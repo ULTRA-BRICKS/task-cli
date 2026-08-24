@@ -22,6 +22,32 @@ def test_parse_clear_just_ask():
     assert parse_verdict("the model says: justAsk") is Verdict.JUST_ASK
 
 
+def test_parse_clear_actionable():
+    # task-cli#80: a review-request-style message must classify as its own third verdict,
+    # not fall into `change` (which used to auto-create a placeholder ticket).
+    assert parse_verdict("VERDICT: actionable") is Verdict.ACTIONABLE
+
+
+def test_parse_actionable_sentinel_case_and_dash_insensitive():
+    assert parse_verdict("verdict:ACTIONABLE") is Verdict.ACTIONABLE
+
+
+def test_parse_bare_actionable_word_without_sentinel_does_not_misclassify():
+    # task-cli#80 review finding: "actionable" is ordinary English prose, unlike `justAsk`.
+    # A bare occurrence with no `VERDICT:` sentinel must NOT be read as the ACTIONABLE
+    # verdict — that would silently drop a real change request (no ticket, no execution,
+    # since execution is out of scope for this repo). The `change` token in the same text
+    # still wins via the reduced fallback scan.
+    assert parse_verdict("the answer is actionable, run it") is Verdict.CHANGE
+    assert parse_verdict("this is a change request, clearly actionable") is Verdict.CHANGE
+
+
+
+def test_parse_actionable_takes_precedence_over_bias_default():
+    # confirms the default bias (change) never masks a genuine actionable signal.
+    assert parse_verdict("VERDICT: actionable", bias=Verdict.CHANGE) is Verdict.ACTIONABLE
+
+
 def test_parse_ambiguous_biases_to_change_by_default():
     # no decisive token in the answer → bias
     assert parse_verdict("hmm not sure, could be either") is Verdict.CHANGE
@@ -47,6 +73,11 @@ def test_parse_prompt_echo_only_biases_not_misreads():
 def test_parse_prompt_echo_plus_answer():
     assert parse_verdict(build_prompt("add a button") + "\n\njustAsk") is Verdict.JUST_ASK
     assert parse_verdict(build_prompt("add a button") + "\n\nchange") is Verdict.CHANGE
+    # `actionable` is sentinel-only (see test_parse_bare_actionable_word_...) — an echoed
+    # prompt plus a bare "actionable" answer, with no `change`/`justAsk` token either, has no
+    # decisive fallback signal and lands on the bias.
+    assert parse_verdict(build_prompt("run the review") + "\n\nactionable") is Verdict.CHANGE
+    assert parse_verdict(build_prompt("run the review") + "\n\nVERDICT: actionable") is Verdict.ACTIONABLE
 
 
 def test_build_prompt_includes_message_and_bias_instruction():
@@ -54,6 +85,7 @@ def test_build_prompt_includes_message_and_bias_instruction():
     assert "please add a button" in p
     assert "Bias to `change`" in p
     assert "VERDICT" in p
+    assert "`actionable`" in p
 
 
 def test_to_model_arg_per_provider():

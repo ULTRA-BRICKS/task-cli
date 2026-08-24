@@ -388,7 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     clp = sub.add_parser(
         "classify",
         parents=[common],
-        help="classify a message change|justAsk (the tg hook entry)",
+        help="classify a message change|actionable|justAsk (the tg hook entry)",
     )
     clp.add_argument("text", help="the message text")
     clp.add_argument(
@@ -3334,6 +3334,11 @@ def cmd_classify(args: argparse.Namespace) -> int:
     cfg = _load(args)
     from .classify import Verdict, build_prompt, parse_verdict, resolve_chain
 
+    # `actionable` (task-cli#80) is deliberately EXCLUDED from the configurable-bias set (review
+    # finding): it's a genuine model-signaled verdict, never a "when confused, assume this"
+    # default. Allowing it as a bias would mean every no-provider/ambiguous message under
+    # `classify_bias: actionable` silently drops (no ticket, no execution) instead of degrading
+    # to a safe extra ticket (`change`) or a safe no-op question (`justAsk`).
     bias = (
         Verdict(cfg.classify_bias)
         if cfg.classify_bias in ("change", "justAsk")
@@ -3366,6 +3371,12 @@ def cmd_classify(args: argparse.Namespace) -> int:
         print(f"{verdict.value}")
 
     if verdict is Verdict.JUST_ASK:
+        return 0
+    if verdict is Verdict.ACTIONABLE:
+        # task-cli#80: an instruction to execute an existing command/tool directly must never
+        # silently spawn a placeholder ticket, even with --create/--update. Actually invoking
+        # the action is out of scope for this repo (AGENTS.md "Out of scope" — the tg-cli
+        # inbound hook owns real execution); this only needs to not file a ticket for it.
         return 0
     # verdict == change
     if args.update:

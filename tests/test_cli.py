@@ -2845,6 +2845,36 @@ def test_classify_just_ask_creates_nothing(capsys, monkeypatch, _inject_fake):
     assert _inject_fake.list() == []
 
 
+def test_classify_actionable_creates_nothing_even_with_create_flag(capsys, monkeypatch, _inject_fake):
+    # task-cli#80: a review-request-style message classified as `actionable` must never spawn
+    # a placeholder ticket, even with --create passed (the exact flag combination the tg-cli
+    # inbound hook uses on every message).
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "VERDICT: actionable")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
+            "anthropic", "claude:claude-haiku-4-5"
+        ),
+    )
+    rc = main(["classify", "review the uncommitted diff for cross-file consistency", "--create"])
+    assert rc == 0
+    assert "actionable" in capsys.readouterr().out
+    assert _inject_fake.list() == []
+
+
+def test_classify_actionable_with_update_also_creates_nothing(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "VERDICT: actionable")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
+            "anthropic", "claude:claude-haiku-4-5"
+        ),
+    )
+    rc = main(["classify", "run the test suite", "--update", "#1"])
+    assert rc == 0
+    assert _inject_fake.comments == []
+
+
 def test_classify_no_provider_biases(capsys, monkeypatch, _inject_fake):
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain", lambda fallbacks=None, env=None, **_kw: None
@@ -2854,6 +2884,25 @@ def test_classify_no_provider_biases(capsys, monkeypatch, _inject_fake):
     out = capsys.readouterr().out
     assert "no classifier provider available" in out
     assert "change" in out
+
+
+def test_classify_bias_actionable_config_falls_back_to_change(capsys, monkeypatch, _inject_fake):
+    # task-cli#80 review finding (Codex/Opus, both independently): `actionable` must never be
+    # an accepted `classify.bias` config value — it's a genuine model-signaled verdict, not a
+    # "when uncertain, assume this" default. Configuring it would silently drop EVERY message
+    # (no ticket, no execution) whenever no provider is reachable, instead of degrading to a
+    # safe extra ticket. Confirm an unrecognized/excluded bias value falls back to `change`.
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(LoadedConfig, "classify_bias", property(lambda self: "actionable"))
+    monkeypatch.setattr("tasklib.classify.resolve_chain", lambda fallbacks=None, env=None, **_kw: None)
+    rc = main(["classify", "ambiguous message", "--create"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "change" in out
+    assert "actionable" not in out
+    # falling back to `change` means a ticket IS created (unlike an `actionable` no-op).
+    assert _inject_fake.list() != []
 
 
 def test_classify_passes_configured_capability_to_resolve_chain(

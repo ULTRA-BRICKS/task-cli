@@ -70,7 +70,7 @@ task change <id> --acceptance "..." --screenshot proof.png
 task done <id>                   # close a ticket (runs the on-done gates)
 task status <id>                 # read state (works outside a repo)
 task status <id> done            # transition (runs the on-done gates)
-task classify "<text>" --create  # change|justAsk; on `change`, create/dedup a ticket
+task classify "<text>" --create  # change|actionable|justAsk; on `change`, create/dedup a ticket
 task session                     # show current session + its tickets
 ```
 

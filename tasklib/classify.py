@@ -1,12 +1,26 @@
-"""Classification of an inbound message → ``change | justAsk``.
+"""Classification of an inbound message → ``change | actionable | justAsk``.
 
 Pure parts only: building the prompt, parsing ``review``'s answer, and resolving the first
 *available* model from a per-provider fallback chain. The effectful shell-out to
 ``review just-ask`` lives in the entrypoint (``bin/task``) — this module decides WHAT to
 run and HOW to read the result, so it is fully unit-testable without spawning anything.
 
-Bias is to ``change`` when ambiguous — most questions to a dev agent are latent change
-requests (spec §7).
+Bias is to ``change`` when ambiguous between change/justAsk — most questions to a dev agent
+are latent change requests (spec §7). ``actionable`` (task-cli#80) is a THIRD, distinct
+verdict, never a bias target: an instruction to directly EXECUTE an existing command/tool
+right now (``"run a read-only code review on the diff"``, ``"run the tests"``) is neither a
+pure question nor a request that should mint a ticket. Before this verdict existed, the
+prompt's binary change/justAsk scheme plus its bias-to-change default silently routed every
+review-request-style message into ``change``, which — with ``--create`` — auto-created a
+placeholder GitHub issue full of ``(needs triage)`` boilerplate instead of the review ever
+running (confirmed 7 times against real inbound messages; see task-cli#80's issue body).
+Actually INVOKING an ``actionable`` message's command is out of scope for this repo (the
+tg-cli inbound hook that owns real execution lives elsewhere — see AGENTS.md "Out of scope");
+this module's job is only to stop misclassifying it as ``change``, so ``cmd_classify``
+(cli.py) never reaches the ticket-auto-create path for it. That also makes the title-
+similarity dedup's failure on repeated review-style requests (task-cli#80's other finding)
+moot for THIS failure mode: an ``actionable`` message never reaches ``_classify_create`` /
+``_best_dedup_match`` at all now, so there is nothing left to dedup.
 """
 
 from __future__ import annotations
@@ -18,20 +32,29 @@ from dataclasses import dataclass
 from enum import Enum
 
 CLASSIFY_PROMPT = (
-    "Classify this message to a dev agent as `change` (should result in a code/doc/config "
-    "edit -> needs a ticket) or `justAsk` (pure question, no edit). Bias to `change` "
-    "when ambiguous -- most questions to a dev agent are latent edit requests. "
+    "Classify this message to a dev agent as EXACTLY ONE of:\n"
+    "  `change` -- a genuine change/edit request: should result in a code/doc/config edit and "
+    "needs a tracked ticket.\n"
+    "  `actionable` -- an instruction to directly EXECUTE an existing command/tool RIGHT NOW "
+    "(e.g. 'run a read-only code review on the diff', 'run the tests', 'ship PR #5') -- not a "
+    "question, and not a request to edit anything; just do the named action, no ticket.\n"
+    "  `justAsk` -- a pure question, no edit and nothing to execute.\n"
+    "Bias to `change` ONLY when genuinely ambiguous between change and justAsk -- most "
+    "questions to a dev agent are latent edit requests. Do NOT apply that bias to a message "
+    "that names an existing action/tool/command to run directly -- that is `actionable`, "
+    "never `change`, even if running it might incidentally touch files.\n"
     "Respond with EXACTLY one line and nothing else: the literal word VERDICT, a colon, "
-    "then your one-word answer (the change/justAsk word).\n\nMESSAGE:\n"
+    "then your one-word answer (change/actionable/justAsk).\n\nMESSAGE:\n"
 )
 
 # The sentinel the model is asked to emit. Parsing keys off this first; it is unambiguous and
 # cannot collide with the prompt body (which deliberately avoids the bare verdict words now).
-_VERDICT_RE = re.compile(r"verdict\s*:\s*(change|justask|just-ask|just ask)", re.IGNORECASE)
+_VERDICT_RE = re.compile(r"verdict\s*:\s*(change|actionable|justask|just-ask|just ask)", re.IGNORECASE)
 
 
 class Verdict(str, Enum):
     CHANGE = "change"
+    ACTIONABLE = "actionable"
     JUST_ASK = "justAsk"
 
 
@@ -189,13 +212,46 @@ def build_prompt(message: str) -> str:
     return CLASSIFY_PROMPT + message.strip()
 
 
+def _word_to_verdict(word: str) -> Verdict:
+    """Normalize a raw matched token (``"just-ask"``, ``"JUSTASK"``, ``"actionable"``, ...)
+    into a :class:`Verdict`. Shared by both the sentinel match and the fallback token scan in
+    :func:`parse_verdict` so the two paths can never disagree on how a word maps to a verdict.
+    """
+    normalized = word.lower().replace(" ", "").replace("-", "")
+    if normalized == "change":
+        return Verdict.CHANGE
+    if normalized == "actionable":
+        return Verdict.ACTIONABLE
+    return Verdict.JUST_ASK
+
+
 def parse_verdict(output: str, *, bias: Verdict = Verdict.CHANGE) -> Verdict:
     """Parse ``review just-ask`` output into a verdict, biasing on ambiguity.
 
     Primary signal: the model is asked to emit a ``VERDICT: <word>`` line — we key off the
     LAST such sentinel (robust, can't collide with the prompt body, which no longer contains
     the bare verdict words). Fallback for a model that ignores the format: scan the output for
-    a standalone ``change``/``justAsk`` token and take the last one. Failing both, ``bias``.
+    a standalone ``change``/``justAsk`` token and take the last one. ``actionable`` is
+    deliberately EXCLUDED from this fallback scan (task-cli#80 review finding): unlike
+    ``justAsk``, "actionable" is ordinary English prose ("this change request is directly
+    actionable"), so treating a bare occurrence as decisive would silently swallow a genuine
+    ``change`` signal with no ticket AND no execution (execution is out of scope for this
+    repo). ``actionable`` is reachable ONLY via the explicit ``VERDICT:`` sentinel. Failing
+    both scans, ``bias`` (never ``actionable`` unless the caller explicitly configured it as
+    the bias — the default bias exists for the change/justAsk ambiguity this feature does NOT
+    touch, not for "no signal at all").
+
+    NOTE on echoed-message injection (task-cli#80 review, Codex/Opus): if a model echoes the
+    untrusted inbound message back in its answer, and that message happens to contain literal
+    text like ``"VERDICT: actionable"``, the sentinel regex could match the echoed text instead
+    of the model's real answer. This is a PRE-EXISTING risk (identical for ``VERDICT: change``/
+    ``VERDICT: justAsk`` before this feature existed), not something task-cli#80 introduces. An
+    attempted fix here (stripping the raw message substring from ``output``) was reverted: it
+    can erase the model's OWN genuine sentinel whenever the message text happens to overlap
+    with it (e.g. a message that is literally the word "actionable" would strip that word out
+    of "VERDICT: actionable" too), and a whitespace-only message triggers a pathological
+    ``str.replace("", " ")`` that corrupts the entire output. A correct fix needs to strip a
+    RECOGNIZED ECHOED BLOCK, not a raw substring — left as a follow-up, not attempted here.
     """
     # strip the known fixed prompt text first so neither the sentinel match nor the fallback
     # token scan can pick up the prompt's own instruction words when a model echoes it.
@@ -203,12 +259,11 @@ def parse_verdict(output: str, *, bias: Verdict = Verdict.CHANGE) -> Verdict:
 
     matches = _VERDICT_RE.findall(cleaned)
     if matches:
-        word = matches[-1].lower().replace(" ", "").replace("-", "")
-        return Verdict.CHANGE if word == "change" else Verdict.JUST_ASK
+        return _word_to_verdict(matches[-1])
 
-    # fallback: no sentinel. Take the last decisive standalone token.
+    # fallback: no sentinel. Take the last decisive standalone token — `change`/`justAsk`
+    # only; see the module-level note above on why `actionable` is excluded here.
     tokens = re.findall(r"\b(change|justask|just-ask|just ask)\b", cleaned.lower())
     if tokens:
-        last = tokens[-1].replace(" ", "").replace("-", "")
-        return Verdict.CHANGE if last == "change" else Verdict.JUST_ASK
+        return _word_to_verdict(tokens[-1])
     return bias
