@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tasklib.session import detect, read_ids, record, sidecar_path
+from tasklib.session import detect, read_entries, read_ids, record, sidecar_path
 
 
 def test_env_task_session_wins():
@@ -70,6 +70,77 @@ def test_read_ids_empty_for_unknown_session(isolated_state):
 def test_label_prefix_is_configurable():
     s = detect(env={"TASK_SESSION": "feat"}, label_prefix="sess/")
     assert s.label == "sess/feat"
+
+
+def test_record_defaults_repo_to_empty_string(isolated_state):
+    # legacy call shape (no repo arg) — task-cli#83's repo field must not become mandatory.
+    record("sess1", "#10", "first")
+    entries = read_entries("sess1")
+    assert entries[0].repo == ""
+
+
+def test_record_persists_repo_coordinate(isolated_state):
+    record("sess1", "#10", "first", repo="github-issues:acme/widgets")
+    entries = read_entries("sess1")
+    assert entries[0].repo == "github-issues:acme/widgets"
+
+
+def test_read_entries_defaults_repo_for_legacy_lines_missing_the_field(isolated_state):
+    # a sidecar line written before task-cli#83's fix has no "repo" key at all.
+    import json
+
+    path = sidecar_path("sess1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"id": "#10", "title": "legacy", "ts": 1}) + "\n", encoding="utf-8")
+    entries = read_entries("sess1")
+    assert entries[0].repo == ""
+
+
+def test_record_keeps_env_as_the_fourth_positional_argument(tmp_path):
+    # review finding: `repo` must NOT shift `env` out of its existing positional slot — an
+    # existing caller doing record(session_id, id, title, env_dict) must still land in `env`,
+    # not silently serialize the dict into `repo` and write to the real/default state dir.
+    env = {"XDG_STATE_HOME": str(tmp_path)}
+    record("sess1", "#10", "first", env)
+    entries = read_entries("sess1", env)
+    assert len(entries) == 1
+    assert entries[0].repo == ""  # repo was never passed — must default, not receive `env`
+    assert sidecar_path("sess1", env).is_file()
+
+
+def test_read_entries_keeps_same_id_from_different_repos(isolated_state):
+    # task-cli#83 review finding: two repos commonly both have a ticket "#1". Deduping only by
+    # id would let repo B's entry silently evict repo A's from the sidecar read entirely —
+    # actual data loss, not just a display leak.
+    record("sess1", "#1", "repo A's first ticket", repo="github-issues:acme/a")
+    record("sess1", "#1", "repo B's first ticket", repo="github-issues:acme/b")
+    entries = read_entries("sess1")
+    assert len(entries) == 2
+    titles = {e.repo: e.title for e in entries}
+    assert titles["github-issues:acme/a"] == "repo A's first ticket"
+    assert titles["github-issues:acme/b"] == "repo B's first ticket"
+
+
+def test_read_entries_still_dedups_same_repo_same_id_touch(isolated_state):
+    # re-touching the SAME (repo, id) pair (e.g. change/done in the same session) must still
+    # collapse to one entry, moved to the end — the pre-task-cli#83 behavior, unchanged.
+    record("sess1", "#10", "first", repo="github-issues:acme/a")
+    record("sess1", "#10", "first again", repo="github-issues:acme/a")
+    entries = read_entries("sess1")
+    assert len(entries) == 1
+    assert entries[0].title == "first again"
+
+
+def test_read_ids_shows_an_id_once_per_distinct_repo(isolated_state):
+    record("sess1", "#1", "repo A's first ticket", repo="github-issues:acme/a")
+    record("sess1", "#1", "repo B's first ticket", repo="github-issues:acme/b")
+    assert read_ids("sess1") == ["#1", "#1"]  # two distinct tickets, both surfaced
+
+
+def test_read_ids_still_collapses_the_same_repo_same_id_touch(isolated_state):
+    record("sess1", "#10", "first")
+    record("sess1", "#10", "first again")
+    assert read_ids("sess1") == ["#10"]
 
 
 def test_git_branch_detect_uses_cwd(monkeypatch):

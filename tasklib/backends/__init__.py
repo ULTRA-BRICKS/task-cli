@@ -106,6 +106,28 @@ class AmbiguousBackendError(RuntimeError):
     exit_code: int = EXIT_AMBIGUOUS
 
 
+def backend_coordinate(backend) -> str:
+    """The backend-scoped repo identity (``github-issues:owner/repo`` or ``linear:TEAM/project``)
+    for an already-constructed backend instance.
+
+    Same shape as :attr:`tasklib.projects.Project.coordinate`, which computes the identical
+    string from a config overlay — this is the live-instance counterpart, for callers (like the
+    session sidecar, task-cli#83) that only have a resolved ``backend``, not a ``Project``. Pure:
+    reads attributes the backend already resolved at construction time, no I/O.
+    """
+    # `getattr(..., default)` only substitutes the default when the attribute is ABSENT — a
+    # backend whose attribute is explicitly `None` (e.g. `LinearBackend(project=None)`) would
+    # otherwise stringify to the literal `"None"`, a truthy value that corrupts the coordinate
+    # (review finding, task-cli#83). `or ""` collapses `None` to empty before stripping.
+    if backend.name == "linear":
+        team = str(getattr(backend, "team_key", "") or "").strip().upper()
+        project = str(getattr(backend, "project", "") or "").strip()
+        return f"linear:{team}/{project}" if project else f"linear:{team}"
+    owner = str(getattr(backend, "owner", "") or "").strip().lower()
+    repo = str(getattr(backend, "repo", "") or "").strip().lower()
+    return f"github-issues:{owner}/{repo}"
+
+
 def get_backend(config, *, env: dict | None = None):
     """Construct the configured backend from a ``LoadedConfig``. Effectful (harvests creds).
 

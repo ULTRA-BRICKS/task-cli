@@ -1436,3 +1436,41 @@ def test_linear_fetch_attachment_bytes_wraps_http_error(monkeypatch):
     )
     with pytest.raises(BackendError, match="401"):
         be.fetch_attachment_bytes("https://uploads.linear.app/asset-1")
+
+
+# ── backend_coordinate (task-cli#83) ────────────────────────────────────────────────
+
+
+def test_backend_coordinate_github_matches_project_coordinate_shape():
+    from tasklib.backends import backend_coordinate
+    from tasklib.projects import Project
+
+    be = GitHubIssuesBackend(owner="Acme", repo="Widgets", token="t")
+    project = Project(name="x", backend="github-issues", overlay={"github": {"repo": "Acme/Widgets"}})
+    assert backend_coordinate(be) == project.coordinate == "github-issues:acme/widgets"
+
+
+def test_backend_coordinate_linear_with_project_matches_project_coordinate_shape():
+    from tasklib.backends import backend_coordinate
+    from tasklib.backends.linear import LinearBackend
+    from tasklib.projects import Project
+
+    be = LinearBackend(api_key="k", team_key="hyp", project="proj-1")
+    project = Project(name="x", backend="linear", overlay={"linear": {"team": "hyp", "project": "proj-1"}})
+    assert backend_coordinate(be) == project.coordinate == "linear:HYP/proj-1"
+
+
+def test_backend_coordinate_linear_without_project():
+    from tasklib.backends import backend_coordinate
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="hyp")
+    assert backend_coordinate(be) == "linear:HYP"
+
+
+def test_backend_coordinate_distinguishes_different_repos():
+    from tasklib.backends import backend_coordinate
+
+    a = GitHubIssuesBackend(owner="acme", repo="one", token="t")
+    b = GitHubIssuesBackend(owner="acme", repo="two", token="t")
+    assert backend_coordinate(a) != backend_coordinate(b)

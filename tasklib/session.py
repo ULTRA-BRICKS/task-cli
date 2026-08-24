@@ -48,11 +48,21 @@ class Session:
 
 @dataclass(frozen=True)
 class SessionEntry:
-    """One sidecar touch record after de-duplication."""
+    """One sidecar touch record after de-duplication.
+
+    ``repo`` is the ticket's OWN backend-scoped coordinate at record() time
+    (:func:`tasklib.backends.backend_coordinate`, e.g. ``"github-issues:owner/repo"``) — not
+    whatever repo the current reader happens to be in. A session id (git branch / tmux pane) is
+    not repo-unique, so without this a reader in one repo could see another, unrelated repo's
+    ticket under the same session id (task-cli#83). Empty for legacy lines written before this
+    field existed; a caller that needs the leak fix must treat an empty/mismatched ``repo`` as
+    "don't show", never "show anyway".
+    """
 
     id: str
     title: str = ""
     ts: int = 0
+    repo: str = ""
 
 
 def _slug(value: str) -> str:
@@ -134,16 +144,29 @@ def sidecar_path(session_id: str, env: dict[str, str] | None = None) -> Path:
     return state_dir(env) / f"{session_id}.jsonl"
 
 
-def record(session_id: str, ticket_id: str, title: str, env: dict[str, str] | None = None) -> None:
+def record(
+    session_id: str, ticket_id: str, title: str, env: dict[str, str] | None = None, *, repo: str = ""
+) -> None:
     """Append a ticket reference to the session's sidecar (idempotent on ticket id).
 
-    The sidecar is a cache; duplicate ids are de-duplicated on read, so a re-append is fine.
-    Never raises into the caller — a sidecar write failure must not break a ticket operation.
+    ``env`` stays the 4th POSITIONAL parameter (unchanged from before task-cli#83) — an
+    existing caller doing ``record(session_id, id, title, env_dict)`` must keep landing in
+    ``env``, not silently serialize the env dict into ``repo``. ``repo`` is therefore
+    keyword-only, appended after ``env``.
+
+    ``repo`` is the ticket's own backend coordinate (see :class:`SessionEntry`) — pass
+    :func:`tasklib.backends.backend_coordinate` of the backend the ticket was created/touched
+    through, so a later repo-scoped read (task-cli#83) can tell this entry apart from another
+    repo's ticket sharing the same session id. The sidecar is a cache; duplicate
+    ``(repo, ticket_id)`` pairs are de-duplicated on read, so a re-append is fine. Never raises
+    into the caller — a sidecar write failure must not break a ticket operation.
     """
     path = sidecar_path(session_id, env)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"id": ticket_id, "title": title, "ts": int(time.time())}, ensure_ascii=False)
+        line = json.dumps(
+            {"id": ticket_id, "title": title, "ts": int(time.time()), "repo": repo}, ensure_ascii=False
+        )
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:
@@ -151,21 +174,33 @@ def record(session_id: str, ticket_id: str, title: str, env: dict[str, str] | No
 
 
 def read_ids(session_id: str, env: dict[str, str] | None = None) -> list[str]:
-    """Return the de-duplicated ticket ids recorded for a session, newest-last."""
+    """Return the recorded ticket ids, newest-last. Already de-duplicated by
+    :func:`read_entries` keying on ``(repo, id)`` — two different repos sharing a ticket
+    NUMBER (both have a "#1") are two different tickets, so the bare id can legitimately
+    appear more than once here; the same ``(repo, id)`` pair never does."""
     return [entry.id for entry in read_entries(session_id, env)]
 
 
 def read_entries(session_id: str, env: dict[str, str] | None = None) -> list[SessionEntry]:
     """Return de-duplicated sidecar entries, newest-last.
 
-    The sidecar is append-only. Re-appending an id is a touch, so the latest line wins and
-    moves that ticket to the end. Malformed legacy lines are ignored; missing timestamps
-    degrade to ``0`` so old sidecars still produce ids without pretending to know recency.
+    The sidecar is append-only. Re-appending a ``(repo, id)`` pair is a touch, so the latest
+    line wins and moves that ticket to the end. Malformed legacy lines are ignored; missing
+    timestamps degrade to ``0`` so old sidecars still produce ids without pretending to know
+    recency.
+
+    Deduplicates by ``(repo, ticket_id)``, NOT by ``ticket_id`` alone (task-cli#83 review
+    finding): two different repos commonly both have a ticket ``#1``. Keying only on the bare
+    id would let repo B's ``#1`` silently evict repo A's ``#1`` entry from the sidecar read —
+    an outright data-loss bug, not just a display leak — before any repo-scoped filter
+    (:func:`tasklib.cli._recent_tickets_block`) even runs. A legacy line with no ``repo``
+    recorded keys as ``("", ticket_id)``, so legacy entries still dedup among themselves the
+    same way they always did.
     """
     path = sidecar_path(session_id, env)
     if not path.is_file():
         return []
-    seen: dict[str, SessionEntry] = {}
+    seen: dict[tuple[str, str], SessionEntry] = {}
     try:
         for raw in path.read_text(encoding="utf-8").splitlines():
             raw = raw.strip()
@@ -179,12 +214,14 @@ def read_entries(session_id: str, env: dict[str, str] | None = None) -> list[Ses
                 continue
             tid = obj.get("id")
             if isinstance(tid, str) and tid:
-                seen.pop(tid, None)
+                repo = str(obj.get("repo") or "")
+                key = (repo, tid)
+                seen.pop(key, None)
                 try:
                     ts = int(obj.get("ts") or 0)
                 except (TypeError, ValueError):
                     ts = 0
-                seen[tid] = SessionEntry(id=tid, title=str(obj.get("title") or ""), ts=ts)
+                seen[key] = SessionEntry(id=tid, title=str(obj.get("title") or ""), ts=ts, repo=repo)
     except OSError:
         return []
     return list(seen.values())

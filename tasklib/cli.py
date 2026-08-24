@@ -1106,7 +1106,7 @@ def cmd_create(args: argparse.Namespace) -> int:
 
     from .session import record
 
-    record(session.id, created.id, created.title)
+    record(session.id, created.id, created.title, repo=_safe_backend_coordinate(backend))
     from .logging import log_event
 
     log_event("ticket.created", ticket_id=created.id, backend=cfg.backend, session=session.id)
@@ -1118,7 +1118,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         print(json.dumps(_ticket_dict(created), ensure_ascii=False, indent=2))
     else:
         print(_ok(f"created {created.id}  {created.url}"))
-        _print_recent_tickets_after_create(session)
+        _print_recent_tickets_after_create(session, backend)
         _print_session_attention_after_mutation(args, cfg, backend, current_id=created.id)
     return 0
 
@@ -1207,13 +1207,28 @@ def _format_duration_hours(seconds: int) -> str:
     return f"{hours:g}h"
 
 
-def _session_attention_notice(session, tickets: list[Ticket], *, priority_change: bool = False) -> str:
+def _session_attention_notice(session, tickets: list[Ticket], backend, *, priority_change: bool = False) -> str:
     """Human-only warning for active session tasks that are easy to forget.
 
     Backend timestamps are not portable across GitHub/Linear, but the session sidecar records
     when task-cli last touched a ticket in this session. Use that as a conservative signal:
     old active work suggests parallel follow-up; recently touched in-progress work suggests the
     agent should ask whether to continue it before switching priority.
+
+    ``backend`` scopes the sidecar lookup to THIS repo's coordinate (task-cli#83, review
+    finding): `tickets` is already correctly repo-scoped (it comes from `backend.session_tickets`,
+    a native per-backend query), but without this filter, keying `read_entries()` by bare
+    ticket id would let ANOTHER repo's same-numbered entry (e.g. both repos have a `#1`)
+    silently supply the wrong touch-timestamp for one of THESE tickets — producing a false or
+    suppressed staleness/recency warning, not a wrong ticket shown outright.
+
+    Resolving the coordinate is best-effort (`_safe_backend_coordinate`): some callers (test
+    doubles, a minimal/partial backend implementation) may not carry the attributes
+    `backend_coordinate` reads. This is a "best-effort human warning" (see above), not a
+    security boundary like the sidecar write path — an unresolvable backend degrades to the
+    same `""` coordinate a pre-task-cli#83 legacy line carries (so it can still match a legacy
+    entry, but never a real repo's), rather than raising into a command that otherwise has
+    nothing to do with this feature.
     """
     if session.source == "none":
         return ""
@@ -1223,7 +1238,8 @@ def _session_attention_notice(session, tickets: list[Ticket], *, priority_change
 
     from .session import read_entries
 
-    entries = {entry.id: entry for entry in read_entries(session.id)}
+    coordinate = _safe_backend_coordinate(backend)
+    entries = {entry.id: entry for entry in read_entries(session.id) if entry.repo == coordinate}
     now = int(time.time())
     stale_after = _env_seconds("TASK_STALE_WARNING_SECONDS", _STALE_WARNING_SECONDS)
     recent_before = _env_seconds("TASK_RECENT_WARNING_SECONDS", _RECENT_WARNING_SECONDS)
@@ -1258,7 +1274,51 @@ def _session_attention_notice(session, tickets: list[Ticket], *, priority_change
     return "\n".join(lines)
 
 
-def _recent_tickets_block(session) -> str:
+def _safe_backend_coordinate(backend) -> str:
+    """`backend_coordinate(backend)`, degrading to `""` on any failure (task-cli#83 review
+    finding: `backend_coordinate` reads `backend.name` via direct attribute access, so a
+    partial/test-double backend missing it raises). The sidecar `repo` field is a best-effort
+    scoping aid, not a security boundary — every call site here runs AFTER the real mutation
+    (ticket create/change/etc.) already succeeded, so a coordinate failure must degrade to an
+    unscoped write, matching a pre-task-cli#83 legacy line, rather than turn an already-
+    successful command into a traceback."""
+    from .backends import backend_coordinate
+
+    try:
+        return backend_coordinate(backend)
+    except Exception:
+        return ""
+
+
+def _local_project_coordinate(cfg) -> str:
+    """This repo's coordinate resolved from config/git alone — no backend construction, no
+    credential harvest (task-cli#83 review finding: gating `task session`'s leak-fix behind
+    `_backend(cfg)`, which is documented "Effectful (harvests creds)", makes the fix silently
+    inert in exactly the credential-free/outside-CI-creds environments a purely-local sidecar
+    command previously worked in unconditionally — it would fall back to unfiltered and the
+    leak would persist right where a `show`/`bind` user most needs it fixed).
+
+    ``_current_project_overlay`` resolves the SAME pinned-config-or-git-origin coordinate
+    `get_backend` would, but stops at local git metadata (``git rev-parse``/``git remote``,
+    no credentials) — :class:`tasklib.projects.Project` then computes the identical string
+    shape :func:`tasklib.backends.backend_coordinate` does from a LIVE instance (see
+    ``test_backend_coordinate_*_matches_project_coordinate_shape``). Degrades to `""` — same
+    as `_safe_backend_coordinate` — on any resolution failure, or genuinely outside a repo
+    (``_current_project_overlay`` returning ``None``), since there's no coordinate to filter
+    by in that case (and `task session` is documented to work outside a repo)."""
+    from .projects import Project
+
+    try:
+        current = _current_project_overlay(cfg)
+        if current is None:
+            return ""
+        name, overlay = current
+        return Project(name=name, backend=str(overlay.get("backend", cfg.backend)), overlay=overlay).coordinate
+    except Exception:
+        return ""
+
+
+def _recent_tickets_block(session, backend) -> str:
     """The 'Recent tickets (last hour)' block printed after a successful `task new`/`create`
     (Alex, tg#10993/#10995): up to 5 tickets created in this session within the last hour,
     newest first, the just-created one included.
@@ -1278,6 +1338,14 @@ def _recent_tickets_block(session) -> str:
     where detection fails — without this guard, "recent tickets" could leak a completely
     unrelated project's tickets into this one's `create` output.
 
+    Also filters every candidate entry to THIS repo's own coordinate (task-cli#83): a session id
+    (git branch / tmux pane) is not repo-unique, so two different repos on the same branch name
+    (or sharing a `TASK_SESSION`/tmux pane) share one sidecar file. Without this filter, an entry
+    recorded while working in a DIFFERENT repo under the same session id would print here too —
+    a ticket id/title from an unrelated project, confusable with this repo's own ids. A legacy
+    entry with no `repo` recorded (written before this field existed) never matches and is simply
+    not shown, rather than shown on the unverifiable assumption that it belongs here.
+
     Bounded by BOTH the count (5) AND a genuinely fixed 1-hour window — deliberately NOT
     configurable (an earlier `TASK_RECENT_TICKETS_WINDOW_SECONDS` override made the hardcoded
     "(last hour)" header lie under a different value; Alex's ask was a fixed hour, so the
@@ -1289,9 +1357,14 @@ def _recent_tickets_block(session) -> str:
         return ""
     from .session import read_entries
 
+    coordinate = _safe_backend_coordinate(backend)
     entries = read_entries(session.id)
     now = int(time.time())
-    in_window = [e for e in entries if e.ts > 0 and 0 <= now - e.ts <= _RECENT_TICKETS_WINDOW_SECONDS]
+    in_window = [
+        e
+        for e in entries
+        if e.ts > 0 and e.repo == coordinate and 0 <= now - e.ts <= _RECENT_TICKETS_WINDOW_SECONDS
+    ]
     # `entries` is oldest-appended-first (session.py: "newest-last"). At 1-second `ts`
     # resolution, two touches in the same second are a real case (a fast create batch, or the
     # just-created ticket landing in the same second as a seeded one) — a plain
@@ -1306,12 +1379,12 @@ def _recent_tickets_block(session) -> str:
     return "\n".join(lines)
 
 
-def _print_recent_tickets_after_create(session) -> None:
+def _print_recent_tickets_after_create(session, backend) -> None:
     """Best-effort wrapper around `_recent_tickets_block`: a sidecar hiccup must never turn a
     successful `create` into a failure — mirrors `_print_session_attention_after_mutation`'s
     same fail-soft contract for the sibling session-sidecar-backed notice."""
     try:
-        block = _recent_tickets_block(session)
+        block = _recent_tickets_block(session, backend)
     except Exception as exc:
         from .logging import log_event
 
@@ -1321,8 +1394,12 @@ def _print_recent_tickets_after_create(session) -> None:
         print(block)
 
 
-def _record_session_touch(cfg, ticket: Ticket) -> None:
-    """Refresh this session's sidecar timestamp for a ticket mutation."""
+def _record_session_touch(cfg, backend, ticket: Ticket) -> None:
+    """Refresh this session's sidecar timestamp for a ticket mutation.
+
+    ``backend`` scopes the sidecar entry to this ticket's own repo coordinate (task-cli#83) —
+    the caller already has one resolved for the mutation itself, so this adds no extra work.
+    """
     if not ticket.id:
         return
     session = _detect_session(cfg)
@@ -1332,7 +1409,7 @@ def _record_session_touch(cfg, ticket: Ticket) -> None:
         return
     from .session import record
 
-    record(session.id, ticket.id, ticket.title)
+    record(session.id, ticket.id, ticket.title, repo=_safe_backend_coordinate(backend))
 
 
 def _print_session_attention_after_mutation(args: argparse.Namespace, cfg, backend, *, current_id: str | None = None) -> None:
@@ -1346,7 +1423,7 @@ def _print_session_attention_after_mutation(args: argparse.Namespace, cfg, backe
         tickets = backend.session_tickets(session.label, limit=_LIMIT_INTERACTIVE)
         if current_id is not None:
             tickets = [ticket for ticket in tickets if ticket.id != current_id]
-        notice = _session_attention_notice(session, tickets, priority_change=True)
+        notice = _session_attention_notice(session, tickets, backend, priority_change=True)
     except Exception as exc:
         from .logging import log_event
 
@@ -1519,7 +1596,7 @@ def _list_session_scoped(args, cfg, state, current) -> int:
     # best-effort) fetch of every project ticket — see _global_stale_notice_block.
     stale_notice = _global_stale_notice_block(args, backend, current[0])
     _emit_list(args, [
-        _session_attention_notice(session, session_tickets),
+        _session_attention_notice(session, session_tickets, backend),
         stale_notice,
         _dim(f"session {session.id} ({session.source}):"),
         _format_tickets(tickets),
@@ -2166,7 +2243,7 @@ def cmd_change(args: argparse.Namespace) -> int:
 
     from .logging import log_event
 
-    _record_session_touch(cfg, updated)
+    _record_session_touch(cfg, backend, updated)
     log_event("ticket.changed", ticket_id=updated.id, backend=cfg.backend, closed=args.done)
     _notify_mutation(cfg, updated, "done" if args.done else "changed")
     if args.json:
@@ -2222,7 +2299,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         raise _UserError(str(exc)) from exc
     from .logging import log_event
 
-    _record_session_touch(cfg, updated)
+    _record_session_touch(cfg, backend, updated)
     log_event("ticket.transition", ticket_id=updated.id, state=new_state.value)
     _notify_mutation(cfg, updated, "done" if new_state is State.DONE else "changed")
     print(_ok(f"{updated.id} → {new_state.value}"))
@@ -2269,7 +2346,7 @@ def cmd_done(args: argparse.Namespace) -> int:
 
     from .logging import log_event
 
-    _record_session_touch(cfg, updated)
+    _record_session_touch(cfg, backend, updated)
     log_event("ticket.transition", ticket_id=updated.id, state=State.DONE.value)
     _notify_mutation(cfg, updated, "done")
     print(_ok(f"{updated.id} → {State.DONE.value}"))
@@ -2320,7 +2397,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     from .logging import log_event
 
-    _record_session_touch(cfg, updated)
+    _record_session_touch(cfg, backend, updated)
     log_event("criterion.checked", ticket_id=updated.id, forced=bool(force_reason and not proofs))
     proof_note = f"proof {proofs[0]}" if proofs else f"forced ({force_reason})"
     remaining = len(updated.unchecked_criteria())
@@ -2692,7 +2769,7 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
         updated, moved_to_review = ticket, False
     else:
         updated, moved_to_review = _record_shipped_pr(backend, ticket, pr_url, commit_sha, commit_url, existing_pr)
-        _record_session_touch(cfg, updated)
+        _record_session_touch(cfg, backend, updated)
         from .logging import log_event
 
         log_event("ticket.shipped", ticket_id=updated.id, pr=pr_url, commit=commit_sha, moved_to_review=moved_to_review)
@@ -2755,7 +2832,7 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
             backend.comment(match.id, f"(restated) {args.text.strip()}")
         except BackendError as exc:
             raise _UserError(str(exc)) from exc
-        _record_session_touch(cfg, match)
+        _record_session_touch(cfg, backend, match)
         print(_ok(f"appended to {match.id} (dedup)"))
         return 0
 
@@ -2810,7 +2887,7 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
         return ambiguous_exit
     from .session import record
 
-    record(session.id, created.id, created.title)
+    record(session.id, created.id, created.title, repo=_safe_backend_coordinate(backend))
     # classify --create is the tg-cli inbound hook path; unlike cmd_create, it must not append
     # a session-attention notice because the hook consumes stdout programmatically.
     print(_ok(f"created {created.id} from message  {created.url}"))
@@ -2852,7 +2929,7 @@ def _classify_append(args: argparse.Namespace, cfg) -> int:
     except BackendError:
         ticket = None
     if ticket is not None:
-        _record_session_touch(cfg, ticket)
+        _record_session_touch(cfg, backend, ticket)
     print(_ok(f"appended to {args.update}"))
     return 0
 
@@ -2920,14 +2997,46 @@ def cmd_session(args: argparse.Namespace) -> int:
             raise _UserError("`task session bind` needs a ticket id")
         from .session import record
 
-        record(session.id, args.bind_id, "")
+        # `bind` had NO backend dependency before task-cli#83 — it's a purely local sidecar
+        # write. Resolve the coordinate from config/git alone (`_local_project_coordinate`),
+        # NOT by constructing a live backend — the latter is documented "Effectful (harvests
+        # creds)" and would add a new credential-harvest side effect to a command that
+        # previously required none (review finding), on top of degrading to unscoped in
+        # exactly the creds-free environments this command is meant to keep working in.
+        record(session.id, args.bind_id, "", repo=_local_project_coordinate(cfg))
         print(_ok(f"bound {args.bind_id} to session {session.id}"))
         return 0
 
     # show
-    from .session import read_ids
+    from .session import read_entries
 
-    ids = read_ids(session.id)
+    # Filter to THIS repo's coordinate when one resolves (task-cli#83 review finding:
+    # `read_ids` itself has no repo scoping, so an unfiltered read leaks another repo's ticket
+    # ids into `task session`/`--json` for a session id shared across repos). Resolved from
+    # config/git alone (`_local_project_coordinate`) rather than a live backend, so the fix
+    # isn't gated behind credentials `task session` never needed before (review finding: a
+    # backend-construction failure would otherwise silently fall back to unfiltered in
+    # exactly the creds-free environments this leak most needs fixing in). Falls back to ""
+    # (unfiltered, matching pre-#83 behavior) only for the genuine outside-a-repo case.
+    coordinate = _local_project_coordinate(cfg)
+    entries = read_entries(session.id)
+    if coordinate:
+        entries = [e for e in entries if e.repo == coordinate]
+    else:
+        # No coordinate to scope by (genuinely outside a repo) — `read_entries` dedups by
+        # `(repo, id)`, so two different repos' same-numbered ticket both survive here as
+        # separate entries (review finding, task-cli#83): shown unfiltered, that would print
+        # an ambiguous "#1, #1" with no way to tell them apart, a REGRESSION from the pre-#83
+        # behavior (dedup by bare id only). Collapse to bare-id dedup for this display,
+        # keeping the latest occurrence and its position (mirrors `read_entries`'s own
+        # pop-then-reinsert "moves to the end" trick) — the same ambiguity the old code had,
+        # not a new, worse one.
+        deduped: dict[str, object] = {}
+        for e in entries:
+            deduped.pop(e.id, None)
+            deduped[e.id] = e
+        entries = list(deduped.values())
+    ids = [e.id for e in entries]
     if args.json:
         import json
 

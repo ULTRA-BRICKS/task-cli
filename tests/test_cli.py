@@ -12,6 +12,8 @@ from tasklib import cli
 from tasklib.cli import _mutation_message, build_parser, main
 from tasklib.model import Ticket
 
+from .conftest import FakeBackend
+
 
 @pytest.fixture(autouse=True)
 def _inject_fake(monkeypatch, fake_backend, isolated_state):
@@ -280,18 +282,26 @@ def test_create_distinct_title_is_not_flagged_as_duplicate(capsys, _inject_fake)
 # immediately — no sleep, no literal clock mock (none exists elsewhere in this file either).
 
 
-def _append_session_touch(session_id: str, ticket_id: str, title: str, ts: int) -> None:
+def _append_session_touch(session_id: str, ticket_id: str, title: str, ts: int, repo: str | None = None) -> None:
     """Append (not overwrite) one raw sidecar line — lets a test seed several entries with
     distinct, explicit timestamps, unlike `_write_session_touch` above which replaces the
-    whole file (fine for its single-entry tests, not for these multi-entry ones)."""
+    whole file (fine for its single-entry tests, not for these multi-entry ones).
+
+    ``repo`` defaults to the SAME coordinate a real `create` against ``fake_backend`` records
+    (task-cli#83's fix filters `_recent_tickets_block` by this field) — so existing callers
+    that seed "this repo's own" prior tickets keep matching without having to know the
+    coordinate. Pass an explicit different value to seed an OTHER repo's entry instead."""
     import json
 
+    from tasklib.backends import backend_coordinate
     from tasklib.session import sidecar_path
 
+    if repo is None:
+        repo = backend_coordinate(FakeBackend())
     path = sidecar_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"id": ticket_id, "title": title, "ts": ts}) + "\n")
+        fh.write(json.dumps({"id": ticket_id, "title": title, "ts": ts, "repo": repo}) + "\n")
 
 
 def test_create_prints_5_most_recent_tickets_including_the_new_one(capsys, _inject_fake):
@@ -365,6 +375,75 @@ def test_create_recent_tickets_caps_at_5_even_with_more_in_window(capsys, _injec
     assert "#14  Old ticket 14" not in section  # 5th-oldest — bumped past the 5-cap
     assert "#15  Old ticket 15" not in section  # 6th-oldest — bumped past the 5-cap
     assert "#1  Newest ticket" in section
+
+
+def test_create_recent_tickets_excludes_other_repo_sharing_the_same_session_id(capsys, _inject_fake):
+    # task-cli#83: a session id (git branch / tmux pane / TASK_SESSION) is NOT repo-unique, so
+    # two unrelated repos can share one sidecar file (e.g. both on branch "main"). A ticket
+    # recorded while working in a DIFFERENT repo under the SAME session id must never appear
+    # in THIS repo's "Recent tickets" block, even though it's within the time window and cap.
+    import time
+
+    now = int(time.time())
+    _append_session_touch(
+        "testsess", "#77", "Unrelated repo's ticket", now - 60, repo="github-issues:acme/other-repo"
+    )
+    _append_session_touch("testsess", "#10", "This repo's own ticket", now - 100)  # default: this fake repo
+
+    rc = main(_create_argv(**{"--title": "Newest ticket"}))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    section = out.split("Recent tickets", 1)[1]
+    assert "#10  This repo's own ticket" in section
+    assert "#1  Newest ticket" in section
+    assert "#77" not in section
+    assert "Unrelated repo's ticket" not in section
+
+
+def test_create_recent_tickets_excludes_a_legacy_entry_with_no_repo_recorded(capsys, _inject_fake):
+    # Opus review finding: the docstring claims a legacy line (written before task-cli#83's
+    # repo field existed) is "never shown, rather than shown on the unverifiable assumption
+    # that it belongs here" — pin that claim with a real test, not just prose.
+    import time
+
+    now = int(time.time())
+    _append_session_touch("testsess", "#55", "Pre-upgrade legacy ticket", now - 60, repo="")
+
+    rc = main(_create_argv(**{"--title": "Newest ticket"}))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    section = out.split("Recent tickets", 1)[1]
+    assert "#1  Newest ticket" in section
+    assert "#55" not in section
+
+
+def test_create_recent_tickets_degrades_when_coordinate_unresolvable(capsys, monkeypatch, _inject_fake):
+    # review finding (Opus): `_recent_tickets_block` must degrade the SAME way
+    # `_session_attention_notice` does when the coordinate can't be resolved (a partial/test
+    # backend missing `.name`) — matching a legacy `repo=""` entry, not raising and getting
+    # the WHOLE block silently dropped by its caller's broad try/except.
+    import time
+
+    now = int(time.time())
+    _append_session_touch("testsess", "#55", "Pre-upgrade legacy ticket", now - 60, repo="")
+
+    monkeypatch.setattr(
+        "tasklib.backends.backend_coordinate",
+        lambda backend: (_ for _ in ()).throw(AttributeError("no .name")),
+    )
+
+    rc = main(_create_argv(**{"--title": "Newest ticket"}))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Recent tickets" in out
+    section = out.split("Recent tickets", 1)[1]
+    # the just-created ticket itself is ALSO recorded with an unresolvable (→ "") coordinate
+    # via `_safe_backend_coordinate` in `cmd_create`, so both it and the legacy entry show.
+    assert "#1  Newest ticket" in section
+    assert "#55  Pre-upgrade legacy ticket" in section
 
 
 def test_create_recent_tickets_excludes_one_older_than_an_hour(capsys, _inject_fake):
@@ -624,14 +703,21 @@ def test_list_filter_excludes_all_session_tickets_does_not_fall_back(capsys, _in
     assert "other-session" not in out and "#2" not in out
 
 
-def _write_session_touch(session_id: str, ticket_id: str, title: str, ts: int) -> None:
+def _write_session_touch(session_id: str, ticket_id: str, title: str, ts: int, *, repo: str | None = None) -> None:
+    """Write one sidecar touch line. Defaults `repo` to `_inject_fake`'s own coordinate
+    (task-cli#83) so every existing call site keeps simulating "this repo touched this
+    ticket" — pass an explicit different `repo=` to simulate ANOTHER repo's entry sharing
+    the same session id (the exact scenario task-cli#83 fixes)."""
     import json
 
+    from tasklib.backends import backend_coordinate
     from tasklib.session import sidecar_path
 
+    if repo is None:
+        repo = backend_coordinate(FakeBackend())
     path = sidecar_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"id": ticket_id, "title": title, "ts": ts}) + "\n", encoding="utf-8")
+    path.write_text(json.dumps({"id": ticket_id, "title": title, "ts": ts, "repo": repo}) + "\n", encoding="utf-8")
 
 
 def _write_raw_session_line(session_id: str, payload: object) -> None:
@@ -656,6 +742,67 @@ def test_list_warns_about_stale_active_session_task(capsys, _inject_fake):
     assert "active tasks in this session may need attention" in out
     assert "#1 [in-progress] Old active work" in out
     assert "parallel" in out
+
+
+def test_list_attention_notice_ignores_other_repos_same_id_touch(capsys, _inject_fake):
+    # task-cli#83 review finding (Codex/GLM/Opus, all three independently): the ORIGINAL fix
+    # scoped `_recent_tickets_block` by repo coordinate but left `_session_attention_notice`
+    # unscoped, so a same-numbered ticket touched by a DIFFERENT repo sharing this session id
+    # could silently supply the WRONG (here: ancient/stale) timestamp for THIS repo's own
+    # recently-touched ticket, producing a false stale-work warning.
+    import json
+    import time
+
+    from tasklib.backends import backend_coordinate
+    from tasklib.session import sidecar_path
+
+    ticket = Ticket(title="Just touched", labels=["session:testsess"], state=cli.State.IN_PROGRESS)
+    _inject_fake.create(ticket)
+
+    path = sidecar_path("testsess")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        # THIS repo's own recent touch of "#1", written FIRST.
+        json.dumps(
+            {"id": "#1", "title": "Just touched", "ts": int(time.time()), "repo": backend_coordinate(FakeBackend())}
+        ),
+        # A DIFFERENT repo's ancient touch of the SAME bare id "#1", written LAST — before the
+        # fix, a bare-id-keyed dict comprehension over `read_entries()` (newest-last) would let
+        # this later, unrelated entry silently overwrite the correct one above.
+        json.dumps({"id": "#1", "title": "Old active work", "ts": 1, "repo": "github-issues:other/repo"}),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rc = main(["list"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # the other repo's ts=1 entry (decades stale) must NOT drive a stale warning here — this
+    # repo's own entry is recent, so neither the stale nor the (single-active-ticket) recent
+    # branch fires.
+    assert "active tasks in this session may need attention" not in out
+
+
+def test_list_attention_notice_degrades_when_coordinate_unresolvable(capsys, monkeypatch, _inject_fake):
+    # review finding: `backend_coordinate` reads `backend.name` via direct attribute access —
+    # a partial/test-double backend missing it must not crash a command that otherwise has
+    # nothing to do with this feature (`_safe_backend_coordinate` degrades to `""`, matching a
+    # pre-task-cli#83 legacy entry, rather than raising).
+    ticket = Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS)
+    _inject_fake.create(ticket)
+    _write_session_touch("testsess", "#1", "Old active work", 1, repo="")  # legacy-shaped entry
+
+    monkeypatch.setattr(
+        "tasklib.backends.backend_coordinate",
+        lambda backend: (_ for _ in ()).throw(AttributeError("no .name")),
+    )
+
+    rc = main(["list"])
+    out = capsys.readouterr().out
+
+    assert rc == 0  # must not crash
+    # coordinate degrades to "", matching the legacy entry above → the warning still fires
+    assert "active tasks in this session may need attention" in out
 
 
 def test_list_recent_active_task_prompts_continue_or_deprioritize(capsys, _inject_fake, monkeypatch):
@@ -1084,6 +1231,7 @@ def test_change_metadata_does_not_emit_priority_attention(capsys, _inject_fake):
 
 
 def test_status_transition_refreshes_session_touch(capsys, _inject_fake):
+    from tasklib.backends import backend_coordinate
     from tasklib.session import read_entries
 
     _inject_fake.create(Ticket(title="Touch me", labels=["session:testsess"], state=cli.State.TODO))
@@ -1096,6 +1244,10 @@ def test_status_transition_refreshes_session_touch(capsys, _inject_fake):
     entries = read_entries("testsess")
     assert entries[-1].id == "#1"
     assert entries[-1].ts > 1
+    # task-cli#83 review finding: `_record_session_touch`'s mutation paths (change/status/
+    # done/check/mark-shipped) must write the SAME repo coordinate `create`/`bind` do — only
+    # `create`'s own touch was previously covered.
+    assert entries[-1].repo == backend_coordinate(_inject_fake)
 
 
 def test_status_transition_does_not_record_ticket_from_another_session(capsys, _inject_fake):
@@ -2151,9 +2303,130 @@ def test_session_show(capsys, _inject_fake):
     assert "session: testsess" in out
 
 
+def _pin_local_project_overlay(monkeypatch, coordinate_repo: str = "acme/here") -> None:
+    """Make `_local_project_coordinate` (config/git-based, no backend) resolve deterministically
+    in a test, the same way `test_create_recent_tickets_absent_when_session_undetected` pins it
+    for the create path — real git-origin resolution must not leak into test behavior."""
+    monkeypatch.setattr(
+        cli,
+        "_current_project_overlay",
+        lambda cfg: (coordinate_repo, {"backend": "github-issues", "github": {"repo": coordinate_repo}}),
+    )
+
+
+def test_session_show_excludes_other_repo_sharing_the_same_session_id(capsys, monkeypatch, _inject_fake):
+    # task-cli#83 review finding: `cmd_session`'s "show" path called the unscoped `read_ids`
+    # directly, so it still leaked a foreign repo's ticket ids for a session id shared across
+    # repos — the same underlying bug #83 fixes for `_recent_tickets_block`/
+    # `_session_attention_notice`, just on a call site the original diff missed.
+    from tasklib.session import record
+
+    _pin_local_project_overlay(monkeypatch)
+    record("testsess", "#77", "Unrelated repo's ticket", repo="github-issues:acme/other-repo")
+    record("testsess", "#10", "This repo's own ticket", repo="github-issues:acme/here")
+
+    rc = main(["session"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "#10" in out
+    assert "#77" not in out
+
+
+def test_session_show_json_excludes_other_repo_sharing_the_same_session_id(capsys, monkeypatch, _inject_fake):
+    import json
+
+    from tasklib.session import record
+
+    _pin_local_project_overlay(monkeypatch)
+    record("testsess", "#77", "Unrelated repo's ticket", repo="github-issues:acme/other-repo")
+    record("testsess", "#10", "This repo's own ticket", repo="github-issues:acme/here")
+
+    rc = main(["session", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["tickets"] == ["#10"]
+
+
+def test_session_show_degrades_to_unfiltered_when_outside_a_repo(capsys, monkeypatch, _inject_fake):
+    # `task session` is documented to work outside a repo — a coordinate-resolution failure
+    # (genuinely outside a repo, `_current_project_overlay` returning None) must fall back to
+    # the pre-#83 unfiltered read, not hide every ticket.
+    from tasklib.session import record
+
+    record("testsess", "#5", "some ticket")
+    monkeypatch.setattr(cli, "_current_project_overlay", lambda cfg: None)
+    rc = main(["session"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "#5" in out
+
+
+def test_session_show_degrades_to_unfiltered_on_resolution_error(capsys, monkeypatch, _inject_fake):
+    # A resolution failure other than "genuinely outside a repo" (a broken origin remote, a
+    # teamless linear config) must degrade the same way, not raise into a display command.
+    from tasklib.session import record
+
+    record("testsess", "#5", "some ticket")
+    monkeypatch.setattr(
+        cli, "_current_project_overlay", lambda cfg: (_ for _ in ()).throw(cli._UserError("broken origin"))
+    )
+    rc = main(["session"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "#5" in out
+
+
+def test_session_show_unfiltered_fallback_dedups_same_numbered_ids_across_repos(
+    capsys, monkeypatch, _inject_fake
+):
+    # review finding: outside a repo (no coordinate to scope by), `read_entries`'s
+    # `(repo, id)` dedup lets two different repos' same-numbered ticket both survive as
+    # separate entries — shown unfiltered, that would print an ambiguous "#1, #1" with no way
+    # to tell them apart, a regression from the pre-#83 behavior (dedup by bare id only).
+    import json
+
+    from tasklib.session import record
+
+    record("testsess", "#1", "repo A's ticket", repo="github-issues:acme/a")
+    record("testsess", "#1", "repo B's ticket", repo="github-issues:acme/b")
+    monkeypatch.setattr(cli, "_current_project_overlay", lambda cfg: None)
+
+    rc = main(["session", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["tickets"] == ["#1"]
+
+
 def test_session_bind_records(capsys, _inject_fake):
     from tasklib.session import read_ids
 
+    rc = main(["session", "bind", "#5"])
+    assert rc == 0
+    assert "#5" in read_ids("testsess")
+
+
+def test_session_bind_degrades_gracefully_outside_a_repo(capsys, monkeypatch, _inject_fake):
+    # review finding: `bind` had NO backend dependency before task-cli#83 — it must not start
+    # hard-failing just because resolving a repo coordinate for the sidecar entry needs
+    # config/git context that isn't available (genuinely outside a repo).
+    from tasklib.session import read_ids
+
+    monkeypatch.setattr(cli, "_current_project_overlay", lambda cfg: None)
+    rc = main(["session", "bind", "#5"])
+    assert rc == 0
+    assert "#5" in read_ids("testsess")
+
+
+def test_session_bind_degrades_on_any_resolution_failure_not_just_outside_a_repo(
+    capsys, monkeypatch, _inject_fake
+):
+    # bind's degradation must not be narrowly tied to one failure mode — any failure while
+    # resolving a display-only coordinate must never break a command that historically had
+    # zero backend dependency.
+    from tasklib.session import read_ids
+
+    monkeypatch.setattr(cli, "_current_project_overlay", lambda cfg: (_ for _ in ()).throw(RuntimeError("unexpected")))
     rc = main(["session", "bind", "#5"])
     assert rc == 0
     assert "#5" in read_ids("testsess")
