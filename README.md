@@ -56,7 +56,7 @@ task change <id>  [--due ...] [--done]  # update; --due sets/clears the due date
 task status <id> [<new-state>]     # read or transition state (works outside a repo)
 #   close/transition verbs validate legality first: a cancelled ticket is a dead-end and a
 #   re-close of an already-done ticket is rejected (no silent re-write). `--force` overrides.
-task classify "<text>" [--create]  # change|justAsk via review; --create makes/dedups a ticket
+task classify "<text>" [--create]  # change|actionable|justAsk via review; --create makes/dedups a ticket
 task session [show|bind <id>]      # show/bind the current session and its tickets
 task daemon start|stop|status|run  # the due-date reminder watcher (see Daemon below)
 ```
@@ -301,13 +301,17 @@ The repo you're currently inside is always one of the groups, even if it isn't (
 
 ## Classification
 
-`task classify "<text>"` decides `change` (→ a ticket) vs `justAsk` (a pure question) by
-shelling out to `review just-ask -m <model> --pool 1`. The model is the **first available**
-in a per-provider fallback chain (default head `claude-haiku-4-5`; degrades through OpenAI →
-commandcode → z.ai → Google → local ollama), so it works with whatever you have — offline via
-ollama, or on any one key. **Bias is to `change` on ambiguity** — most questions to a dev agent
-are latent change requests. `task classify "<text>" --create` is the entry point the `tg-cli`
-inbound hook calls.
+`task classify "<text>"` decides `change` (→ a ticket), `actionable` (an instruction to
+directly execute an existing command/tool right now — e.g. "run a review on the diff"; no
+ticket, and actually invoking it is out of scope for this repo, see "Out of scope" below), or
+`justAsk` (a pure question) by shelling out to `review just-ask -m <model> --pool 1`. The
+model is the **first available** in a per-provider fallback chain (default head
+`claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google → local ollama), so
+it works with whatever you have — offline via ollama, or on any one key. **Bias is to
+`change` on ambiguity between change/justAsk** — most questions to a dev agent are latent
+change requests; that bias never applies to a genuine `actionable` signal, which is only
+recognized via the model's explicit `VERDICT: actionable` sentinel. `task classify "<text>"
+--create` is the entry point the `tg-cli` inbound hook calls.
 
 ## Config — `rig.yaml` `task:` block (per-repo) + `task.yaml` + global
 

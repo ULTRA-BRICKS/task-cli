@@ -35,7 +35,7 @@ Telegram messages are classified and turned into tickets with no babysitting.
   backend directly.
 - **Pure core** (testable, no I/O): `model.py` (the `Ticket` dataclass), `render.py`
   (Ticket ↔ structured markdown body, fixed section order), `policy.py` (enforcement rules over
-  a Ticket), `classify.py` (parse `review just-ask` output → `change|justAsk`), `session.py`
+  a Ticket), `classify.py` (parse `review just-ask` output → `change|actionable|justAsk`), `session.py`
   (session id detection + sidecar index), `config.py` (load `task.yaml` + global defaults).
 - **Effectful entrypoint** `bin/task`: backend calls, filesystem, the classification shell-out.
 
@@ -91,7 +91,7 @@ complete create/enforce loop:
 | `task find <query>` | Search tickets (title+body) via the backend; same line format; `--state`, `--all`. |
 | `task change <id>` | Update: append/replace sections, add acceptance criteria, `--screenshot` (implementation proof), `--why/--impact/--if-not-done`, `--title`, `--label`. Enforces the on-done gates when used to close. |
 | `task status <id> [<new-state>]` | Read or transition state (`todo / in-progress / in-review / done / cancelled`, mapped per backend). Transition → `done` runs on-done enforcement. **All transition paths validate legality first** (one shared table in `tasklib/transitions.py`): a `cancelled` ticket is a dead-end and a re-entry into the same state is rejected — `--force` overrides. |
-| `task classify "<text>" [--create \| --update <id>]` | Classify `change \| justAsk` via `review just-ask`; with `--create`, a `change` verdict creates (or dedups → updates) a ticket. **This is what the tg hook calls.** |
+| `task classify "<text>" [--create \| --update <id>]` | Classify `change \| actionable \| justAsk` via `review just-ask`; with `--create`, a `change` verdict creates (or dedups → updates) a ticket. `actionable` (an instruction to directly execute an existing command/tool, e.g. "run a review on the diff") never creates a ticket — actually invoking it is out of scope for this repo. **This is what the tg hook calls.** |
 | `task session [show \| bind <id>]` | Show/bind the current session and list its tickets. |
 
 Global flags: `--backend`, `--repo`, `--config`, `--json`, `--yes`, and the per-gate escape
@@ -153,20 +153,28 @@ across machines) **and** (b) recorded in a local sidecar `~/.local/state/task-cl
 (fast, offline lookup). `task list` defaults to the current session's tickets with status +
 first paragraph.
 
-## 7. Classification (`change | justAsk`)
+## 7. Classification (`change | actionable | justAsk`)
 
 `task classify` resolves the **first available model in the per-provider fallback chain**
 (§2 `classify.fallbacks`, default head haiku — whichever provider the user actually has) and
-shells out to `review just-ask -m <resolved model> --pool 1` with a fixed prompt:
-*"Classify this message to a dev agent as `change` (should result in a code/doc/config change →
-needs a ticket) or `justAsk` (pure question, no change). **Bias to `change` when ambiguous —
-most questions to a dev agent are latent change requests.** Output one word."* `--pool 1` = a
-single fast/cheap model, no panel. The chain is provider-agnostic: it degrades to whatever's
-reachable (Anthropic → OpenAI → commandcode → z.ai → Google → local ollama), so classification
-keeps working offline (ollama) or on any one key.
+shells out to `review just-ask -m <resolved model> --pool 1` with a fixed prompt asking the
+model to pick exactly one of three verdicts: `change` (should result in a code/doc/config
+edit → needs a ticket), `actionable` (task-cli#80: an instruction to directly EXECUTE an
+existing command/tool right now, e.g. "run a review on the diff" — not a question, not an
+edit request; actually invoking it stays out of scope for this repo — the tg-cli inbound
+hook (§8) owns real execution), or
+`justAsk` (pure question, no edit, nothing to execute). **Bias to `change` ONLY when
+genuinely ambiguous between `change`/`justAsk`** — most questions to a dev agent are latent
+edit requests; that bias never applies to a genuine `actionable` signal, which is recognized
+only via the model's explicit `VERDICT: actionable` sentinel (a bare occurrence of the word
+"actionable" in freeform prose is NOT decisive — it's ordinary English, unlike `justAsk`).
+`--pool 1` = a single fast/cheap model, no panel. The chain is provider-agnostic: it degrades
+to whatever's reachable (Anthropic → OpenAI → commandcode → z.ai → Google → local ollama), so
+classification keeps working offline (ollama) or on any one key.
 
 - `change` → dedup: `task find` an open ticket matching the request (same session + high title
   similarity); found → `task change` (append/comment); else → `task create --from-message`.
+- `actionable` → no ticket, no execution; logged to `agenttools_log` (still observable).
 - `justAsk` → no ticket, but logged to `agenttools_log` (still observable).
 
 ## 8. tg-cli inbound hook
