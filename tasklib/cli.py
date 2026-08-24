@@ -75,21 +75,45 @@ _SKIP_FLAGS = (
 def _add_skip_flags(p: argparse.ArgumentParser) -> None:
     for flag, gate in _SKIP_FLAGS:
         dest = "skip_" + gate.replace("-", "_")
-        p.add_argument(flag, dest=dest, metavar="REASON", help=f"skip the {gate} gate with a recorded justification")
+        p.add_argument(
+            flag,
+            dest=dest,
+            metavar="REASON",
+            help=f"skip the {gate} gate with a recorded justification",
+        )
 
 
 def _add_create_args(p: argparse.ArgumentParser) -> None:
     """The ticket-creation argument set, shared by `create` and its `new` alias."""
     p.add_argument("--title", help="ticket title")
-    p.add_argument("--from-message", dest="from_message", metavar="TEXT", help="raw user text → derive title/body")
+    p.add_argument(
+        "--from-message",
+        dest="from_message",
+        metavar="TEXT",
+        help="raw user text → derive title/body",
+    )
     p.add_argument("--what", help="the change (one paragraph)")
-    p.add_argument("--acceptance", action="append", default=[], metavar="CRIT", help="acceptance criterion (repeatable)")
+    p.add_argument(
+        "--acceptance",
+        action="append",
+        default=[],
+        metavar="CRIT",
+        help="acceptance criterion (repeatable)",
+    )
     p.add_argument("--why", help="motivation")
     p.add_argument("--impact", help="user impact")
     p.add_argument("--if-not-done", dest="if_not_done", help="cost of inaction")
-    p.add_argument("--screenshot", action="append", default=[], metavar="PATH", help="screenshot (repeatable)")
+    p.add_argument(
+        "--screenshot",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="screenshot (repeatable)",
+    )
     p.add_argument("--label", action="append", default=[], help="label (repeatable)")
-    p.add_argument("--due", metavar="YYYY-MM-DD", help="due date (the daemon reminds before/at it)")
+    p.add_argument(
+        "--due", metavar="YYYY-MM-DD", help="due date (the daemon reminds before/at it)"
+    )
     p.add_argument("--yes", action="store_true", help="non-interactive; do not prompt")
     p.add_argument(
         "--force",
@@ -111,11 +135,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"task {__version__}")
     # global flags live on the top parser AND each subparser via parents
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-C", "--cwd", default=".", help="repo root to operate on (default: cwd)")
-    common.add_argument("--backend", help="override the configured backend (github-issues|linear)")
+    common.add_argument(
+        "-C", "--cwd", default=".", help="repo root to operate on (default: cwd)"
+    )
+    common.add_argument(
+        "--backend", help="override the configured backend (github-issues|linear)"
+    )
     common.add_argument("--repo", help="override github repo (owner/name)")
-    common.add_argument("--config", help="explicit config file (default: ./task.yaml + global)")
-    common.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    common.add_argument(
+        "--config", help="explicit config file (default: ./task.yaml + global)"
+    )
+    common.add_argument(
+        "--json", action="store_true", help="machine-readable JSON output"
+    )
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
@@ -128,24 +160,69 @@ def build_parser() -> argparse.ArgumentParser:
         _add_create_args(cp)
 
     # list
-    lp = sub.add_parser("list", parents=[common], help="list THIS session's tickets (default)")
-    lp.add_argument("--all", action="store_true", help="all tickets, not just this session")
+    lp = sub.add_parser(
+        "list", parents=[common], help="list THIS session's tickets (default)"
+    )
+    lp.add_argument(
+        "--all", action="store_true", help="all tickets, not just this session"
+    )
     lp.add_argument("--mine", action="store_true", help="only tickets assigned to me")
-    lp.add_argument("--state", help="filter by state (todo|in-progress|in-review|done|cancelled)")
-    lp.add_argument("--label", action="append", default=[], help="filter by label (repeatable)")
+    lp.add_argument(
+        "--state", help="filter by state (todo|in-progress|in-review|done|cancelled)"
+    )
+    lp.add_argument(
+        "--label", action="append", default=[], help="filter by label (repeatable)"
+    )
     # default=None so the limit is chosen by interactivity: 100 in a TTY (the pager scrolls),
     # 30 when piped/scripted. An explicit -n always wins (see _effective_limit).
-    lp.add_argument("-n", type=int, default=None, dest="limit", help="max results (default 100 interactive, 30 piped)")
-    lp.add_argument("--no-pager", action="store_true", dest="no_pager", help="never page output (also honors NO_PAGER, $PAGER='')")
+    lp.add_argument(
+        "-n",
+        type=int,
+        default=None,
+        dest="limit",
+        help="max results (default 100 interactive, 30 piped)",
+    )
+    lp.add_argument(
+        "--no-pager",
+        action="store_true",
+        dest="no_pager",
+        help="never page output (also honors NO_PAGER, $PAGER='')",
+    )
 
     # gantt — read-only due-date timeline (charts `list`'s tickets, same scoping)
-    gp = sub.add_parser("gantt", parents=[common], help="render tickets on a due-date timeline (read-only)")
-    gp.add_argument("--all", action="store_true", help="all tickets, not just this session")
-    gp.add_argument("--state", help="filter by state (todo|in-progress|in-review|done|cancelled)")
-    gp.add_argument("--label", action="append", default=[], help="filter by label (repeatable)")
-    gp.add_argument("-n", type=int, default=None, dest="limit", help="max tickets (default 100 interactive, 30 piped)")
-    gp.add_argument("--width", type=int, default=None, help="bar-area width in columns (default: auto from terminal)")
-    gp.add_argument("--no-pager", action="store_true", dest="no_pager", help="never page output (also honors NO_PAGER, $PAGER='')")
+    gp = sub.add_parser(
+        "gantt",
+        parents=[common],
+        help="render tickets on a due-date timeline (read-only)",
+    )
+    gp.add_argument(
+        "--all", action="store_true", help="all tickets, not just this session"
+    )
+    gp.add_argument(
+        "--state", help="filter by state (todo|in-progress|in-review|done|cancelled)"
+    )
+    gp.add_argument(
+        "--label", action="append", default=[], help="filter by label (repeatable)"
+    )
+    gp.add_argument(
+        "-n",
+        type=int,
+        default=None,
+        dest="limit",
+        help="max tickets (default 100 interactive, 30 piped)",
+    )
+    gp.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="bar-area width in columns (default: auto from terminal)",
+    )
+    gp.add_argument(
+        "--no-pager",
+        action="store_true",
+        dest="no_pager",
+        help="never page output (also honors NO_PAGER, $PAGER='')",
+    )
 
     # read / view
     rp = sub.add_parser("read", parents=[common], help="show a full ticket")
@@ -165,48 +242,127 @@ def build_parser() -> argparse.ArgumentParser:
     fp = sub.add_parser("find", parents=[common], help="search tickets (title+body)")
     fp.add_argument("query", help="search query")
     fp.add_argument("--state", help="filter by state")
-    fp.add_argument("--all", action="store_true", help="(reserved) include all; search is global by default")
-    fp.add_argument("-n", type=int, default=None, dest="limit", help="max results (default 100 interactive, 30 piped)")
-    fp.add_argument("--no-pager", action="store_true", dest="no_pager", help="never page output (also honors NO_PAGER, $PAGER='')")
+    fp.add_argument(
+        "--all",
+        action="store_true",
+        help="(reserved) include all; search is global by default",
+    )
+    fp.add_argument(
+        "-n",
+        type=int,
+        default=None,
+        dest="limit",
+        help="max results (default 100 interactive, 30 piped)",
+    )
+    fp.add_argument(
+        "--no-pager",
+        action="store_true",
+        dest="no_pager",
+        help="never page output (also honors NO_PAGER, $PAGER='')",
+    )
 
     # change
-    chp = sub.add_parser("change", parents=[common], help="update a ticket (enforces on-done gates when closing)")
+    chp = sub.add_parser(
+        "change",
+        parents=[common],
+        help="update a ticket (enforces on-done gates when closing)",
+    )
     chp.add_argument("id", help="ticket id")
     chp.add_argument("--title", help="new title")
     chp.add_argument("--what", help="replace the What section")
-    chp.add_argument("--acceptance", action="append", default=[], metavar="CRIT", help="add acceptance criterion")
+    chp.add_argument(
+        "--acceptance",
+        action="append",
+        default=[],
+        metavar="CRIT",
+        help="add acceptance criterion",
+    )
     chp.add_argument("--why", help="set motivation")
     chp.add_argument("--impact", help="set user impact")
     chp.add_argument("--if-not-done", dest="if_not_done", help="set cost of inaction")
-    chp.add_argument("--screenshot", action="append", default=[], metavar="PATH", help="add implementation screenshot")
+    chp.add_argument(
+        "--screenshot",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="add implementation screenshot",
+    )
     chp.add_argument("--label", action="append", default=[], help="add label")
-    chp.add_argument("--due", metavar="YYYY-MM-DD", help="set/replace the due date (empty string clears it)")
-    chp.add_argument("--done", action="store_true", help="close the ticket (runs the on-done gates)")
-    chp.add_argument("--force", action="store_true", help="override the legal-transition check (e.g. re-close a cancelled ticket)")
+    chp.add_argument(
+        "--due",
+        metavar="YYYY-MM-DD",
+        help="set/replace the due date (empty string clears it)",
+    )
+    chp.add_argument(
+        "--done", action="store_true", help="close the ticket (runs the on-done gates)"
+    )
+    chp.add_argument(
+        "--force",
+        action="store_true",
+        help="override the legal-transition check (e.g. re-close a cancelled ticket)",
+    )
     _add_skip_flags(chp)
 
     # status
-    stp = sub.add_parser("status", parents=[common], help="read or transition a ticket's state")
+    stp = sub.add_parser(
+        "status", parents=[common], help="read or transition a ticket's state"
+    )
     stp.add_argument("id", help="ticket id")
-    stp.add_argument("new_state", nargs="?", help="new state (todo|in-progress|in-review|done|cancelled)")
-    stp.add_argument("--force", action="store_true", help="override the legal-transition check (e.g. reopen a cancelled ticket)")
+    stp.add_argument(
+        "new_state",
+        nargs="?",
+        help="new state (todo|in-progress|in-review|done|cancelled)",
+    )
+    stp.add_argument(
+        "--force",
+        action="store_true",
+        help="override the legal-transition check (e.g. reopen a cancelled ticket)",
+    )
     _add_skip_flags(stp)
 
     # done — close a ticket by id (the on-done gates run; the close-verb the CTO reaches for)
-    dnp = sub.add_parser("done", parents=[common], help="close a ticket (runs the on-done gates)")
+    dnp = sub.add_parser(
+        "done", parents=[common], help="close a ticket (runs the on-done gates)"
+    )
     dnp.add_argument("id", help="ticket id (#123 or HYP-456)")
-    dnp.add_argument("--screenshot", action="append", default=[], metavar="PATH", help="add implementation screenshot")
-    dnp.add_argument("--force", action="store_true", help="override the legal-transition check (re-close a cancelled/done ticket)")
+    dnp.add_argument(
+        "--screenshot",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="add implementation screenshot",
+    )
+    dnp.add_argument(
+        "--force",
+        action="store_true",
+        help="override the legal-transition check (re-close a cancelled/done ticket)",
+    )
     _add_skip_flags(dnp)
 
     # check — tick an acceptance criterion off, with the visual proof the box demands
-    ckp = sub.add_parser("check", parents=[common], help="check an acceptance criterion (requires a visual proof)")
-    ckp.add_argument("id", help="ticket id (#123 or HYP-456)")
-    ckp.add_argument("selector", help="which criterion: a 1-based index, or a text substring")
-    ckp.add_argument(
-        "--proof", action="append", default=[], metavar="PATH", help="visual proof (screenshot/image) for this criterion (repeatable)"
+    ckp = sub.add_parser(
+        "check",
+        parents=[common],
+        help="check an acceptance criterion (requires a visual proof)",
     )
-    ckp.add_argument("--screenshot", action="append", default=[], dest="proof", help="alias of --proof")
+    ckp.add_argument("id", help="ticket id (#123 or HYP-456)")
+    ckp.add_argument(
+        "selector", help="which criterion: a 1-based index, or a text substring"
+    )
+    ckp.add_argument(
+        "--proof",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="visual proof (screenshot/image) for this criterion (repeatable)",
+    )
+    ckp.add_argument(
+        "--screenshot",
+        action="append",
+        default=[],
+        dest="proof",
+        help="alias of --proof",
+    )
     ckp.add_argument(
         "--force",
         dest="force_reason",
@@ -223,24 +379,52 @@ def build_parser() -> argparse.ArgumentParser:
     msp.add_argument("id", help="ticket id (#123 or HYP-456)")
     msp.add_argument("--pr", required=True, metavar="URL", help="the merged PR's URL")
     msp.add_argument(
-        "--commit", metavar="SHA", help="merge commit SHA (used to derive a commit link when the PR URL is GitHub's)"
+        "--commit",
+        metavar="SHA",
+        help="merge commit SHA (used to derive a commit link when the PR URL is GitHub's)",
     )
 
     # classify
-    clp = sub.add_parser("classify", parents=[common], help="classify a message change|justAsk (the tg hook entry)")
+    clp = sub.add_parser(
+        "classify",
+        parents=[common],
+        help="classify a message change|justAsk (the tg hook entry)",
+    )
     clp.add_argument("text", help="the message text")
-    clp.add_argument("--create", action="store_true", help="on a `change` verdict, create/dedup a ticket")
-    clp.add_argument("--update", metavar="ID", help="on a `change` verdict, append to this ticket")
+    clp.add_argument(
+        "--create",
+        action="store_true",
+        help="on a `change` verdict, create/dedup a ticket",
+    )
+    clp.add_argument(
+        "--update", metavar="ID", help="on a `change` verdict, append to this ticket"
+    )
 
     # session
-    sep = sub.add_parser("session", parents=[common], help="show/bind the current session and its tickets")
-    sep.add_argument("action", nargs="?", choices=["show", "bind"], default="show", help="show (default) | bind")
-    sep.add_argument("bind_id", nargs="?", metavar="ID", help="ticket id to bind (with `bind`)")
+    sep = sub.add_parser(
+        "session",
+        parents=[common],
+        help="show/bind the current session and its tickets",
+    )
+    sep.add_argument(
+        "action",
+        nargs="?",
+        choices=["show", "bind"],
+        default="show",
+        help="show (default) | bind",
+    )
+    sep.add_argument(
+        "bind_id", nargs="?", metavar="ID", help="ticket id to bind (with `bind`)"
+    )
 
     sub.add_parser("install-skill", help="register the task agent skill with harnesses")
 
     # daemon — the due-date reminder watcher (start/stop/status/run lifecycle)
-    dp = sub.add_parser("daemon", parents=[common], help="due-date reminder daemon (start|stop|status|run)")
+    dp = sub.add_parser(
+        "daemon",
+        parents=[common],
+        help="due-date reminder daemon (start|stop|status|run)",
+    )
     dp.add_argument(
         "action",
         choices=["start", "stop", "status", "run"],
@@ -375,8 +559,12 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
             # do we return None to route to the grouped/registry view.
             if not _in_git_repo(cfg.repo_root):
                 return None
-            _backend(cfg)  # NoReturn here: raises _UserError("linear backend requires a team key")
-            raise AssertionError("unreachable: _backend raises on a teamless linear config")
+            _backend(
+                cfg
+            )  # NoReturn here: raises _UserError("linear backend requires a team key")
+            raise AssertionError(
+                "unreachable: _backend raises on a teamless linear config"
+            )
         project = str(cfg.section("linear").get("project", "")).strip()
         name = f"{team}/{project}" if project else team
         return name, {"backend": "linear", "linear": {"team": team, "project": project}}
@@ -471,7 +659,11 @@ def _route_id_to_project(ticket_id: str, projects: list):
     # same-team projects "ambiguous" (they'd resolve the same issue either way).
     prefix = tid.partition("-")[0].upper() if "-" in tid else ""
     if prefix:
-        matches = [p for p in projects if p.backend == "linear" and _linear_team_of(p) == prefix]
+        matches = [
+            p
+            for p in projects
+            if p.backend == "linear" and _linear_team_of(p) == prefix
+        ]
         if matches:
             return matches[0]
     return None
@@ -559,7 +751,9 @@ def _normalize_due(value: str | None) -> str | None:
     try:
         return date.fromisoformat(text).isoformat()
     except ValueError as exc:
-        raise _UserError(f"--due must be an ISO date YYYY-MM-DD (got {value!r})") from exc
+        raise _UserError(
+            f"--due must be an ISO date YYYY-MM-DD (got {value!r})"
+        ) from exc
 
 
 def _collect_skips(args: argparse.Namespace) -> dict[str, str]:
@@ -607,7 +801,10 @@ def _ticket_dict(t: Ticket) -> dict:
     # Only emitted when the backend actually returned any (Linear; GitHub never populates this)
     # — keeps the JSON shape unchanged for every existing consumer that doesn't care about it.
     if t.attachments:
-        d["attachments"] = [{"id": a.id, "title": a.title, "url": a.url, "subtitle": a.subtitle} for a in t.attachments]
+        d["attachments"] = [
+            {"id": a.id, "title": a.title, "url": a.url, "subtitle": a.subtitle}
+            for a in t.attachments
+        ]
         # review finding: human output already warns about the 250-item cap — a JSON consumer
         # (`--json`) must get the SAME signal, not silently treat a capped list as complete.
         if t.attachments_truncated:
@@ -646,7 +843,9 @@ def _enforce_or_die(ticket: Ticket, cfg, phase) -> None:
     from .policy import Phase, check
 
     cfg_e = _enforce_config(cfg)
-    result = check(ticket, cfg_e, phase, resolvable_ids=_msgref_resolvable_ids(ticket, cfg_e))
+    result = check(
+        ticket, cfg_e, phase, resolvable_ids=_msgref_resolvable_ids(ticket, cfg_e)
+    )
     _report_and_die(result, "create" if phase is Phase.CREATE else "close")
 
 
@@ -666,7 +865,10 @@ def _report_and_die(result, label: str) -> None:
     for w in result.warnings:
         print(_warn(f"  ⚠ {w.gate}: {w.message}"), file=sys.stderr)
     if result.skipped:
-        print(_warn(f"  skipped gates (justified): {', '.join(result.skipped)}"), file=sys.stderr)
+        print(
+            _warn(f"  skipped gates (justified): {', '.join(result.skipped)}"),
+            file=sys.stderr,
+        )
     if not result.ok:
         from .policy import NON_SKIPPABLE_GATES
 
@@ -678,12 +880,18 @@ def _report_and_die(result, label: str) -> None:
                 # --skip-<gate> flag at all -- suggesting one is actively misleading (task-cli#45
                 # review finding: the new msgref-title gate inherited this pre-existing wart from
                 # acceptance-checked). Only append the skip hint for a gate that actually has one.
-                skip_hint = "" if v.gate in NON_SKIPPABLE_GATES else f'  (or --skip-{v.gate} "<reason>")'
+                skip_hint = (
+                    ""
+                    if v.gate in NON_SKIPPABLE_GATES
+                    else f'  (or --skip-{v.gate} "<reason>")'
+                )
                 print(_dim(f"      → {v.hint}{skip_hint}"))
         raise _UserError("policy gates not satisfied")
 
 
-def _apply_force(ticket: Ticket, cfg, phase, reason: str | None, forceable: set[str]) -> None:
+def _apply_force(
+    ticket: Ticket, cfg, phase, reason: str | None, forceable: set[str]
+) -> None:
     """Record ``reason`` as the skip justification for whichever ``forceable`` gates actually fire.
 
     This is how ``--force "<reason>"`` overrides the new content gates (links / user-impact-
@@ -720,7 +928,9 @@ def _session_dedup_candidates(backend, session) -> list[Ticket]:
         return []
 
 
-def _refuse_if_duplicate(backend, session, force_reason: str | None, ticket: Ticket) -> None:
+def _refuse_if_duplicate(
+    backend, session, force_reason: str | None, ticket: Ticket
+) -> None:
     """Block `create` when a close-duplicate ticket already exists in this session.
 
     Reuses `_best_dedup_match` — the SAME conservative title-similarity check `_classify_create`
@@ -812,7 +1022,14 @@ def _load_msgref_history_if_needed(*texts: str):
     return load_history()
 
 
-def _enforce_edit_or_die(ticket: Ticket, cfg, *, check_links: bool, check_impact: bool, check_title: bool = False) -> None:
+def _enforce_edit_or_die(
+    ticket: Ticket,
+    cfg,
+    *,
+    check_links: bool,
+    check_impact: bool,
+    check_title: bool = False,
+) -> None:
     """The edit-time gates (rule 1 links, and rule 5 impact-quality when impact was touched).
 
     A plain ``change`` (not a close) doesn't re-run the full create gates — an edit may be a
@@ -859,7 +1076,9 @@ def _enforce_edit_or_die(ticket: Ticket, cfg, *, check_links: bool, check_impact
         # Auto-expansion runs on this same command before enforcement, so a freshly set --what
         # carrying a reference is already quoted; this catches a pre-existing unquoted reference
         # in an untouched field — the backstop for a web-UI-authored ticket.
-        deny, warn = msgref_quote_reports(ticket, cfg_e, _msgref_resolvable_ids(ticket, cfg_e))
+        deny, warn = msgref_quote_reports(
+            ticket, cfg_e, _msgref_resolvable_ids(ticket, cfg_e)
+        )
         if deny is not None:
             raw.append(deny)
         if warn is not None:
@@ -896,7 +1115,9 @@ def _notify_mutation(cfg, ticket, action: str) -> None:
     _daemon.notify(msg, notifier)
 
 
-def _mutation_message(ticket: Ticket, action: str, state_str: str, *, html_mode: bool) -> str:
+def _mutation_message(
+    ticket: Ticket, action: str, state_str: str, *, html_mode: bool
+) -> str:
     """Render the one-line mutation notice in plain text or Telegram HTML."""
     ticket_id = ticket.id or "(new)"
     if not html_mode:
@@ -912,7 +1133,9 @@ def _mutation_message(ticket: Ticket, action: str, state_str: str, *, html_mode:
     return f"[task {safe_action}] {display_id}: {safe_title} [{safe_state}]"
 
 
-def _resolve_notification_notifier(notifier: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+def _resolve_notification_notifier(
+    notifier: tuple[str, ...],
+) -> tuple[tuple[str, ...], bool]:
     if not _is_tg_notifier(notifier):
         return notifier, False
     notifier, fmt = _normalize_format_arg(notifier)
@@ -925,7 +1148,9 @@ def _is_tg_notifier(notifier: tuple[str, ...]) -> bool:
     return bool(notifier) and Path(notifier[0]).name == "tg"
 
 
-def _normalize_format_arg(notifier: tuple[str, ...]) -> tuple[tuple[str, ...], str | None]:
+def _normalize_format_arg(
+    notifier: tuple[str, ...],
+) -> tuple[tuple[str, ...], str | None]:
     normalized: list[str] = []
     fmt: str | None = None
     idx = 0
@@ -988,7 +1213,9 @@ def _attach_screenshots(backend, ticket_id: str, screenshots) -> None:
             continue
 
 
-def _create_ticket_or_ambiguous(backend, ticket: Ticket) -> tuple[Ticket | None, int | None]:
+def _create_ticket_or_ambiguous(
+    backend, ticket: Ticket
+) -> tuple[Ticket | None, int | None]:
     """Create ``ticket`` via ``backend``. Returns ``(created, None)`` on success, or
     ``(None, exit_code)`` when the outcome is ambiguous — the caller returns ``exit_code``
     immediately without further output (the message is already printed here).
@@ -1040,7 +1267,9 @@ def cmd_create(args: argparse.Namespace) -> int:
         title = _derive_title_from_message(args.from_message)
         what = what or args.from_message.strip()
     if not title:
-        raise _UserError("a title is required (--title, or --from-message to derive one)")
+        raise _UserError(
+            "a title is required (--title, or --from-message to derive one)"
+        )
 
     # Expand tg#<id> mentions in each prose field, once history is loaded (a single read of
     # tg-cli's local history log, reused across all four fields — see _load_msgref_history).
@@ -1065,7 +1294,13 @@ def cmd_create(args: argparse.Namespace) -> int:
     # the gate, or the waiver would still leak the very quote it waives (review finding).
     skips = _collect_skips(args)
     expand = _msgref_expand_enabled(skips, cfg)
-    history = _load_msgref_history_if_needed(what, args.why or "", args.impact or "", args.if_not_done or "") if expand else None
+    history = (
+        _load_msgref_history_if_needed(
+            what, args.why or "", args.impact or "", args.if_not_done or ""
+        )
+        if expand
+        else None
+    )
     labels = list(dict.fromkeys([*args.label, session.label]))
     screenshots = [Screenshot(ref=p, kind="creation") for p in args.screenshot]
     due = _normalize_due(getattr(args, "due", None)) or ""
@@ -1073,8 +1308,12 @@ def cmd_create(args: argparse.Namespace) -> int:
         title=title,
         what=_expand_msgrefs(what, history) if expand else what,
         why=_expand_msgrefs(args.why or "", history) if expand else (args.why or ""),
-        user_impact=_expand_msgrefs(args.impact or "", history) if expand else (args.impact or ""),
-        cost_of_inaction=_expand_msgrefs(args.if_not_done or "", history) if expand else (args.if_not_done or ""),
+        user_impact=_expand_msgrefs(args.impact or "", history)
+        if expand
+        else (args.impact or ""),
+        cost_of_inaction=_expand_msgrefs(args.if_not_done or "", history)
+        if expand
+        else (args.if_not_done or ""),
         acceptance=list(args.acceptance),
         screenshots=screenshots,
         labels=labels,
@@ -1090,7 +1329,9 @@ def cmd_create(args: argparse.Namespace) -> int:
     from .policy import GATE_LINKS, GATE_USER_IMPACT_QUALITY, Phase
 
     force_reason = getattr(args, "force_reason", None)
-    _apply_force(ticket, cfg, Phase.CREATE, force_reason, {GATE_LINKS, GATE_USER_IMPACT_QUALITY})
+    _apply_force(
+        ticket, cfg, Phase.CREATE, force_reason, {GATE_LINKS, GATE_USER_IMPACT_QUALITY}
+    )
     _enforce_or_die(ticket, cfg, Phase.CREATE)
 
     backend = _backend(cfg)
@@ -1106,10 +1347,14 @@ def cmd_create(args: argparse.Namespace) -> int:
 
     from .session import record
 
-    record(session.id, created.id, created.title, repo=_safe_backend_coordinate(backend))
+    record(
+        session.id, created.id, created.title, repo=_safe_backend_coordinate(backend)
+    )
     from .logging import log_event
 
-    log_event("ticket.created", ticket_id=created.id, backend=cfg.backend, session=session.id)
+    log_event(
+        "ticket.created", ticket_id=created.id, backend=cfg.backend, session=session.id
+    )
     _notify_mutation(cfg, created, "created")
 
     if args.json:
@@ -1119,7 +1364,9 @@ def cmd_create(args: argparse.Namespace) -> int:
     else:
         print(_ok(f"created {created.id}  {created.url}"))
         _print_recent_tickets_after_create(session, backend)
-        _print_session_attention_after_mutation(args, cfg, backend, current_id=created.id)
+        _print_session_attention_after_mutation(
+            args, cfg, backend, current_id=created.id
+        )
     return 0
 
 
@@ -1189,7 +1436,9 @@ def _attention_line(ticket: Ticket, age: int | None) -> str:
 
 
 def _stale_line(ticket: Ticket, age: int) -> str:
-    return f"{ticket.id} [{ticket.state.value}] {ticket.title} (updated {_age_text(age)})"
+    return (
+        f"{ticket.id} [{ticket.state.value}] {ticket.title} (updated {_age_text(age)})"
+    )
 
 
 def _format_duration_hours(seconds: int) -> str:
@@ -1207,7 +1456,9 @@ def _format_duration_hours(seconds: int) -> str:
     return f"{hours:g}h"
 
 
-def _session_attention_notice(session, tickets: list[Ticket], backend, *, priority_change: bool = False) -> str:
+def _session_attention_notice(
+    session, tickets: list[Ticket], backend, cfg, *, priority_change: bool = False
+) -> str:
     """Human-only warning for active session tasks that are easy to forget.
 
     Backend timestamps are not portable across GitHub/Linear, but the session sidecar records
@@ -1215,20 +1466,42 @@ def _session_attention_notice(session, tickets: list[Ticket], backend, *, priori
     old active work suggests parallel follow-up; recently touched in-progress work suggests the
     agent should ask whether to continue it before switching priority.
 
-    ``backend`` scopes the sidecar lookup to THIS repo's coordinate (task-cli#83, review
-    finding): `tickets` is already correctly repo-scoped (it comes from `backend.session_tickets`,
-    a native per-backend query), but without this filter, keying `read_entries()` by bare
-    ticket id would let ANOTHER repo's same-numbered entry (e.g. both repos have a `#1`)
-    silently supply the wrong touch-timestamp for one of THESE tickets — producing a false or
-    suppressed staleness/recency warning, not a wrong ticket shown outright.
+    Each ticket's OWN verified coordinate scopes its sidecar lookup (task-cli#83, review
+    finding, 2nd round): `tickets` is already correctly repo-scoped (it comes from
+    `backend.session_tickets`, a native per-backend query), but without a per-entry filter,
+    keying `read_entries()` by bare ticket id would let ANOTHER repo's same-numbered entry (e.g.
+    both repos have a `#1`) silently supply the wrong touch-timestamp for one of THESE tickets —
+    producing a false or suppressed staleness/recency warning, not a wrong ticket shown outright.
+    A single coordinate shared across every ticket (the earlier, simpler version of this fix)
+    regressed the exact same-team-Linear misroute scenario this whole feature targets: the
+    WRITE side (`_record_session_touch`) records a misrouted ticket under its ACTUAL project
+    (`verified_ticket_coordinate`), but a single naive `backend`-derived coordinate here would
+    filter by the project the id merely happened to be ROUTED THROUGH — the two would never
+    match, silently dropping the just-touched ticket from its own session's attention notice.
+    Computing each ticket's coordinate individually (same helper the write side uses) keeps
+    both sides in agreement.
 
-    Resolving the coordinate is best-effort (`_safe_backend_coordinate`): some callers (test
-    doubles, a minimal/partial backend implementation) may not carry the attributes
-    `backend_coordinate` reads. This is a "best-effort human warning" (see above), not a
-    security boundary like the sidecar write path — an unresolvable backend degrades to the
-    same `""` coordinate a pre-task-cli#83 legacy line carries (so it can still match a legacy
-    entry, but never a real repo's), rather than raising into a command that otherwise has
-    nothing to do with this feature.
+    Resolving a coordinate is best-effort (`_safe_verified_coordinate`, which itself degrades to
+    `_safe_backend_coordinate` on failure): some callers (test doubles, a minimal/partial backend
+    implementation) may not carry the attributes it reads. This is a "best-effort human warning"
+    (see above), not a security boundary like the sidecar write path — an unresolvable ticket
+    degrades to the same `""` coordinate a pre-task-cli#83 legacy line carries (so it can still
+    match a legacy entry, but never a real repo's), rather than raising into a command that
+    otherwise has nothing to do with this feature.
+
+    KNOWN LIMITATION (review finding, 4th round), out of scope for task-cli#83: `tickets` only
+    ever contains what `backend.session_tickets()` actually returned, and Linear's own
+    `list()`/`session_tickets()` filters SERVER-SIDE to `self.project` whenever the routed-to
+    registry entry pins one — so a same-team ticket living in a genuinely different, ALSO
+    project-pinned entry is never fetched in the first place, regardless of anything this
+    function does with whatever coordinate it computes. The per-ticket correction here only has
+    something to act on when the routed-to entry is TEAM-ONLY (no `project:` pinned), so Linear
+    returns every team ticket unfiltered and different tickets in that set can genuinely report
+    different `backend_project_id`s. Fully closing the project-pinned case would mean querying
+    every same-team registered project's own backend for its session tickets too (the same
+    cross-project aggregation `_list_grouped` already does elsewhere) — a materially bigger
+    change than task-cli#83's actual scope (the session-sidecar's cross-REPO id-leak), left as a
+    separate concern.
     """
     if session.source == "none":
         return ""
@@ -1238,8 +1511,32 @@ def _session_attention_notice(session, tickets: list[Ticket], backend, *, priori
 
     from .session import read_entries
 
-    coordinate = _safe_backend_coordinate(backend)
-    entries = {entry.id: entry for entry in read_entries(session.id) if entry.repo == coordinate}
+    # 3rd-round review finding (codex + Opus, independently): collapsing `read_entries()` to a
+    # bare-id dict BEFORE filtering by coordinate reintroduces the exact cross-repo same-id bug
+    # this feature exists to prevent — a DIFFERENT repo's more-recently-appended same-numbered
+    # entry would shadow THIS repo's own valid, coordinate-matching one, since dict construction
+    # keeps only the last-appended entry per bare id regardless of which repo it belongs to.
+    # Fix: compute each active ticket's expected coordinate FIRST, then walk entries in their
+    # natural (oldest-appended-first) order, keeping only entries that match BOTH the id and
+    # that ticket's own coordinate — "last write wins" now operates within the matching set,
+    # not across repos. `_verified_coord_cache` avoids re-parsing the project registry once per
+    # DISTINCT `backend_project_id` value in `active` (review finding: most session tickets share
+    # one actual project, so this collapses what would otherwise be an O(active × registry) scan
+    # back to O(distinct_projects × registry) — `verified_ticket_coordinate`'s result depends
+    # only on `backend`/`cfg` (fixed for this call) and `ticket.backend_project_id`).
+    _verified_coord_cache: dict[str, str] = {}
+
+    def _ticket_coordinate(ticket: Ticket) -> str:
+        key = str(getattr(ticket, "backend_project_id", "") or "")
+        if key not in _verified_coord_cache:
+            _verified_coord_cache[key] = _safe_verified_coordinate(cfg, backend, ticket)
+        return _verified_coord_cache[key]
+
+    coordinates = {ticket.id: _ticket_coordinate(ticket) for ticket in active}
+    entries = {}
+    for entry in read_entries(session.id):
+        if entry.id in coordinates and entry.repo == coordinates[entry.id]:
+            entries[entry.id] = entry
     now = int(time.time())
     stale_after = _env_seconds("TASK_STALE_WARNING_SECONDS", _STALE_WARNING_SECONDS)
     recent_before = _env_seconds("TASK_RECENT_WARNING_SECONDS", _RECENT_WARNING_SECONDS)
@@ -1266,11 +1563,23 @@ def _session_attention_notice(session, tickets: list[Ticket], backend, *, priori
 
     lines = [_warn("warning: active tasks in this session may need attention:")]
     if stale:
-        lines.append(_dim("  forgotten/old: consider continuing in parallel or explicitly parking:"))
-        lines.extend(_dim(f"    - {_attention_line(ticket, age)}") for ticket, age in stale[:3])
+        lines.append(
+            _dim(
+                "  forgotten/old: consider continuing in parallel or explicitly parking:"
+            )
+        )
+        lines.extend(
+            _dim(f"    - {_attention_line(ticket, age)}") for ticket, age in stale[:3]
+        )
     if recent:
-        lines.append(_dim("  recently touched active task: ask whether to continue it or park it before switching priorities:"))
-        lines.extend(_dim(f"    - {_attention_line(ticket, age)}") for ticket, age in recent[:3])
+        lines.append(
+            _dim(
+                "  recently touched active task: ask whether to continue it or park it before switching priorities:"
+            )
+        )
+        lines.extend(
+            _dim(f"    - {_attention_line(ticket, age)}") for ticket, age in recent[:3]
+        )
     return "\n".join(lines)
 
 
@@ -1302,18 +1611,43 @@ def _local_project_coordinate(cfg) -> str:
     `get_backend` would, but stops at local git metadata (``git rev-parse``/``git remote``,
     no credentials) — :class:`tasklib.projects.Project` then computes the identical string
     shape :func:`tasklib.backends.backend_coordinate` does from a LIVE instance (see
-    ``test_backend_coordinate_*_matches_project_coordinate_shape``). Degrades to `""` — same
-    as `_safe_backend_coordinate` — on any resolution failure, or genuinely outside a repo
-    (``_current_project_overlay`` returning ``None``), since there's no coordinate to filter
-    by in that case (and `task session` is documented to work outside a repo)."""
+    ``test_backend_coordinate_*_matches_project_coordinate_shape``). Degrades to `""` ONLY for
+    the genuine outside-a-repo case (``_current_project_overlay`` returning ``None``), since
+    there's no coordinate to filter by there (and `task session` is documented to work outside a
+    repo). A genuine resolution ERROR (a broken/unsupported git origin, a teamless `linear`
+    config) is a DIFFERENT thing — `_current_project_overlay` already raises `_UserError` for
+    that case rather than returning `None` — and is deliberately let PROPAGATE here (2nd-round
+    review finding: an earlier blanket `except Exception: return ""` swallowed that `_UserError`
+    into the same empty coordinate as "outside a repo", which made `cmd_session`'s callers take
+    the unfiltered fallback branch on a transient error — silently reintroducing the exact
+    cross-repo leak this coordinate exists to prevent, and losing a `session bind` write into an
+    unscoped entry it can no longer find once the error clears). Callers reach this through
+    `main()`'s existing top-level `except _UserError` handler, which already turns it into a
+    clean ``error: ...`` message + exit 2 — the same handling every other resolution failure in
+    this module gets, not a new code path.
+
+    A truly UNEXPECTED exception (not `_UserError`, i.e. not one of this module's own recognized
+    resolution-error shapes) still degrades to `""` — preserving `bind`'s original design intent
+    (it "had NO backend dependency before task-cli#83") of never hard-crashing a purely-local
+    sidecar command on a failure mode nobody anticipated. Only a genuine, RECOGNIZED resolution
+    error gets the clean-surface treatment; a mystery exception still fails soft. Construction of
+    the (pure, no-I/O) `Project` value from an already-resolved overlay is likewise degraded to
+    `""` on any failure."""
+    try:
+        current = _current_project_overlay(cfg)
+    except _UserError:
+        raise
+    except Exception:
+        return ""
+    if current is None:
+        return ""
+    name, overlay = current
     from .projects import Project
 
     try:
-        current = _current_project_overlay(cfg)
-        if current is None:
-            return ""
-        name, overlay = current
-        return Project(name=name, backend=str(overlay.get("backend", cfg.backend)), overlay=overlay).coordinate
+        return Project(
+            name=name, backend=str(overlay.get("backend", cfg.backend)), overlay=overlay
+        ).coordinate
     except Exception:
         return ""
 
@@ -1363,14 +1697,18 @@ def _recent_tickets_block(session, backend) -> str:
     in_window = [
         e
         for e in entries
-        if e.ts > 0 and e.repo == coordinate and 0 <= now - e.ts <= _RECENT_TICKETS_WINDOW_SECONDS
+        if e.ts > 0
+        and e.repo == coordinate
+        and 0 <= now - e.ts <= _RECENT_TICKETS_WINDOW_SECONDS
     ]
     # `entries` is oldest-appended-first (session.py: "newest-last"). At 1-second `ts`
     # resolution, two touches in the same second are a real case (a fast create batch, or the
     # just-created ticket landing in the same second as a seeded one) — a plain
     # `sorted(..., reverse=True)` is stable and would keep ties in oldest-appended-first order,
     # silently violating "newest first". Break ties by original (append) position instead.
-    by_recency = sorted(enumerate(in_window), key=lambda pair: (pair[1].ts, pair[0]), reverse=True)
+    by_recency = sorted(
+        enumerate(in_window), key=lambda pair: (pair[1].ts, pair[0]), reverse=True
+    )
     recent = [entry for _, entry in by_recency][:_RECENT_TICKETS_LIMIT]
     if not recent:
         return ""
@@ -1394,11 +1732,35 @@ def _print_recent_tickets_after_create(session, backend) -> None:
         print(block)
 
 
+def _safe_verified_coordinate(cfg, backend, ticket: Ticket) -> str:
+    """``verified_ticket_coordinate(cfg, backend, ticket)``, degrading to the NAIVE
+    ``_safe_backend_coordinate(backend)`` — not `""` — on any failure (review finding: the
+    correction machinery this wraps does extra work, `projects_from_config`/`Project`
+    construction from the config registry, that the naive coordinate never needed; if THAT
+    fails, e.g. a malformed `projects:` entry, the caller already has a perfectly good naive
+    coordinate in hand and discarding it in favor of an empty one would make the sidecar entry
+    invisible to every reader — `_recent_tickets_block`/`_session_attention_notice`/
+    `cmd_session` are all explicitly tested to treat `repo=""` as "outside a repo, don't
+    filter/show," which is a much worse outcome than "recorded under the possibly-still-wrong
+    pre-correction coordinate," the exact behavior before this fix existed). This sidecar field
+    is a best-effort scoping aid, not a security boundary, and every call site here runs AFTER
+    the real mutation already succeeded."""
+    from .backends import verified_ticket_coordinate
+
+    try:
+        return verified_ticket_coordinate(cfg, backend, ticket)
+    except Exception:
+        return _safe_backend_coordinate(backend)
+
+
 def _record_session_touch(cfg, backend, ticket: Ticket) -> None:
     """Refresh this session's sidecar timestamp for a ticket mutation.
 
-    ``backend`` scopes the sidecar entry to this ticket's own repo coordinate (task-cli#83) —
-    the caller already has one resolved for the mutation itself, so this adds no extra work.
+    Scopes the sidecar entry to this ticket's ACTUAL repo coordinate (task-cli#83), not just
+    whichever backend config happened to resolve/fetch it — outside a repo, a Linear id can be
+    routed to a same-team project's config that isn't the ticket's real project (review finding);
+    `_safe_verified_coordinate` corrects for that using the ticket's own reported project when
+    available, falling back to the naive backend coordinate otherwise.
     """
     if not ticket.id:
         return
@@ -1409,10 +1771,17 @@ def _record_session_touch(cfg, backend, ticket: Ticket) -> None:
         return
     from .session import record
 
-    record(session.id, ticket.id, ticket.title, repo=_safe_backend_coordinate(backend))
+    record(
+        session.id,
+        ticket.id,
+        ticket.title,
+        repo=_safe_verified_coordinate(cfg, backend, ticket),
+    )
 
 
-def _print_session_attention_after_mutation(args: argparse.Namespace, cfg, backend, *, current_id: str | None = None) -> None:
+def _print_session_attention_after_mutation(
+    args: argparse.Namespace, cfg, backend, *, current_id: str | None = None
+) -> None:
     """Best-effort human warning after commands that can switch task context."""
     if args.json:
         return
@@ -1423,7 +1792,9 @@ def _print_session_attention_after_mutation(args: argparse.Namespace, cfg, backe
         tickets = backend.session_tickets(session.label, limit=_LIMIT_INTERACTIVE)
         if current_id is not None:
             tickets = [ticket for ticket in tickets if ticket.id != current_id]
-        notice = _session_attention_notice(session, tickets, backend, priority_change=True)
+        notice = _session_attention_notice(
+            session, tickets, backend, cfg, priority_change=True
+        )
     except Exception as exc:
         from .logging import log_event
 
@@ -1466,7 +1837,9 @@ def _scope_to_current_user(backend, tickets: list) -> list:
     return [t for t in tickets if t.reporter and t.reporter == me]
 
 
-def _global_stale_notice_block(args: argparse.Namespace, backend, coordinate: str) -> str:
+def _global_stale_notice_block(
+    args: argparse.Namespace, backend, coordinate: str
+) -> str:
     """Rate-limited nudge: ANY of the user's own active tickets stale >48h, not just this
     session's (issue #59 — `_session_attention_notice` above only ever sees session-touched
     tickets). Fail-soft end to end: a backend hiccup or a malformed cache file here must never
@@ -1517,7 +1890,11 @@ def _global_stale_notice_block(args: argparse.Namespace, backend, coordinate: st
     if not stale:
         return ""
     threshold = _format_duration_hours(stale_notice.stale_after_seconds())
-    lines = [_warn(f"warning: {len(stale)} open ticket(s) look stale (no backend update in {threshold}+):")]
+    lines = [
+        _warn(
+            f"warning: {len(stale)} open ticket(s) look stale (no backend update in {threshold}+):"
+        )
+    ]
     lines.extend(_dim(f"    - {_stale_line(ticket, age)}") for ticket, age in stale[:3])
     return "\n".join(lines)
 
@@ -1562,7 +1939,9 @@ def _list_session_scoped(args, cfg, state, current) -> int:
         # Whether to fall back is decided on the UNFILTERED session result: a session that HAS
         # tickets but none match --state/--label is a legitimately-empty FILTERED view, NOT a
         # reason to spill every other session's tickets. Only a truly empty session falls back.
-        session_tickets = [] if no_session else backend.session_tickets(session.label, limit=limit)
+        session_tickets = (
+            [] if no_session else backend.session_tickets(session.label, limit=limit)
+        )
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
 
@@ -1576,7 +1955,9 @@ def _list_session_scoped(args, cfg, state, current) -> int:
         if args.json:
             _print_tickets_json(tickets)
             return 0
-        notice = _dim("showing all project tasks (`task list` defaults to tasks created in the agent session)")
+        notice = _dim(
+            "showing all project tasks (`task list` defaults to tasks created in the agent session)"
+        )
         # deliberately NOT reusing `tickets` here — it may be --state/--label filtered, and the
         # global check needs its OWN unfiltered view (see _global_stale_notice_block's docstring).
         stale_notice = _global_stale_notice_block(args, backend, current[0])
@@ -1595,12 +1976,15 @@ def _list_session_scoped(args, cfg, state, current) -> int:
     # session_tickets is scoped to THIS session, so the global check needs its own (rate-limited,
     # best-effort) fetch of every project ticket — see _global_stale_notice_block.
     stale_notice = _global_stale_notice_block(args, backend, current[0])
-    _emit_list(args, [
-        _session_attention_notice(session, session_tickets, backend),
-        stale_notice,
-        _dim(f"session {session.id} ({session.source}):"),
-        _format_tickets(tickets),
-    ])
+    _emit_list(
+        args,
+        [
+            _session_attention_notice(session, session_tickets, backend, cfg),
+            stale_notice,
+            _dim(f"session {session.id} ({session.source}):"),
+            _format_tickets(tickets),
+        ],
+    )
     return 0
 
 
@@ -1618,7 +2002,11 @@ def _list_grouped(args, cfg, state, *, outside_repo: bool) -> int:
         )
 
     groups = _aggregate_projects(
-        cfg, projects, labels=args.label or None, state=state, limit=_effective_limit(args),
+        cfg,
+        projects,
+        labels=args.label or None,
+        state=state,
+        limit=_effective_limit(args),
         current_coordinate=current_coordinate,
     )
 
@@ -1629,7 +2017,9 @@ def _list_grouped(args, cfg, state, *, outside_repo: bool) -> int:
     # The session-vs-all line: an implicit aggregate (outside a repo) must explain itself; an
     # explicit `--all` was asked for, so no apology is needed there.
     notice = (
-        _dim("showing all project tasks (`task list` defaults to tasks created in the agent session)")
+        _dim(
+            "showing all project tasks (`task list` defaults to tasks created in the agent session)"
+        )
         if outside_repo
         else ""
     )
@@ -1648,7 +2038,9 @@ class _ProjectGroup:
     current: bool = False  # True for the repo the user is currently inside
 
 
-def _aggregate_projects(base_cfg, projects, *, labels, state, limit, current_coordinate=None) -> list:
+def _aggregate_projects(
+    base_cfg, projects, *, labels, state, limit, current_coordinate=None
+) -> list:
     """Query each project's backend; a failing one becomes a degraded group, not a hard stop.
 
     Each project's config is the base config with the project's overlay deep-merged in, so the
@@ -1657,7 +2049,10 @@ def _aggregate_projects(base_cfg, projects, *, labels, state, limit, current_coo
     cross-repo view (the "never aborts the whole aggregation" rule).
     """
     return _query_projects(
-        base_cfg, projects, lambda b: b.list(labels=labels, state=state, limit=limit), current_coordinate
+        base_cfg,
+        projects,
+        lambda b: b.list(labels=labels, state=state, limit=limit),
+        current_coordinate,
     )
 
 
@@ -1678,9 +2073,21 @@ def _query_projects(base_cfg, projects, call, current_coordinate=None) -> list:
         try:
             backend = get_backend(_config_for_overlay(base_cfg, proj.overlay))
             tickets = call(backend)
-            groups.append(_ProjectGroup(name=proj.name, backend=proj.backend, tickets=tickets, current=cur))
+            groups.append(
+                _ProjectGroup(
+                    name=proj.name, backend=proj.backend, tickets=tickets, current=cur
+                )
+            )
         except (BackendError, CredentialError) as exc:
-            groups.append(_ProjectGroup(name=proj.name, backend=proj.backend, tickets=[], error=str(exc), current=cur))
+            groups.append(
+                _ProjectGroup(
+                    name=proj.name,
+                    backend=proj.backend,
+                    tickets=[],
+                    error=str(exc),
+                    current=cur,
+                )
+            )
     return groups
 
 
@@ -1710,7 +2117,9 @@ def _format_groups(groups) -> str:
         else:
             lines.extend("  " + _ticket_line(t) for t in g.tickets)
         sections.append("\n".join(lines))
-    return "\n\n".join(sections)  # blank line BETWEEN project groups (was the per-iter print())
+    return "\n\n".join(
+        sections
+    )  # blank line BETWEEN project groups (was the per-iter print())
 
 
 def _print_groups_json(groups) -> None:
@@ -1755,7 +2164,11 @@ def _gantt_tickets(args, cfg, state) -> list[Ticket]:
                 "  fix: add a `projects:` entry to ~/.config/task-cli/config.yaml, or run inside a repo."
             )
         groups = _aggregate_projects(
-            cfg, projects, labels=args.label or None, state=state, limit=limit,
+            cfg,
+            projects,
+            labels=args.label or None,
+            state=state,
+            limit=limit,
             current_coordinate=current_coordinate,
         )
         return [t for g in groups for t in g.tickets]
@@ -1766,7 +2179,9 @@ def _gantt_tickets(args, cfg, state) -> list[Ticket]:
     no_session = session.source == "none"
     want_labels = set(args.label or [])
     try:
-        session_tickets = [] if no_session else backend.session_tickets(session.label, limit=limit)
+        session_tickets = (
+            [] if no_session else backend.session_tickets(session.label, limit=limit)
+        )
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
 
@@ -1894,7 +2309,9 @@ def _sanitize_attachment_basename(title: str) -> str:
     return stripped
 
 
-def _unique_attachment_filenames(attachments, existing: frozenset = frozenset()) -> dict:
+def _unique_attachment_filenames(
+    attachments, existing: frozenset = frozenset()
+) -> dict:
     """``{id(attachment): filename}`` with a ``-2``/``-3``/… suffix on any REPEATED title
     (review finding: two attachments can share a title — e.g. two screenshots both named
     ``screenshot.png`` — and writing both to the same bare filename silently drops the first).
@@ -1947,7 +2364,11 @@ def _unique_attachment_filenames(attachments, existing: frozenset = frozenset())
         # review finding: `a.id` is ALSO tracker-controlled data (the same trust boundary as
         # `a.title`) — falling back to it raw would bypass the sanitizer entirely and reopen the
         # exact traversal hole it exists to close.
-        base = _sanitize_attachment_basename(a.title) or _sanitize_attachment_basename(a.id) or "attachment"
+        base = (
+            _sanitize_attachment_basename(a.title)
+            or _sanitize_attachment_basename(a.id)
+            or "attachment"
+        )
         stem, ext = os.path.splitext(base)
         candidate = base
         n = 1
@@ -2010,7 +2431,9 @@ def _save_attachments(backend, ticket, dest_dir: str) -> list[str]:
     """
     fetch = getattr(backend, "fetch_attachment_bytes", None)
     if fetch is None:
-        return [f"  (backend {backend.name!r} has no native attachment fetch — nothing to save)"]
+        return [
+            f"  (backend {backend.name!r} has no native attachment fetch — nothing to save)"
+        ]
     is_native = getattr(backend, "is_native_attachment_url", None)
 
     import os
@@ -2029,7 +2452,9 @@ def _save_attachments(backend, ticket, dest_dir: str) -> list[str]:
     to_fetch = []
     for a in ticket.attachments:
         if is_native is None or not is_native(a.url):
-            lines.append(f"  (skipped, external/unconfirmed link — open directly) {a.title}: {a.url}")
+            lines.append(
+                f"  (skipped, external/unconfirmed link — open directly) {a.title}: {a.url}"
+            )
         else:
             to_fetch.append(a)
     # review finding: naming ALL attachments (including skipped ones) let a skipped external
@@ -2097,7 +2522,11 @@ def cmd_read(args: argparse.Namespace) -> int:
         for a in ticket.attachments:
             print(_dim(f"    - {a.title}: {a.url}"))
         if ticket.attachments_truncated:
-            print(_dim("    (more attachments exist beyond the 250-item cap — not all are listed)"))
+            print(
+                _dim(
+                    "    (more attachments exist beyond the 250-item cap — not all are listed)"
+                )
+            )
     if saved_lines:
         print(_dim("  saved attachments:"))
         for line in saved_lines:
@@ -2125,7 +2554,12 @@ def cmd_find(args: argparse.Namespace) -> int:
                 "  fix: add a `projects:` entry to ~/.config/task-cli/config.yaml, or run inside a repo."
             )
         groups = _search_projects(
-            cfg, projects, args.query, state=state, limit=limit, current_coordinate=current_coordinate
+            cfg,
+            projects,
+            args.query,
+            state=state,
+            limit=limit,
+            current_coordinate=current_coordinate,
         )
         if args.json:
             _print_groups_json(groups)
@@ -2145,10 +2579,15 @@ def cmd_find(args: argparse.Namespace) -> int:
     return 0
 
 
-def _search_projects(base_cfg, projects, query, *, state, limit, current_coordinate=None) -> list:
+def _search_projects(
+    base_cfg, projects, query, *, state, limit, current_coordinate=None
+) -> list:
     """Cross-project search — the search analogue of :func:`_aggregate_projects`."""
     return _query_projects(
-        base_cfg, projects, lambda b: b.search(query, state=state, limit=limit), current_coordinate
+        base_cfg,
+        projects,
+        lambda b: b.search(query, state=state, limit=limit),
+        current_coordinate,
     )
 
 
@@ -2182,7 +2621,9 @@ def cmd_change(args: argparse.Namespace) -> int:
     # --label), an edit naming no tg#<id>, or a msgref-quote-waived edit never touches the
     # (potentially large) history log.
     history = (
-        _load_msgref_history_if_needed(args.what or "", args.why or "", args.impact or "", args.if_not_done or "")
+        _load_msgref_history_if_needed(
+            args.what or "", args.why or "", args.impact or "", args.if_not_done or ""
+        )
         if expand
         else None
     )
@@ -2193,9 +2634,13 @@ def cmd_change(args: argparse.Namespace) -> int:
     if args.why:
         ticket.why = _expand_msgrefs(args.why, history) if expand else args.why
     if args.impact:
-        ticket.user_impact = _expand_msgrefs(args.impact, history) if expand else args.impact
+        ticket.user_impact = (
+            _expand_msgrefs(args.impact, history) if expand else args.impact
+        )
     if args.if_not_done:
-        ticket.cost_of_inaction = _expand_msgrefs(args.if_not_done, history) if expand else args.if_not_done
+        ticket.cost_of_inaction = (
+            _expand_msgrefs(args.if_not_done, history) if expand else args.if_not_done
+        )
     # Acceptance criteria are NEVER msgref-expanded (see the cmd_create comment on why: the
     # single-line checkbox format can't carry a multi-line quote), so this dedup stays plain
     # equality against the stored (always-raw) text — unchanged from before this feature.
@@ -2207,7 +2652,9 @@ def cmd_change(args: argparse.Namespace) -> int:
     if getattr(args, "due", None) is not None:
         # --due passed (incl. --due "" to clear): validate then set. Not passed → leave as-is.
         ticket.due = _normalize_due(args.due)
-    new_shots = [Screenshot(ref=path, kind="implementation") for path in args.screenshot]
+    new_shots = [
+        Screenshot(ref=path, kind="implementation") for path in args.screenshot
+    ]
     ticket.screenshots.extend(new_shots)
     for label in args.label:
         if label not in ticket.labels:
@@ -2221,10 +2668,21 @@ def cmd_change(args: argparse.Namespace) -> int:
     # body, not only the new bytes); a pure metadata edit (--due/--label) touches no scanned
     # field and is exempt entirely (see _enforce_edit_or_die).
     touched_text = any(
-        [args.title, args.what, args.why, args.impact, args.if_not_done, args.acceptance]
+        [
+            args.title,
+            args.what,
+            args.why,
+            args.impact,
+            args.if_not_done,
+            args.acceptance,
+        ]
     )
     _enforce_edit_or_die(
-        ticket, cfg, check_links=touched_text, check_impact=bool(args.impact), check_title=bool(args.title)
+        ticket,
+        cfg,
+        check_links=touched_text,
+        check_impact=bool(args.impact),
+        check_title=bool(args.title),
     )
 
     if args.done:
@@ -2244,7 +2702,9 @@ def cmd_change(args: argparse.Namespace) -> int:
     from .logging import log_event
 
     _record_session_touch(cfg, backend, updated)
-    log_event("ticket.changed", ticket_id=updated.id, backend=cfg.backend, closed=args.done)
+    log_event(
+        "ticket.changed", ticket_id=updated.id, backend=cfg.backend, closed=args.done
+    )
     _notify_mutation(cfg, updated, "done" if args.done else "changed")
     if args.json:
         import json
@@ -2330,7 +2790,9 @@ def cmd_done(args: argparse.Namespace) -> int:
 
     # legality first: refuse re-closing a cancelled/already-done ticket before any mutation (#10).
     validate_transition(ticket.state, State.DONE, force=args.force)
-    new_shots = [Screenshot(ref=path, kind="implementation") for path in args.screenshot]
+    new_shots = [
+        Screenshot(ref=path, kind="implementation") for path in args.screenshot
+    ]
     ticket.screenshots.extend(new_shots)
     ticket.skips.update(_collect_skips(args))
     # enforce BEFORE mutating state (the DONE phase is passed explicitly, not read off the
@@ -2391,17 +2853,27 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     try:
         updated = backend.update(ticket)
-        _attach_screenshots(backend, updated.id, [Screenshot(ref=p, kind="implementation") for p in proofs])
+        _attach_screenshots(
+            backend,
+            updated.id,
+            [Screenshot(ref=p, kind="implementation") for p in proofs],
+        )
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
 
     from .logging import log_event
 
     _record_session_touch(cfg, backend, updated)
-    log_event("criterion.checked", ticket_id=updated.id, forced=bool(force_reason and not proofs))
+    log_event(
+        "criterion.checked",
+        ticket_id=updated.id,
+        forced=bool(force_reason and not proofs),
+    )
     proof_note = f"proof {proofs[0]}" if proofs else f"forced ({force_reason})"
     remaining = len(updated.unchecked_criteria())
-    print(_ok(f"checked {crit.text!r} on {updated.id}  ({proof_note}; {remaining} left)"))
+    print(
+        _ok(f"checked {crit.text!r} on {updated.id}  ({proof_note}; {remaining} left)")
+    )
     return 0
 
 
@@ -2409,7 +2881,9 @@ def _select_criterion(ticket: Ticket, selector: str) -> Criterion:
     """Resolve a criterion by 1-based index or by a unique text substring; raise on miss/ambiguity."""
     crits = ticket.acceptance
     if not crits:
-        raise _UserError(f"ticket {ticket.id or '(unknown)'} has no acceptance criteria to check")
+        raise _UserError(
+            f"ticket {ticket.id or '(unknown)'} has no acceptance criteria to check"
+        )
     sel = selector.strip()
     if sel.isdigit():
         idx = int(sel)
@@ -2420,8 +2894,12 @@ def _select_criterion(ticket: Ticket, selector: str) -> Criterion:
     if len(matches) == 1:
         return matches[0]
     if not matches:
-        raise _UserError(f"no acceptance criterion matches {selector!r}; use an index (1..{len(crits)})")
-    raise _UserError(f"{len(matches)} criteria match {selector!r}; use an index (1..{len(crits)}) to disambiguate")
+        raise _UserError(
+            f"no acceptance criterion matches {selector!r}; use an index (1..{len(crits)})"
+        )
+    raise _UserError(
+        f"{len(matches)} criteria match {selector!r}; use an index (1..{len(crits)}) to disambiguate"
+    )
 
 
 # ── mark-shipped (the `gh ship` post-merge hook) ────────────────────────────────────
@@ -2467,7 +2945,9 @@ def _commit_url_from_pr(pr_url: str, commit_sha: str) -> str | None:
     return f"https://github.com/{owner}/{repo}/commit/{commit_sha}"
 
 
-def _shipped_comment(ticket_id: str, pr_url: str, commit_sha: str, *, already_closed: bool) -> str:
+def _shipped_comment(
+    ticket_id: str, pr_url: str, commit_sha: str, *, already_closed: bool
+) -> str:
     """The durable backend comment recorded on a shipped ticket — the point of it is to make
     the merge visible on the tracker itself (not just in task-cli's own state). For a ticket
     that's already Done, the "this does NOT close" framing would be actively misleading (it's
@@ -2494,21 +2974,50 @@ def _acceptance_instructions(ticket: Ticket) -> list[str]:
     needed" advice about a ticket that is, by definition, already accepted would be nonsense.
     """
     if ticket.state is State.DONE:
-        return [_dim(f"{ticket.id} is already Done — this merge was recorded for reference only.")]
+        return [
+            _dim(
+                f"{ticket.id} is already Done — this merge was recorded for reference only."
+            )
+        ]
     unchecked = ticket.unchecked_criteria()
     if not unchecked:
-        return [_dim(f"all acceptance criteria are already checked — if the other close gates pass, run `task done {ticket.id}`.")]
-    lines = [_warn(f"acceptance needed before this can be marked Done ({len(unchecked)} unchecked):")]
-    lines.extend(_dim(f"  [{i}] {c.text}") for i, c in enumerate(ticket.acceptance, start=1) if not c.checked)
+        return [
+            _dim(
+                f"all acceptance criteria are already checked — if the other close gates pass, run `task done {ticket.id}`."
+            )
+        ]
+    lines = [
+        _warn(
+            f"acceptance needed before this can be marked Done ({len(unchecked)} unchecked):"
+        )
+    ]
+    lines.extend(
+        _dim(f"  [{i}] {c.text}")
+        for i, c in enumerate(ticket.acceptance, start=1)
+        if not c.checked
+    )
     if ticket.is_ui:
-        lines.append(_dim("  this ticket is UI-labeled — each criterion needs a visual proof (screenshot/recording), not just a passing test."))
-    lines.append(_dim(f'  next: task check {ticket.id} <N> --proof <path>   (or --force "<reason>" if a proof is genuinely impossible)'))
+        lines.append(
+            _dim(
+                "  this ticket is UI-labeled — each criterion needs a visual proof (screenshot/recording), not just a passing test."
+            )
+        )
+    lines.append(
+        _dim(
+            f'  next: task check {ticket.id} <N> --proof <path>   (or --force "<reason>" if a proof is genuinely impossible)'
+        )
+    )
     lines.append(_dim(f"  then: task done {ticket.id}"))
     return lines
 
 
 def _record_shipped_pr(
-    backend, ticket: Ticket, pr_url: str, commit_sha: str, commit_url: str | None, existing_pr: str | None
+    backend,
+    ticket: Ticket,
+    pr_url: str,
+    commit_sha: str,
+    commit_url: str | None,
+    existing_pr: str | None,
 ) -> tuple[Ticket, bool]:
     """Post the shipped comment, persist the PR link (+ derived commit link), and move
     TODO/IN_PROGRESS to IN_REVIEW. Returns ``(updated_ticket, moved_to_review)``.
@@ -2547,7 +3056,12 @@ def _record_shipped_pr(
 
     already_closed = ticket.state is State.DONE
     try:
-        backend.comment(ticket.id, _shipped_comment(ticket.id, pr_url, commit_sha, already_closed=already_closed))
+        backend.comment(
+            ticket.id,
+            _shipped_comment(
+                ticket.id, pr_url, commit_sha, already_closed=already_closed
+            ),
+        )
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
 
@@ -2562,7 +3076,11 @@ def _record_shipped_pr(
         # commit" link that now points at the OLD PR's commit while "PR" points at the new one
         # (review finding: a silently mismatched pair is worse than no link at all).
         new_links.pop("Merge commit", None)
-    to_persist = replace(ticket, links=new_links, state=State.IN_REVIEW if moved_to_review else ticket.state)
+    to_persist = replace(
+        ticket,
+        links=new_links,
+        state=State.IN_REVIEW if moved_to_review else ticket.state,
+    )
     try:
         updated = backend.update(to_persist)
     except BackendError as exc:
@@ -2599,7 +3117,9 @@ def _normalize_pr_url(pr_url: str) -> str:
         if m:
             owner, repo, number = m.groups()
             return f"{scheme}://github.com/{owner}/{repo}/pull/{number}"
-    normalized = parts._replace(scheme=scheme, netloc=netloc, path=parts.path.rstrip("/") or "/")
+    normalized = parts._replace(
+        scheme=scheme, netloc=netloc, path=parts.path.rstrip("/") or "/"
+    )
     return urlunsplit(normalized)
 
 
@@ -2631,7 +3151,9 @@ def _parse_mark_shipped_flags(args: argparse.Namespace) -> tuple[str, str]:
     pr_url = _normalize_pr_url(pr_url)
     commit_sha = (args.commit or "").strip()
     if commit_sha and not _COMMIT_SHA_RE.match(commit_sha):
-        raise _UserError(f"--commit must be a 7-40 character hex commit SHA (got {args.commit!r})")
+        raise _UserError(
+            f"--commit must be a 7-40 character hex commit SHA (got {args.commit!r})"
+        )
     return pr_url, commit_sha.lower()
 
 
@@ -2644,13 +3166,23 @@ def _print_mark_shipped_cancelled(ticket: Ticket, as_json: bool) -> None:
 
         print(
             json.dumps(
-                {"id": ticket.id, "url": ticket.url, "state": ticket.state.value, "recorded": False, "reason": "cancelled"},
+                {
+                    "id": ticket.id,
+                    "url": ticket.url,
+                    "state": ticket.state.value,
+                    "recorded": False,
+                    "reason": "cancelled",
+                },
                 ensure_ascii=False,
                 indent=2,
             )
         )
         return
-    print(_warn(f"{ticket.id} is cancelled — not recording (a cancelled ticket is a deliberate dead end)."))
+    print(
+        _warn(
+            f"{ticket.id} is cancelled — not recording (a cancelled ticket is a deliberate dead end)."
+        )
+    )
 
 
 def _print_mark_shipped_result(
@@ -2679,7 +3211,9 @@ def _print_mark_shipped_result(
                     "moved_to_review": moved_to_review,
                     "replaced_pr": replaced_pr,
                     "commit_url": updated.links.get("Merge commit"),
-                    "unchecked_criteria": [c.text for c in updated.unchecked_criteria()],
+                    "unchecked_criteria": [
+                        c.text for c in updated.unchecked_criteria()
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -2768,17 +3302,30 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     if already_recorded:
         updated, moved_to_review = ticket, False
     else:
-        updated, moved_to_review = _record_shipped_pr(backend, ticket, pr_url, commit_sha, commit_url, existing_pr)
+        updated, moved_to_review = _record_shipped_pr(
+            backend, ticket, pr_url, commit_sha, commit_url, existing_pr
+        )
         _record_session_touch(cfg, backend, updated)
         from .logging import log_event
 
-        log_event("ticket.shipped", ticket_id=updated.id, pr=pr_url, commit=commit_sha, moved_to_review=moved_to_review)
+        log_event(
+            "ticket.shipped",
+            ticket_id=updated.id,
+            pr=pr_url,
+            commit=commit_sha,
+            moved_to_review=moved_to_review,
+        )
         _notify_mutation(cfg, updated, "shipped")
 
     replaced_pr = existing_pr if (existing_pr and existing_pr != pr_url) else None
     _print_mark_shipped_result(
-        updated, pr_url, already_recorded=already_recorded, moved_to_review=moved_to_review,
-        replaced_pr=replaced_pr, as_json=args.json, instructions=_acceptance_instructions(updated),
+        updated,
+        pr_url,
+        already_recorded=already_recorded,
+        moved_to_review=moved_to_review,
+        replaced_pr=replaced_pr,
+        as_json=args.json,
+        instructions=_acceptance_instructions(updated),
     )
     return 0
 
@@ -2787,8 +3334,14 @@ def cmd_classify(args: argparse.Namespace) -> int:
     cfg = _load(args)
     from .classify import Verdict, build_prompt, parse_verdict, resolve_chain
 
-    bias = Verdict(cfg.classify_bias) if cfg.classify_bias in ("change", "justAsk") else Verdict.CHANGE
-    resolved = resolve_chain(cfg.classify_fallbacks or None, capability=cfg.classify_capability or None)
+    bias = (
+        Verdict(cfg.classify_bias)
+        if cfg.classify_bias in ("change", "justAsk")
+        else Verdict.CHANGE
+    )
+    resolved = resolve_chain(
+        cfg.classify_fallbacks or None, capability=cfg.classify_capability or None
+    )
     if resolved is None:
         # no provider reachable → bias-decide, still observable
         verdict = bias
@@ -2799,7 +3352,11 @@ def cmd_classify(args: argparse.Namespace) -> int:
 
     from .logging import log_event
 
-    log_event("classify", verdict=verdict.value, model=(resolved.model_arg if resolved else "none"))
+    log_event(
+        "classify",
+        verdict=verdict.value,
+        model=(resolved.model_arg if resolved else "none"),
+    )
 
     if args.json:
         import json
@@ -2851,7 +3408,9 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
         # path already refuses this (`if not title: raise _UserError(...)`); this path must
         # refuse the same way rather than silently create a titleless ticket (task-cli#45
         # review finding: the two paths must not diverge on this either).
-        raise _UserError("cannot auto-create from this message — no title could be derived from it")
+        raise _UserError(
+            "cannot auto-create from this message — no title could be derived from it"
+        )
     ticket = Ticket(
         title=title,
         what=what_raw,
@@ -2859,7 +3418,15 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
         user_impact="(needs triage)",
         cost_of_inaction="(needs triage)",
         acceptance=[Criterion(text="triage this request and fill in the criteria")],
-        labels=list(dict.fromkeys([*cfg.section("github").get("default_labels", []), session.label, "needs-triage"])),
+        labels=list(
+            dict.fromkeys(
+                [
+                    *cfg.section("github").get("default_labels", []),
+                    session.label,
+                    "needs-triage",
+                ]
+            )
+        ),
         # See the matching NOTE in cmd_create: the session id belongs in `labels` only, never
         # duplicated into `links` (which is for real URL references like a PR link, not session
         # metadata — the Links renderer does not enforce URLs, so junk there slips through).
@@ -2872,7 +3439,9 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
         # no legitimate exception (task-cli#45 review finding: this is exactly the scenario the
         # non-skippable gate exists to prevent, and it must never be bypassed here either).
         names = "; ".join(f"{v.gate}: {v.message}" for v in blocking)
-        raise _UserError(f"cannot auto-create from this message — non-skippable gate(s) failed: {names}")
+        raise _UserError(
+            f"cannot auto-create from this message — non-skippable gate(s) failed: {names}"
+        )
     # Expand tg#<id> mentions in `what` the SAME way cmd_create's --from-message path does — this
     # classify path is ALSO a tg-cli hook entry point (it IS the `task classify "<msg>" --create`
     # call an agent makes from an inbound message), so it must not be the one path that silently
@@ -2880,14 +3449,18 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
     # Honours the same master switch as the other paths: no expansion (nor history read) when
     # `enforce.msgref_quote: false` or the reference is waived (review finding).
     if _msgref_expand_enabled(ticket.skips, cfg):
-        ticket.what = _expand_msgrefs(ticket.what, _load_msgref_history_if_needed(what_raw))
+        ticket.what = _expand_msgrefs(
+            ticket.what, _load_msgref_history_if_needed(what_raw)
+        )
 
     created, ambiguous_exit = _create_ticket_or_ambiguous(backend, ticket)
     if ambiguous_exit is not None:
         return ambiguous_exit
     from .session import record
 
-    record(session.id, created.id, created.title, repo=_safe_backend_coordinate(backend))
+    record(
+        session.id, created.id, created.title, repo=_safe_backend_coordinate(backend)
+    )
     # classify --create is the tg-cli inbound hook path; unlike cmd_create, it must not append
     # a session-attention notice because the hook consumes stdout programmatically.
     print(_ok(f"created {created.id} from message  {created.url}"))
@@ -2912,7 +3485,9 @@ def _auto_skip_failing_gates(ticket: Ticket, cfg) -> list:
         if v.gate in NON_SKIPPABLE_GATES:
             blocking.append(v)
         else:
-            ticket.skips.setdefault(v.gate, "auto-created from inbound message; pending triage")
+            ticket.skips.setdefault(
+                v.gate, "auto-created from inbound message; pending triage"
+            )
     return blocking
 
 
@@ -3040,7 +3615,16 @@ def cmd_session(args: argparse.Namespace) -> int:
     if args.json:
         import json
 
-        print(json.dumps({"id": session.id, "source": session.source, "label": session.label, "tickets": ids}))
+        print(
+            json.dumps(
+                {
+                    "id": session.id,
+                    "source": session.source,
+                    "label": session.label,
+                    "tickets": ids,
+                }
+            )
+        )
         return 0
     print(_bold(f"session: {session.id}") + _dim(f"  (source: {session.source})"))
     print(_dim(f"  label: {session.label}"))
@@ -3105,13 +3689,21 @@ def _daemon_child_flags(args: argparse.Namespace) -> list[str]:
 def _daemon_start(daemon, coordinate: str, cfg, args: argparse.Namespace) -> int:
     dcfg = daemon.DaemonConfig.from_config(cfg)
     if not dcfg.enabled:
-        print(_warn("daemon is disabled in config (daemon.enabled: false) — not starting"))
+        print(
+            _warn("daemon is disabled in config (daemon.enabled: false) — not starting")
+        )
         return 0
-    outcome, pid = daemon.start(coordinate, cwd=str(cfg.repo_root), child_flags=_daemon_child_flags(args))
+    outcome, pid = daemon.start(
+        coordinate, cwd=str(cfg.repo_root), child_flags=_daemon_child_flags(args)
+    )
     if outcome == "already-running":
         print(_dim(f"daemon already running (pid {pid}) for {coordinate}"))
     else:
-        print(_ok(f"daemon started (pid {pid}) for {coordinate}  interval={dcfg.interval_s}s"))
+        print(
+            _ok(
+                f"daemon started (pid {pid}) for {coordinate}  interval={dcfg.interval_s}s"
+            )
+        )
     return 0
 
 
@@ -3124,7 +3716,11 @@ def _daemon_stop(daemon, coordinate: str) -> int:
     elif outcome == "not-ours":
         # the recorded pid is alive but is NOT our daemon (a crash + OS pid-reuse) — we refused to
         # signal it; the stale pid-file is cleared. Surface this so it isn't mistaken for a clean stop.
-        print(_warn(f"pid {pid} is alive but is not the task daemon (recycled pid); not signalled, pid-file cleared"))
+        print(
+            _warn(
+                f"pid {pid} is alive but is not the task daemon (recycled pid); not signalled, pid-file cleared"
+            )
+        )
     else:
         print(_dim("no running daemon"))
     return 0
@@ -3155,12 +3751,18 @@ def _daemon_status(daemon, coordinate: str, cfg, args: argparse.Namespace) -> in
         return 0
     line = {
         "running": _ok(f"running (pid {pid})"),
-        "not-ours": _warn(f"recycled pid-file (pid {pid} is alive but is a foreign, reused process)"),
+        "not-ours": _warn(
+            f"recycled pid-file (pid {pid} is alive but is a foreign, reused process)"
+        ),
         "stale": _warn(f"stale pid-file (pid {pid} is gone)"),
         "stopped": _dim("stopped"),
     }.get(status, _warn(f"{status} (pid {pid})"))
     print(f"daemon: {line}  for {coordinate}")
-    print(_dim(f"  interval={dcfg.interval_s}s  due_soon={dcfg.due_soon_days}d  notifier={' '.join(dcfg.notifier)}"))
+    print(
+        _dim(
+            f"  interval={dcfg.interval_s}s  due_soon={dcfg.due_soon_days}d  notifier={' '.join(dcfg.notifier)}"
+        )
+    )
     print(_dim(f"  pidfile={paths.pid}"))
     return 0
 

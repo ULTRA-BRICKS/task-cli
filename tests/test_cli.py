@@ -18,7 +18,9 @@ from .conftest import FakeBackend
 @pytest.fixture(autouse=True)
 def _inject_fake(monkeypatch, fake_backend, isolated_state):
     """Every CLI test gets the in-memory fake backend and an isolated state dir."""
-    monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: fake_backend)
+    monkeypatch.setattr(
+        "tasklib.backends.get_backend", lambda cfg, env=None: fake_backend
+    )
     # force git-branch session detection to a stable id (no ambient tmux/env)
     monkeypatch.setenv("TASK_SESSION", "testsess")
     return fake_backend
@@ -122,8 +124,17 @@ def test_create_complete_ticket_succeeds(capsys, _inject_fake):
 def test_create_refuses_when_gate_unmet(capsys):
     # drop --why → motivation gate fails
     argv = [
-        "create", "--title", "t", "--what", "c", "--impact", "u", "--if-not-done", "p",
-        "--acceptance", "works",
+        "create",
+        "--title",
+        "t",
+        "--what",
+        "c",
+        "--impact",
+        "u",
+        "--if-not-done",
+        "p",
+        "--acceptance",
+        "works",
     ]
     rc = main(argv)
     assert rc == 2
@@ -134,9 +145,21 @@ def test_create_refuses_when_gate_unmet(capsys):
 
 def test_create_escape_hatch_allows_skip(capsys, _inject_fake):
     argv = [
-        "create", "--title", "t", "--what", "c", "--impact", _GOOD_IMPACT, "--if-not-done", "p",
-        "--acceptance", "works", "--acceptance", "also handles the empty input",
-        "--skip-motivation", "spike, no motivation needed",
+        "create",
+        "--title",
+        "t",
+        "--what",
+        "c",
+        "--impact",
+        _GOOD_IMPACT,
+        "--if-not-done",
+        "p",
+        "--acceptance",
+        "works",
+        "--acceptance",
+        "also handles the empty input",
+        "--skip-motivation",
+        "spike, no motivation needed",
     ]
     rc = main(argv)
     assert rc == 0
@@ -147,9 +170,19 @@ def test_create_escape_hatch_allows_skip(capsys, _inject_fake):
 def test_create_from_message_derives_title(capsys, _inject_fake):
     rc = main(
         [
-            "create", "--from-message", "fix the broken header on mobile", "--why", "b",
-            "--impact", _GOOD_IMPACT, "--if-not-done", "p",
-            "--acceptance", "works", "--acceptance", "also covers the empty input",
+            "create",
+            "--from-message",
+            "fix the broken header on mobile",
+            "--why",
+            "b",
+            "--impact",
+            _GOOD_IMPACT,
+            "--if-not-done",
+            "p",
+            "--acceptance",
+            "works",
+            "--acceptance",
+            "also covers the empty input",
         ]
     )
     assert rc == 0
@@ -165,9 +198,19 @@ def test_create_from_message_strips_tg_inbound_wrap_from_title(capsys, _inject_f
     # message that legitimately quotes itself); it must still reach `what` untouched.
     rc = main(
         [
-            "create", "--from-message", "[TG from Alex tg#1234] fix the broken header on mobile",
-            "--why", "b", "--impact", _GOOD_IMPACT, "--if-not-done", "p",
-            "--acceptance", "works", "--acceptance", "also covers the empty input",
+            "create",
+            "--from-message",
+            "[TG from Alex tg#1234] fix the broken header on mobile",
+            "--why",
+            "b",
+            "--impact",
+            _GOOD_IMPACT,
+            "--if-not-done",
+            "p",
+            "--acceptance",
+            "works",
+            "--acceptance",
+            "also covers the empty input",
         ]
     )
     assert rc == 0
@@ -206,14 +249,18 @@ def test_create_puts_session_in_labels_not_links(_inject_fake):
 # ── ambiguous backend failure after create (task-cli bug 1) ─────────────────────────
 
 
-def test_create_ambiguous_backend_error_prints_distinct_message_and_exit_code(capsys, monkeypatch, _inject_fake):
+def test_create_ambiguous_backend_error_prints_distinct_message_and_exit_code(
+    capsys, monkeypatch, _inject_fake
+):
     # a connection drop mid-read AFTER the fake provider "accepted" the create must NOT look
     # like a bare traceback, and must NOT collide with the clean-refusal exit code (2) that
     # _UserError / TransitionError already use — a caller needs to tell the two apart.
     from tasklib.backends import AmbiguousBackendError, EXIT_AMBIGUOUS
 
     def raise_ambiguous(ticket):
-        raise AmbiguousBackendError("github: connection interrupted while reading the response for POST url (status 201 was already returned)")
+        raise AmbiguousBackendError(
+            "github: connection interrupted while reading the response for POST url (status 201 was already returned)"
+        )
 
     monkeypatch.setattr(_inject_fake, "create", raise_ambiguous)
     rc = main(_create_argv())
@@ -267,7 +314,11 @@ def test_create_distinct_title_is_not_flagged_as_duplicate(capsys, _inject_fake)
     main(_create_argv())  # "Add a thing"
     capsys.readouterr()
 
-    rc = main(_create_argv(**{"--title": "Completely unrelated feature request for the sidebar"}))
+    rc = main(
+        _create_argv(
+            **{"--title": "Completely unrelated feature request for the sidebar"}
+        )
+    )
     assert rc == 0
     assert len(_inject_fake.list()) == 2  # a genuinely distinct title is never blocked
 
@@ -282,7 +333,9 @@ def test_create_distinct_title_is_not_flagged_as_duplicate(capsys, _inject_fake)
 # immediately — no sleep, no literal clock mock (none exists elsewhere in this file either).
 
 
-def _append_session_touch(session_id: str, ticket_id: str, title: str, ts: int, repo: str | None = None) -> None:
+def _append_session_touch(
+    session_id: str, ticket_id: str, title: str, ts: int, repo: str | None = None
+) -> None:
     """Append (not overwrite) one raw sidecar line — lets a test seed several entries with
     distinct, explicit timestamps, unlike `_write_session_touch` above which replaces the
     whole file (fine for its single-entry tests, not for these multi-entry ones).
@@ -301,10 +354,14 @@ def _append_session_touch(session_id: str, ticket_id: str, title: str, ts: int, 
     path = sidecar_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"id": ticket_id, "title": title, "ts": ts, "repo": repo}) + "\n")
+        fh.write(
+            json.dumps({"id": ticket_id, "title": title, "ts": ts, "repo": repo}) + "\n"
+        )
 
 
-def test_create_prints_5_most_recent_tickets_including_the_new_one(capsys, _inject_fake):
+def test_create_prints_5_most_recent_tickets_including_the_new_one(
+    capsys, _inject_fake
+):
     import time
 
     now = int(time.time())
@@ -319,7 +376,9 @@ def test_create_prints_5_most_recent_tickets_including_the_new_one(capsys, _inje
     assert "last hour" in out
     for i in (10, 11, 12, 13):
         assert f"#{i}  Old ticket {i}" in out
-    assert "#1  Newest ticket" in out  # the just-created ticket itself, not just any "#1..." prefix
+    assert (
+        "#1  Newest ticket" in out
+    )  # the just-created ticket itself, not just any "#1..." prefix
     # newest-first: the just-created ticket (age ~0) leads, then oldest-to-newest among the
     # seeded ones is age 100 < 200 < 300 < 400, so #10 comes right after #1 and #13 comes last.
     assert (
@@ -331,7 +390,9 @@ def test_create_prints_5_most_recent_tickets_including_the_new_one(capsys, _inje
     )
 
 
-def test_create_recent_tickets_breaks_same_second_ties_by_append_order(capsys, _inject_fake):
+def test_create_recent_tickets_breaks_same_second_ties_by_append_order(
+    capsys, _inject_fake
+):
     # Two tickets touched in the same wall-clock second (a fast agent batch, or a `create`
     # whose own `int(time.time())` lands on the same second as a seeded entry) must not
     # silently fall back to "whichever line happened to be appended first" for the "newest
@@ -377,7 +438,9 @@ def test_create_recent_tickets_caps_at_5_even_with_more_in_window(capsys, _injec
     assert "#1  Newest ticket" in section
 
 
-def test_create_recent_tickets_excludes_other_repo_sharing_the_same_session_id(capsys, _inject_fake):
+def test_create_recent_tickets_excludes_other_repo_sharing_the_same_session_id(
+    capsys, _inject_fake
+):
     # task-cli#83: a session id (git branch / tmux pane / TASK_SESSION) is NOT repo-unique, so
     # two unrelated repos can share one sidecar file (e.g. both on branch "main"). A ticket
     # recorded while working in a DIFFERENT repo under the SAME session id must never appear
@@ -386,9 +449,15 @@ def test_create_recent_tickets_excludes_other_repo_sharing_the_same_session_id(c
 
     now = int(time.time())
     _append_session_touch(
-        "testsess", "#77", "Unrelated repo's ticket", now - 60, repo="github-issues:acme/other-repo"
+        "testsess",
+        "#77",
+        "Unrelated repo's ticket",
+        now - 60,
+        repo="github-issues:acme/other-repo",
     )
-    _append_session_touch("testsess", "#10", "This repo's own ticket", now - 100)  # default: this fake repo
+    _append_session_touch(
+        "testsess", "#10", "This repo's own ticket", now - 100
+    )  # default: this fake repo
 
     rc = main(_create_argv(**{"--title": "Newest ticket"}))
     out = capsys.readouterr().out
@@ -401,14 +470,18 @@ def test_create_recent_tickets_excludes_other_repo_sharing_the_same_session_id(c
     assert "Unrelated repo's ticket" not in section
 
 
-def test_create_recent_tickets_excludes_a_legacy_entry_with_no_repo_recorded(capsys, _inject_fake):
+def test_create_recent_tickets_excludes_a_legacy_entry_with_no_repo_recorded(
+    capsys, _inject_fake
+):
     # Opus review finding: the docstring claims a legacy line (written before task-cli#83's
     # repo field existed) is "never shown, rather than shown on the unverifiable assumption
     # that it belongs here" — pin that claim with a real test, not just prose.
     import time
 
     now = int(time.time())
-    _append_session_touch("testsess", "#55", "Pre-upgrade legacy ticket", now - 60, repo="")
+    _append_session_touch(
+        "testsess", "#55", "Pre-upgrade legacy ticket", now - 60, repo=""
+    )
 
     rc = main(_create_argv(**{"--title": "Newest ticket"}))
     out = capsys.readouterr().out
@@ -419,7 +492,9 @@ def test_create_recent_tickets_excludes_a_legacy_entry_with_no_repo_recorded(cap
     assert "#55" not in section
 
 
-def test_create_recent_tickets_degrades_when_coordinate_unresolvable(capsys, monkeypatch, _inject_fake):
+def test_create_recent_tickets_degrades_when_coordinate_unresolvable(
+    capsys, monkeypatch, _inject_fake
+):
     # review finding (Opus): `_recent_tickets_block` must degrade the SAME way
     # `_session_attention_notice` does when the coordinate can't be resolved (a partial/test
     # backend missing `.name`) — matching a legacy `repo=""` entry, not raising and getting
@@ -427,7 +502,9 @@ def test_create_recent_tickets_degrades_when_coordinate_unresolvable(capsys, mon
     import time
 
     now = int(time.time())
-    _append_session_touch("testsess", "#55", "Pre-upgrade legacy ticket", now - 60, repo="")
+    _append_session_touch(
+        "testsess", "#55", "Pre-upgrade legacy ticket", now - 60, repo=""
+    )
 
     monkeypatch.setattr(
         "tasklib.backends.backend_coordinate",
@@ -452,7 +529,9 @@ def test_create_recent_tickets_excludes_one_older_than_an_hour(capsys, _inject_f
     now = int(time.time())
     _append_session_touch("testsess", "#10", "Within the window", now - 100)
     _append_session_touch("testsess", "#11", "Also within the window", now - 200)
-    _append_session_touch("testsess", "#12", "Two hours old", now - 7200)  # outside the 1h window
+    _append_session_touch(
+        "testsess", "#12", "Two hours old", now - 7200
+    )  # outside the 1h window
 
     rc = main(_create_argv(**{"--title": "Newest ticket"}))
     out = capsys.readouterr().out
@@ -461,12 +540,18 @@ def test_create_recent_tickets_excludes_one_older_than_an_hour(capsys, _inject_f
     section = out.split("Recent tickets", 1)[1]
     assert "#10" in section
     assert "#11" in section
-    assert "#12" not in section  # older than 1h — excluded even though it'd fit in the top 5
+    assert (
+        "#12" not in section
+    )  # older than 1h — excluded even though it'd fit in the top 5
     assert "Two hours old" not in section
 
 
-def test_create_recent_tickets_shows_fewer_than_5_without_erroring(capsys, _inject_fake):
-    rc = main(_create_argv())  # nothing pre-seeded; only the ticket just created falls in the window
+def test_create_recent_tickets_shows_fewer_than_5_without_erroring(
+    capsys, _inject_fake
+):
+    rc = main(
+        _create_argv()
+    )  # nothing pre-seeded; only the ticket just created falls in the window
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -477,7 +562,9 @@ def test_create_recent_tickets_shows_fewer_than_5_without_erroring(capsys, _inje
     assert section.count("#1  Add a thing") == 1
 
 
-def test_create_recent_tickets_absent_when_session_undetected(capsys, tmp_path, monkeypatch, _inject_fake):
+def test_create_recent_tickets_absent_when_session_undetected(
+    capsys, tmp_path, monkeypatch, _inject_fake
+):
     # No `TASK_SESSION` and `-C` points at a non-git dir → session.source == "none". An
     # unresolved session always collapses to the SAME sidecar id ("default"), shared by every
     # repo where detection fails — seed it with another "project"'s ticket to prove this
@@ -487,11 +574,16 @@ def test_create_recent_tickets_absent_when_session_undetected(capsys, tmp_path, 
     monkeypatch.setattr(
         cli,
         "_current_project_overlay",
-        lambda cfg: ("acme/here", {"backend": "github-issues", "github": {"repo": "acme/here"}}),
+        lambda cfg: (
+            "acme/here",
+            {"backend": "github-issues", "github": {"repo": "acme/here"}},
+        ),
     )
     import time
 
-    _append_session_touch("default", "#99", "Unrelated project's ticket", int(time.time()) - 60)
+    _append_session_touch(
+        "default", "#99", "Unrelated project's ticket", int(time.time()) - 60
+    )
 
     rc = main(_create_argv(**{"-C": str(tmp_path)}))
     out = capsys.readouterr().out
@@ -501,13 +593,20 @@ def test_create_recent_tickets_absent_when_session_undetected(capsys, tmp_path, 
     assert "#99" not in out
 
 
-def test_create_recent_tickets_fail_soft_on_sidecar_read_error(capsys, monkeypatch, _inject_fake):
+def test_create_recent_tickets_fail_soft_on_sidecar_read_error(
+    capsys, monkeypatch, _inject_fake
+):
     # A sidecar read blowing up (corrupt file, permissions, whatever) must never turn a
     # successful create into a reported failure — matches `_print_session_attention_after_
     # mutation`'s existing fail-soft contract for the sibling sidecar-backed notice.
     events = []
-    monkeypatch.setattr("tasklib.logging.log_event", lambda *a, **k: events.append((a, k)))
-    monkeypatch.setattr("tasklib.session.read_entries", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(
+        "tasklib.logging.log_event", lambda *a, **k: events.append((a, k))
+    )
+    monkeypatch.setattr(
+        "tasklib.session.read_entries",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")),
+    )
 
     rc = main(_create_argv())
     out = capsys.readouterr().out
@@ -545,7 +644,21 @@ def test_new_is_an_alias_of_create(capsys, _inject_fake):
 
 def test_new_enforces_the_create_gates(capsys, _inject_fake):
     # the alias is not an escape hatch: a missing motivation still refuses.
-    rc = main(["new", "--title", "t", "--what", "c", "--impact", "u", "--if-not-done", "p", "--acceptance", "w"])
+    rc = main(
+        [
+            "new",
+            "--title",
+            "t",
+            "--what",
+            "c",
+            "--impact",
+            "u",
+            "--if-not-done",
+            "p",
+            "--acceptance",
+            "w",
+        ]
+    )
     assert rc == 2
     out = capsys.readouterr().out
     assert "refusing to create" in out and "motivation" in out
@@ -598,7 +711,9 @@ def test_done_skip_links_waives_the_close_phase_links_gate(capsys, _inject_fake)
     # simulate a body that never passed the create gate.
     main(_create_argv())
     _ready_to_close(_inject_fake)
-    _inject_fake.get("#1").what = "regressed by HYP-789"  # a bare ref the create gate never saw
+    _inject_fake.get(
+        "#1"
+    ).what = "regressed by HYP-789"  # a bare ref the create gate never saw
     capsys.readouterr()
     # without the skip, the close is refused on links
     assert main(["done", "#1"]) == 2
@@ -610,20 +725,28 @@ def test_done_skip_links_waives_the_close_phase_links_gate(capsys, _inject_fake)
 
     t = _inject_fake.get("#1")
     assert t.state.value == "done"
-    assert "## Skipped gates" in render(t) and "legacy ref edited in the GitHub UI" in render(t)
+    assert "## Skipped gates" in render(
+        t
+    ) and "legacy ref edited in the GitHub UI" in render(t)
 
 
-def test_done_skip_user_impact_quality_waives_the_close_phase_quality_gate(capsys, _inject_fake):
+def test_done_skip_user_impact_quality_waives_the_close_phase_quality_gate(
+    capsys, _inject_fake
+):
     # symmetric to the links case: the close-command --skip-user-impact-quality flag is wired and
     # waives the now-active close-phase quality gate, so a close-ready ticket whose impact was
     # thinned (e.g. edited in the web UI) closes with a recorded reason instead of being stuck.
     main(_create_argv())
     _ready_to_close(_inject_fake)
-    _inject_fake.get("#1").user_impact = "users"  # a thin impact the create gate never graded
+    _inject_fake.get(
+        "#1"
+    ).user_impact = "users"  # a thin impact the create gate never graded
     capsys.readouterr()
     assert main(["done", "#1"]) == 2
     assert "user-impact-quality" in capsys.readouterr().out
-    rc = main(["done", "#1", "--skip-user-impact-quality", "internal tool, no end user"])
+    rc = main(
+        ["done", "#1", "--skip-user-impact-quality", "internal tool, no end user"]
+    )
     assert rc == 0
     assert _inject_fake.get("#1").state.value == "done"
 
@@ -632,7 +755,10 @@ def test_create_force_links_waiver_persists_through_close(capsys, _inject_fake):
     # the documented migration: a bare reference waived at create with --force is recorded in the
     # body's Skipped gates, so the ticket closes WITHOUT re-specifying the skip — the close-phase
     # links gate honors the persisted waiver via the render/parse round-trip.
-    main(_create_argv() + ["--what", "follow-up to HYP-789", "--force", "legacy ref, pre-link era"])
+    main(
+        _create_argv()
+        + ["--what", "follow-up to HYP-789", "--force", "legacy ref, pre-link era"]
+    )
     _ready_to_close(_inject_fake)
     capsys.readouterr()
     rc = main(["done", "#1"])
@@ -666,7 +792,9 @@ def test_list_defaults_to_session(capsys, _inject_fake):
 
 def test_list_all_shows_everything(capsys, _inject_fake):
     main(_create_argv())
-    _inject_fake.create(type(_inject_fake.list()[0])(title="other", labels=["session:elsewhere"]))
+    _inject_fake.create(
+        type(_inject_fake.list()[0])(title="other", labels=["session:elsewhere"])
+    )
     capsys.readouterr()
     main(["list", "--all"])
     out = capsys.readouterr().out
@@ -679,7 +807,10 @@ def test_list_label_filters_session_view(capsys, _inject_fake):
     # whenever the current session had tickets.
     main(_create_argv())  # #1: session:testsess, no extra label
     # a distinct title so the create-time dedup guard doesn't fold this into a comment on #1
-    main(_create_argv(**{"--title": "Add a second, unrelated thing"}) + ["--label", "urgent"])  # #2
+    main(
+        _create_argv(**{"--title": "Add a second, unrelated thing"})
+        + ["--label", "urgent"]
+    )  # #2
     capsys.readouterr()
     rc = main(["list", "--label", "urgent"])
     out = capsys.readouterr().out
@@ -688,12 +819,18 @@ def test_list_label_filters_session_view(capsys, _inject_fake):
     assert "#1" not in out
 
 
-def test_list_filter_excludes_all_session_tickets_does_not_fall_back(capsys, _inject_fake):
+def test_list_filter_excludes_all_session_tickets_does_not_fall_back(
+    capsys, _inject_fake
+):
     # a session that HAS tickets but none match the filter is a legitimately-empty FILTERED view
     # — it must NOT fall back to all tasks (which would spill other sessions' tickets). Regression
     # for the codex P1 (fallback decided on filtered result leaked cross-session tickets).
     main(_create_argv())  # #1: this session, state=todo
-    _inject_fake.create(type(_inject_fake.list()[0])(title="other-session", labels=["session:elsewhere"]))
+    _inject_fake.create(
+        type(_inject_fake.list()[0])(
+            title="other-session", labels=["session:elsewhere"]
+        )
+    )
     capsys.readouterr()
     rc = main(["list", "--label", "nonexistent-label"])
     out = capsys.readouterr().out
@@ -703,7 +840,9 @@ def test_list_filter_excludes_all_session_tickets_does_not_fall_back(capsys, _in
     assert "other-session" not in out and "#2" not in out
 
 
-def _write_session_touch(session_id: str, ticket_id: str, title: str, ts: int, *, repo: str | None = None) -> None:
+def _write_session_touch(
+    session_id: str, ticket_id: str, title: str, ts: int, *, repo: str | None = None
+) -> None:
     """Write one sidecar touch line. Defaults `repo` to `_inject_fake`'s own coordinate
     (task-cli#83) so every existing call site keeps simulating "this repo touched this
     ticket" — pass an explicit different `repo=` to simulate ANOTHER repo's entry sharing
@@ -717,7 +856,10 @@ def _write_session_touch(session_id: str, ticket_id: str, title: str, ts: int, *
         repo = backend_coordinate(FakeBackend())
     path = sidecar_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"id": ticket_id, "title": title, "ts": ts, "repo": repo}) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps({"id": ticket_id, "title": title, "ts": ts, "repo": repo}) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_raw_session_line(session_id: str, payload: object) -> None:
@@ -731,7 +873,11 @@ def _write_raw_session_line(session_id: str, payload: object) -> None:
 
 
 def test_list_warns_about_stale_active_session_task(capsys, _inject_fake):
-    stale = Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS)
+    stale = Ticket(
+        title="Old active work",
+        labels=["session:testsess"],
+        state=cli.State.IN_PROGRESS,
+    )
     _inject_fake.create(stale)
     _write_session_touch("testsess", "#1", "Old active work", 1)
 
@@ -756,7 +902,9 @@ def test_list_attention_notice_ignores_other_repos_same_id_touch(capsys, _inject
     from tasklib.backends import backend_coordinate
     from tasklib.session import sidecar_path
 
-    ticket = Ticket(title="Just touched", labels=["session:testsess"], state=cli.State.IN_PROGRESS)
+    ticket = Ticket(
+        title="Just touched", labels=["session:testsess"], state=cli.State.IN_PROGRESS
+    )
     _inject_fake.create(ticket)
 
     path = sidecar_path("testsess")
@@ -764,12 +912,24 @@ def test_list_attention_notice_ignores_other_repos_same_id_touch(capsys, _inject
     lines = [
         # THIS repo's own recent touch of "#1", written FIRST.
         json.dumps(
-            {"id": "#1", "title": "Just touched", "ts": int(time.time()), "repo": backend_coordinate(FakeBackend())}
+            {
+                "id": "#1",
+                "title": "Just touched",
+                "ts": int(time.time()),
+                "repo": backend_coordinate(FakeBackend()),
+            }
         ),
         # A DIFFERENT repo's ancient touch of the SAME bare id "#1", written LAST — before the
         # fix, a bare-id-keyed dict comprehension over `read_entries()` (newest-last) would let
         # this later, unrelated entry silently overwrite the correct one above.
-        json.dumps({"id": "#1", "title": "Old active work", "ts": 1, "repo": "github-issues:other/repo"}),
+        json.dumps(
+            {
+                "id": "#1",
+                "title": "Old active work",
+                "ts": 1,
+                "repo": "github-issues:other/repo",
+            }
+        ),
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -783,14 +943,81 @@ def test_list_attention_notice_ignores_other_repos_same_id_touch(capsys, _inject
     assert "active tasks in this session may need attention" not in out
 
 
-def test_list_attention_notice_degrades_when_coordinate_unresolvable(capsys, monkeypatch, _inject_fake):
+def test_list_attention_notice_finds_own_stale_entry_behind_a_newer_foreign_same_id_touch(
+    capsys, _inject_fake
+):
+    # task-cli#83 3rd-round review finding (codex + Opus, independently): the ABOVE test doesn't
+    # actually distinguish correct from buggy code — both produce "no warning" for it, just for
+    # different reasons. This one does: THIS repo's OWN entry for "#1" is genuinely stale, but
+    # was appended BEFORE a different repo's more-recent same-id touch. A buggy
+    # collapse-by-bare-id-first implementation lets the LATER, unrelated entry shadow this
+    # repo's own valid one during the dict-comprehension collapse, before the coordinate filter
+    # ever runs — so the real stale warning silently disappears. The fix must filter by
+    # (id, coordinate) BEFORE collapsing, so this repo's own entry is found regardless of where
+    # it sits in the file relative to an unrelated repo's later touch of the same bare id.
+    import json
+    import time
+
+    from tasklib.backends import backend_coordinate
+    from tasklib.session import sidecar_path
+
+    ticket = Ticket(
+        title="Genuinely stale",
+        labels=["session:testsess"],
+        state=cli.State.IN_PROGRESS,
+    )
+    _inject_fake.create(ticket)
+
+    path = sidecar_path("testsess")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        # THIS repo's own touch of "#1" — genuinely ancient (ts=1), written FIRST.
+        json.dumps(
+            {
+                "id": "#1",
+                "title": "Genuinely stale",
+                "ts": 1,
+                "repo": backend_coordinate(FakeBackend()),
+            }
+        ),
+        # A DIFFERENT repo's RECENT touch of the SAME bare id "#1", written LAST — under the
+        # buggy collapse-first code this would overwrite the entry above before the coordinate
+        # filter runs, hiding the real stale warning this repo's own entry should produce.
+        json.dumps(
+            {
+                "id": "#1",
+                "title": "Unrelated repo's recent work",
+                "ts": int(time.time()),
+                "repo": "github-issues:other/repo",
+            }
+        ),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rc = main(["list"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "active tasks in this session may need attention" in out
+    assert "#1 [in-progress] Genuinely stale" in out
+
+
+def test_list_attention_notice_degrades_when_coordinate_unresolvable(
+    capsys, monkeypatch, _inject_fake
+):
     # review finding: `backend_coordinate` reads `backend.name` via direct attribute access —
     # a partial/test-double backend missing it must not crash a command that otherwise has
     # nothing to do with this feature (`_safe_backend_coordinate` degrades to `""`, matching a
     # pre-task-cli#83 legacy entry, rather than raising).
-    ticket = Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS)
+    ticket = Ticket(
+        title="Old active work",
+        labels=["session:testsess"],
+        state=cli.State.IN_PROGRESS,
+    )
     _inject_fake.create(ticket)
-    _write_session_touch("testsess", "#1", "Old active work", 1, repo="")  # legacy-shaped entry
+    _write_session_touch(
+        "testsess", "#1", "Old active work", 1, repo=""
+    )  # legacy-shaped entry
 
     monkeypatch.setattr(
         "tasklib.backends.backend_coordinate",
@@ -805,12 +1032,22 @@ def test_list_attention_notice_degrades_when_coordinate_unresolvable(capsys, mon
     assert "active tasks in this session may need attention" in out
 
 
-def test_list_recent_active_task_prompts_continue_or_deprioritize(capsys, _inject_fake, monkeypatch):
+def test_list_recent_active_task_prompts_continue_or_deprioritize(
+    capsys, _inject_fake, monkeypatch
+):
     import time
 
     monkeypatch.setenv("TASK_RECENT_WARNING_SECONDS", "999999")
-    _inject_fake.create(Ticket(title="Started just now", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
-    _inject_fake.create(Ticket(title="New priority", labels=["session:testsess"], state=cli.State.TODO))
+    _inject_fake.create(
+        Ticket(
+            title="Started just now",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
+    _inject_fake.create(
+        Ticket(title="New priority", labels=["session:testsess"], state=cli.State.TODO)
+    )
     _write_session_touch("testsess", "#1", "Started just now", int(time.time()))
 
     rc = main(["list"])
@@ -822,7 +1059,13 @@ def test_list_recent_active_task_prompts_continue_or_deprioritize(capsys, _injec
 
 
 def test_list_legacy_sidecar_without_timestamp_does_not_warn(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Old sidecar format", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Old sidecar format",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_raw_session_line("testsess", {"id": "#1", "title": "Old sidecar format"})
 
     rc = main(["list"])
@@ -834,7 +1077,13 @@ def test_list_legacy_sidecar_without_timestamp_does_not_warn(capsys, _inject_fak
 
 
 def test_list_ignores_non_object_sidecar_lines(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_raw_session_line("testsess", [])
 
     rc = main(["list"])
@@ -845,7 +1094,13 @@ def test_list_ignores_non_object_sidecar_lines(capsys, _inject_fake):
 
 
 def test_list_ignores_sidecar_lines_with_non_string_ids(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_raw_session_line("testsess", {"id": ["#1"], "title": "bad id", "ts": 1})
 
     rc = main(["list"])
@@ -859,8 +1114,18 @@ def test_list_future_sidecar_timestamp_is_not_recent(capsys, _inject_fake, monke
     import time
 
     monkeypatch.setenv("TASK_RECENT_WARNING_SECONDS", "999999")
-    _inject_fake.create(Ticket(title="Future timestamp", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
-    _inject_fake.create(Ticket(title="Other priority", labels=["session:testsess"], state=cli.State.TODO))
+    _inject_fake.create(
+        Ticket(
+            title="Future timestamp",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
+    _inject_fake.create(
+        Ticket(
+            title="Other priority", labels=["session:testsess"], state=cli.State.TODO
+        )
+    )
     _write_session_touch("testsess", "#1", "Future timestamp", int(time.time()) + 3600)
 
     rc = main(["list"])
@@ -871,7 +1136,13 @@ def test_list_future_sidecar_timestamp_is_not_recent(capsys, _inject_fake, monke
 
 
 def test_list_json_omits_stale_task_warning(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Old active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_session_touch("testsess", "#1", "Old active work", 1)
 
     rc = main(["list", "--json"])
@@ -891,7 +1162,9 @@ def test_list_json_omits_stale_task_warning(capsys, _inject_fake):
 def _iso_hours_ago(hours: float) -> str:
     from datetime import datetime, timedelta, timezone
 
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 def test_list_warns_about_globally_stale_ticket_outside_session(capsys, _inject_fake):
@@ -901,8 +1174,12 @@ def test_list_warns_about_globally_stale_ticket_outside_session(capsys, _inject_
     # keep `session_tickets` non-empty so `_list_session_scoped` takes the session-scoped branch,
     # not the "no session tickets -> show everything" fallback — proving the global check looks
     # beyond this session's own tickets, not just reusing the fallback's already-broad query.
-    _inject_fake.create(Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO))
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO)
+    )
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
 
     rc = main(["list"])
@@ -919,8 +1196,12 @@ def test_list_warns_about_globally_stale_ticket_outside_session(capsys, _inject_
 
 
 def test_list_does_not_warn_about_recently_updated_active_ticket(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO))
-    fresh = _inject_fake.create(Ticket(title="Fresh ticket", state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO)
+    )
+    fresh = _inject_fake.create(
+        Ticket(title="Fresh ticket", state=cli.State.IN_PROGRESS)
+    )
     fresh.updated_at = _iso_hours_ago(1)
 
     rc = main(["list"])
@@ -930,10 +1211,14 @@ def test_list_does_not_warn_about_recently_updated_active_ticket(capsys, _inject
     assert "stale" not in out.lower()
 
 
-def test_list_global_stale_warning_does_not_repeat_within_rate_limit_window(capsys, _inject_fake):
+def test_list_global_stale_warning_does_not_repeat_within_rate_limit_window(
+    capsys, _inject_fake
+):
     """Rate-limited: an immediate second `task list` must not re-nag (a local timestamp cache,
     not per-process memory, since every CLI invocation is a fresh process)."""
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
 
     rc1 = main(["list"])
@@ -947,7 +1232,9 @@ def test_list_global_stale_warning_does_not_repeat_within_rate_limit_window(caps
 
 
 def test_list_json_omits_global_stale_warning(capsys, _inject_fake):
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
 
     rc = main(["list", "--json"])
@@ -957,16 +1244,22 @@ def test_list_json_omits_global_stale_warning(capsys, _inject_fake):
     assert "stale" not in out.lower()
 
 
-def test_list_global_stale_check_failure_is_best_effort(capsys, _inject_fake, monkeypatch):
+def test_list_global_stale_check_failure_is_best_effort(
+    capsys, _inject_fake, monkeypatch
+):
     """A backend hiccup in the global stale check must never break `task list`'s own output —
     it's a bonus nudge, not the command's job (see _global_stale_notice_block's fail-soft try)."""
     from tasklib.backends import BackendError
 
-    _inject_fake.create(Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO))
+    _inject_fake.create(
+        Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO)
+    )
     original_list = _inject_fake.list
 
     def flaky_list(*args, **kwargs):
-        if kwargs.get("limit") == cli._LIMIT_INTERACTIVE:  # the global check's own fetch
+        if (
+            kwargs.get("limit") == cli._LIMIT_INTERACTIVE
+        ):  # the global check's own fetch
             raise BackendError("boom")
         return original_list(*args, **kwargs)
 
@@ -980,13 +1273,17 @@ def test_list_global_stale_check_failure_is_best_effort(capsys, _inject_fake, mo
     assert "stale" not in out.lower()
 
 
-def test_list_global_stale_check_failure_leaves_rate_limit_window_open(capsys, _inject_fake, monkeypatch):
+def test_list_global_stale_check_failure_leaves_rate_limit_window_open(
+    capsys, _inject_fake, monkeypatch
+):
     """A transient backend failure must not consume the rate-limit window — mark_checked only
     runs after a successful scan (see _global_stale_notice_block), so the NEXT invocation gets
     a real retry instead of being silently rate-limited for the failed one."""
     from tasklib.backends import BackendError
 
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
     original_list = _inject_fake.list
     calls = {"n": 0}
@@ -1010,9 +1307,13 @@ def test_list_global_stale_check_failure_leaves_rate_limit_window_open(capsys, _
     assert "stale" in out2.lower()  # window was NOT consumed — the retry actually ran
 
 
-def test_list_global_stale_notice_reflects_custom_threshold(capsys, _inject_fake, monkeypatch):
+def test_list_global_stale_notice_reflects_custom_threshold(
+    capsys, _inject_fake, monkeypatch
+):
     monkeypatch.setenv("TASK_GLOBAL_STALE_SECONDS", str(2 * 3600))
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(3)
 
     rc = main(["list"])
@@ -1022,11 +1323,15 @@ def test_list_global_stale_notice_reflects_custom_threshold(capsys, _inject_fake
     assert "2h+" in out
 
 
-def test_list_global_stale_notice_formats_sub_hour_threshold_precisely(capsys, _inject_fake, monkeypatch):
+def test_list_global_stale_notice_formats_sub_hour_threshold_precisely(
+    capsys, _inject_fake, monkeypatch
+):
     # a naive `seconds // 3600` would print "1h+" for 90 minutes and "0h+" for any sub-hour
     # value — both misleading (review finding: 5400s must read as "1.5h+", not floor to "1h+").
     monkeypatch.setenv("TASK_GLOBAL_STALE_SECONDS", "5400")  # 90 minutes
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(2)
 
     rc = main(["list"])
@@ -1037,17 +1342,25 @@ def test_list_global_stale_notice_formats_sub_hour_threshold_precisely(capsys, _
     assert "0h+" not in out and "1h+" not in out
 
 
-def test_list_global_stale_check_ignores_tickets_reported_by_someone_else(capsys, _inject_fake):
+def test_list_global_stale_check_ignores_tickets_reported_by_someone_else(
+    capsys, _inject_fake
+):
     """P2 (review): an unqualified `backend.list()` scans EVERY ticket in a shared GitHub/Linear
     project, not just the current user's — contradicting issue #59's stated scope ("check ALL of
     THE USER'S open tickets"). A stale ticket someone else filed must never surface in my nudge,
     but MY stale ticket must still surface."""
     _inject_fake.current_user_result = "alex"
-    _inject_fake.create(Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO))
-    mine = _inject_fake.create(Ticket(title="My forgotten ticket", state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(title="Session work", labels=["session:testsess"], state=cli.State.TODO)
+    )
+    mine = _inject_fake.create(
+        Ticket(title="My forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     mine.updated_at = _iso_hours_ago(50)
     mine.reporter = "alex"
-    theirs = _inject_fake.create(Ticket(title="Coworker forgotten ticket", state=cli.State.IN_PROGRESS))
+    theirs = _inject_fake.create(
+        Ticket(title="Coworker forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     theirs.updated_at = _iso_hours_ago(50)
     theirs.reporter = "bob"
 
@@ -1060,13 +1373,17 @@ def test_list_global_stale_check_ignores_tickets_reported_by_someone_else(capsys
     assert "Coworker forgotten ticket" not in out
 
 
-def test_list_global_stale_check_keeps_scanning_when_identity_is_unknown(capsys, _inject_fake):
+def test_list_global_stale_check_keeps_scanning_when_identity_is_unknown(
+    capsys, _inject_fake
+):
     """When the backend can't determine "who am I" (current_user() -> None, e.g. an
     unauthenticated-for-that-endpoint token or a transient hiccup), the reporter filter must fail
     OPEN — degrade to the prior unfiltered behavior — rather than silently disabling the whole
     nudge. Worse-case parity with before this fix, never worse."""
     _inject_fake.current_user_result = None
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
     stale.reporter = "someone"
 
@@ -1078,7 +1395,9 @@ def test_list_global_stale_check_keeps_scanning_when_identity_is_unknown(capsys,
     assert "Forgotten ticket" in out
 
 
-def test_list_global_stale_check_keeps_scanning_when_identity_lookup_raises(capsys, _inject_fake, monkeypatch):
+def test_list_global_stale_check_keeps_scanning_when_identity_lookup_raises(
+    capsys, _inject_fake, monkeypatch
+):
     """P1 (review, found independently by two reviewers): `backend.current_user()` can RAISE
     (a network hiccup a backend forgot to wrap, or any other unexpected error) instead of just
     returning None. Before this fix that exception propagated out of `_scope_to_current_user`
@@ -1091,7 +1410,9 @@ def test_list_global_stale_check_keeps_scanning_when_identity_lookup_raises(caps
         raise RuntimeError("boom")
 
     monkeypatch.setattr(_inject_fake, "current_user", raise_boom)
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
     stale.reporter = "someone"
 
@@ -1103,13 +1424,17 @@ def test_list_global_stale_check_keeps_scanning_when_identity_lookup_raises(caps
     assert "Forgotten ticket" in out
 
 
-def test_list_global_stale_check_keeps_scanning_when_current_user_is_missing(capsys, _inject_fake, monkeypatch):
+def test_list_global_stale_check_keeps_scanning_when_current_user_is_missing(
+    capsys, _inject_fake, monkeypatch
+):
     """P1 (review): same fail-open contract when `current_user()` is missing entirely (a minimal
     third-party ``TicketBackend`` — the protocol is structural, not ABC-enforced — that never
     implements it), which raises ``AttributeError`` rather than a "normal" exception. Must
     degrade the same way as a raise or a None return, not swallow the whole nudge."""
     monkeypatch.delattr(type(_inject_fake), "current_user")
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
     stale.reporter = "someone"
 
@@ -1121,12 +1446,16 @@ def test_list_global_stale_check_keeps_scanning_when_current_user_is_missing(cap
     assert "Forgotten ticket" in out
 
 
-def test_list_global_stale_notice_survives_unwritable_cache(capsys, _inject_fake, monkeypatch):
+def test_list_global_stale_notice_survives_unwritable_cache(
+    capsys, _inject_fake, monkeypatch
+):
     """A failure to persist the rate-limit marker must not discard an already-computed finding
     (see _global_stale_notice_block's separate try/except around mark_checked)."""
     from tasklib import stale_notice
 
-    stale = _inject_fake.create(Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS))
+    stale = _inject_fake.create(
+        Ticket(title="Forgotten ticket", state=cli.State.IN_PROGRESS)
+    )
     stale.updated_at = _iso_hours_ago(50)
 
     def raise_mark(*args, **kwargs):
@@ -1142,7 +1471,11 @@ def test_list_global_stale_notice_survives_unwritable_cache(capsys, _inject_fake
 
 
 def test_create_warns_about_stale_active_session_task(capsys, _inject_fake):
-    stale = Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS)
+    stale = Ticket(
+        title="Old active work",
+        labels=["session:testsess"],
+        state=cli.State.IN_PROGRESS,
+    )
     _inject_fake.create(stale)
     _write_session_touch("testsess", "#1", "Old active work", 1)
 
@@ -1159,7 +1492,13 @@ def test_create_warns_about_stale_active_session_task(capsys, _inject_fake):
 def test_create_warns_about_recent_active_session_task(capsys, _inject_fake):
     import time
 
-    _inject_fake.create(Ticket(title="Started work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Started work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_session_touch("testsess", "#1", "Started work", int(time.time()))
 
     rc = main(_create_argv())
@@ -1172,7 +1511,13 @@ def test_create_warns_about_recent_active_session_task(capsys, _inject_fake):
 
 
 def test_create_json_omits_stale_task_warning(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Old active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_session_touch("testsess", "#1", "Old active work", 1)
 
     rc = main(_create_argv() + ["--json"])
@@ -1199,13 +1544,23 @@ def test_create_attention_notice_failure_is_best_effort(capsys, monkeypatch):
     assert "created #1" in out
 
 
-def test_status_to_in_progress_warns_after_priority_change(capsys, _inject_fake, monkeypatch):
+def test_status_to_in_progress_warns_after_priority_change(
+    capsys, _inject_fake, monkeypatch
+):
     import time
 
     monkeypatch.setenv("TASK_RECENT_WARNING_SECONDS", "999999")
-    _inject_fake.create(Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Old active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_session_touch("testsess", "#1", "Old active work", int(time.time()))
-    _inject_fake.create(Ticket(title="New priority", labels=["session:testsess"], state=cli.State.TODO))
+    _inject_fake.create(
+        Ticket(title="New priority", labels=["session:testsess"], state=cli.State.TODO)
+    )
 
     rc = main(["status", "#2", "in-progress"])
     out = capsys.readouterr().out
@@ -1218,9 +1573,17 @@ def test_status_to_in_progress_warns_after_priority_change(capsys, _inject_fake,
 
 
 def test_change_metadata_does_not_emit_priority_attention(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Old active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_session_touch("testsess", "#1", "Old active work", 1)
-    _inject_fake.create(Ticket(title="Metadata edit", labels=["session:testsess"], state=cli.State.TODO))
+    _inject_fake.create(
+        Ticket(title="Metadata edit", labels=["session:testsess"], state=cli.State.TODO)
+    )
 
     rc = main(["change", "#2", "--title", "Renamed metadata edit"])
     out = capsys.readouterr().out
@@ -1234,7 +1597,9 @@ def test_status_transition_refreshes_session_touch(capsys, _inject_fake):
     from tasklib.backends import backend_coordinate
     from tasklib.session import read_entries
 
-    _inject_fake.create(Ticket(title="Touch me", labels=["session:testsess"], state=cli.State.TODO))
+    _inject_fake.create(
+        Ticket(title="Touch me", labels=["session:testsess"], state=cli.State.TODO)
+    )
     _write_session_touch("testsess", "#1", "Touch me", 1)
 
     rc = main(["status", "#1", "in-progress"])
@@ -1250,10 +1615,16 @@ def test_status_transition_refreshes_session_touch(capsys, _inject_fake):
     assert entries[-1].repo == backend_coordinate(_inject_fake)
 
 
-def test_status_transition_does_not_record_ticket_from_another_session(capsys, _inject_fake):
+def test_status_transition_does_not_record_ticket_from_another_session(
+    capsys, _inject_fake
+):
     from tasklib.session import read_entries
 
-    _inject_fake.create(Ticket(title="Other session", labels=["session:elsewhere"], state=cli.State.TODO))
+    _inject_fake.create(
+        Ticket(
+            title="Other session", labels=["session:elsewhere"], state=cli.State.TODO
+        )
+    )
 
     rc = main(["status", "#1", "in-progress"])
     capsys.readouterr()
@@ -1319,7 +1690,11 @@ def test_gantt_session_filter_excluding_all_does_not_fall_back(capsys, _inject_f
     # parity with `list`: a session that HAS tickets but none match --label must NOT spill other
     # sessions' tickets via the all-tasks fallback (the same regression `list` guards).
     main(_create_argv() + ["--due", "2026-07-01"])  # #1: this session
-    _inject_fake.create(type(_inject_fake.list()[0])(title="other-session", labels=["session:elsewhere"]))
+    _inject_fake.create(
+        type(_inject_fake.list()[0])(
+            title="other-session", labels=["session:elsewhere"]
+        )
+    )
     capsys.readouterr()
     rc = main(["gantt", "--label", "nonexistent-label", "--json"])
     out = capsys.readouterr().out
@@ -1392,7 +1767,13 @@ def test_status_transition_done_non_ui_succeeds(capsys, _inject_fake):
 
 
 def test_status_done_does_not_emit_priority_attention(capsys, _inject_fake):
-    _inject_fake.create(Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+    _inject_fake.create(
+        Ticket(
+            title="Old active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_session_touch("testsess", "#1", "Old active work", 1)
     main(_create_argv())
     _ready_to_close(_inject_fake, "#2")
@@ -1411,7 +1792,9 @@ def test_status_done_persists_skip_justification(_inject_fake):
     # body (not lose it to a re-fetching transition()). Regression for the Codex/Opus P1.
     main(_create_argv() + ["--label", "ui", "--skip-screenshots", "no proof at create"])
     _ready_to_close(_inject_fake)
-    rc = main(["status", "#1", "done", "--skip-screenshots", "config-only change, no UI"])
+    rc = main(
+        ["status", "#1", "done", "--skip-screenshots", "config-only change, no UI"]
+    )
     assert rc == 0
     from tasklib.render import render
 
@@ -1440,7 +1823,9 @@ def test_create_calls_attach_for_screenshots(_inject_fake):
     assert ("#1", "mock.png") in _inject_fake.attachments
 
 
-def test_change_close_refuses_ui_without_implementation_screenshot(capsys, _inject_fake):
+def test_change_close_refuses_ui_without_implementation_screenshot(
+    capsys, _inject_fake
+):
     # create a UI ticket WITH a creation screenshot (passes create) but NO recorded waiver.
     main(_create_argv() + ["--label", "ui", "--screenshot", "creation.png"])
     capsys.readouterr()
@@ -1461,7 +1846,10 @@ def test_change_close_allowed_with_implementation_screenshot(capsys, _inject_fak
 
 def test_change_close_recorded_waiver_persists(capsys, _inject_fake):
     # a recorded screenshots waiver is an auditable decision and legitimately carries through.
-    main(_create_argv() + ["--label", "ui", "--skip-screenshots", "config-only, not real UI"])
+    main(
+        _create_argv()
+        + ["--label", "ui", "--skip-screenshots", "config-only, not real UI"]
+    )
     _ready_to_close(_inject_fake)
     capsys.readouterr()
     rc = main(["change", "#1", "--done"])
@@ -1475,7 +1863,9 @@ def _force_state(backend, ticket_id, state):
     """Put a stored ticket into ``state`` directly (bypassing the close paths under test)."""
     from tasklib.model import State
 
-    backend.get(ticket_id).state = State(state) if not isinstance(state, State) else state
+    backend.get(ticket_id).state = (
+        State(state) if not isinstance(state, State) else state
+    )
 
 
 # Every (close-verb argv) the three close paths reach DONE through. Parametrizing over these
@@ -1599,7 +1989,19 @@ def test_illegal_change_done_with_screenshot_fires_no_attachment(capsys, _inject
     labels_before = list(stored.labels)
     title_before = stored.title
     capsys.readouterr()
-    rc = main(["change", "#1", "--done", "--screenshot", "after.png", "--title", "HIJACK", "--label", "x"])
+    rc = main(
+        [
+            "change",
+            "#1",
+            "--done",
+            "--screenshot",
+            "after.png",
+            "--title",
+            "HIJACK",
+            "--label",
+            "x",
+        ]
+    )
     out = capsys.readouterr().out
     assert rc == 2
     assert "illegal transition" in out
@@ -1623,7 +2025,15 @@ def test_create_blocks_unlinked_reference(capsys, _inject_fake):
 
 
 def test_create_force_overrides_unlinked_reference(capsys, _inject_fake):
-    rc = main(_create_argv() + ["--what", "the SKU HYP-789 ships", "--force", "HYP-789 is a product SKU, not a ticket"])
+    rc = main(
+        _create_argv()
+        + [
+            "--what",
+            "the SKU HYP-789 ships",
+            "--force",
+            "HYP-789 is a product SKU, not a ticket",
+        ]
+    )
     assert rc == 0
     from tasklib.render import render
 
@@ -1652,12 +2062,26 @@ def test_change_edit_links_skippable(_inject_fake):
 
 
 def test_create_force_overrides_links_and_impact_together(_inject_fake):
-    rc = main(_create_argv() + ["--what", "see HYP-1", "--impact", "n/a", "--force", "spike: SKU + internal tool"])
+    rc = main(
+        _create_argv()
+        + [
+            "--what",
+            "see HYP-1",
+            "--impact",
+            "n/a",
+            "--force",
+            "spike: SKU + internal tool",
+        ]
+    )
     assert rc == 0
     from tasklib.render import render
 
     body = render(_inject_fake.get("#1"))
-    assert "links" in body and "user-impact-quality" in body and "spike: SKU + internal tool" in body
+    assert (
+        "links" in body
+        and "user-impact-quality" in body
+        and "spike: SKU + internal tool" in body
+    )
 
 
 def test_force_records_only_the_gate_that_failed(_inject_fake):
@@ -1732,7 +2156,9 @@ def test_metadata_only_edit_does_not_rescan_links(_inject_fake):
 
 
 def test_create_force_overrides_thin_impact(_inject_fake):
-    rc = main(_create_argv() + ["--impact", "n/a", "--force", "internal tool, no end user"])
+    rc = main(
+        _create_argv() + ["--impact", "n/a", "--force", "internal tool, no end user"]
+    )
     assert rc == 0
     from tasklib.render import render
 
@@ -1757,8 +2183,21 @@ def _write_tg_history(isolated_tmp_path, records: list[dict]) -> None:
 
 def test_create_title_with_msgref_refuses(capsys, _inject_fake):
     argv = [
-        "create", "--title", "see tg#5900", "--what", "c", "--why", "b",
-        "--impact", _GOOD_IMPACT, "--if-not-done", "p", "--acceptance", "works", "--acceptance", "also empty",
+        "create",
+        "--title",
+        "see tg#5900",
+        "--what",
+        "c",
+        "--why",
+        "b",
+        "--impact",
+        _GOOD_IMPACT,
+        "--if-not-done",
+        "p",
+        "--acceptance",
+        "works",
+        "--acceptance",
+        "also empty",
     ]
     rc = main(argv)
     out = capsys.readouterr().out
@@ -1774,7 +2213,16 @@ def test_create_body_msgref_does_not_trip_the_title_gate(capsys, _inject_fake):
 def test_create_expands_msgref_quote_from_local_history(_inject_fake, isolated_state):
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "fix the props bug", "pane": "%0"}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "fix the props bug",
+                "pane": "%0",
+            }
+        ],
     )
     rc = main(_create_argv() + ["--what", "per tg#42 do X"])
     assert rc == 0
@@ -1784,7 +2232,9 @@ def test_create_expands_msgref_quote_from_local_history(_inject_fake, isolated_s
     assert "Alex" in stored.what
 
 
-def test_create_msgref_not_found_in_history_still_succeeds(_inject_fake, isolated_state):
+def test_create_msgref_not_found_in_history_still_succeeds(
+    _inject_fake, isolated_state
+):
     # no history file written at all — the reference is unresolvable, but creation must still
     # succeed (never block a ticket on tg-cli being absent/empty), with a plain "not found" note.
     rc = main(_create_argv() + ["--what", "per tg#999999 do X"])
@@ -1793,26 +2243,48 @@ def test_create_msgref_not_found_in_history_still_succeeds(_inject_fake, isolate
     assert "not found" in stored.what
 
 
-def test_quoted_message_carrying_a_bare_reference_does_not_trip_the_links_gate(_inject_fake, isolated_state):
+def test_quoted_message_carrying_a_bare_reference_does_not_trip_the_links_gate(
+    _inject_fake, isolated_state
+):
     # the quoted message's text is arbitrary — it happens to mention "HYP-999" here. Without the
     # blockquote-line exclusion in policy._scanned_text, this would wrongly refuse creation on
     # text the author never wrote (task-cli#45 review finding). It must succeed.
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "blocked by HYP-999", "pane": None}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "blocked by HYP-999",
+                "pane": None,
+            }
+        ],
     )
     rc = main(_create_argv() + ["--what", "per tg#42 do X"])
     assert rc == 0
 
 
-def test_stored_quote_does_not_trip_links_gate_on_a_later_UNRELATED_edit(capsys, _inject_fake, isolated_state):
+def test_stored_quote_does_not_trip_links_gate_on_a_later_UNRELATED_edit(
+    capsys, _inject_fake, isolated_state
+):
     # task-cli#45 review finding (the main one): an earlier version protected only the command
     # that DID the expanding — the quote, once stored, was re-scanned (and could refuse) on any
     # LATER command. Create with a quote carrying a bare reference, then edit a DIFFERENT field
     # (--why) — the stored `what` (with its embedded "HYP-999") must not block this edit.
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "blocked by HYP-999", "pane": None}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "blocked by HYP-999",
+                "pane": None,
+            }
+        ],
     )
     main(_create_argv() + ["--what", "per tg#42 do X"])
     capsys.readouterr()
@@ -1827,7 +2299,16 @@ def test_stored_quote_does_not_block_close(_inject_fake, isolated_state):
     # buried in an already-stored quote must not block closing a ticket that is otherwise ready.
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "blocked by HYP-999", "pane": None}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "blocked by HYP-999",
+                "pane": None,
+            }
+        ],
     )
     main(_create_argv() + ["--what", "per tg#42 do X"])
     _ready_to_close(_inject_fake, "#1")
@@ -1835,12 +2316,23 @@ def test_stored_quote_does_not_block_close(_inject_fake, isolated_state):
     assert rc == 0
 
 
-def test_acceptance_criterion_msgref_stays_bare_not_expanded(_inject_fake, isolated_state):
+def test_acceptance_criterion_msgref_stays_bare_not_expanded(
+    _inject_fake, isolated_state
+):
     # acceptance criteria are excluded from expansion (single-line checkbox format can't carry a
     # multi-line quote — see the msgrefs.py module docstring). The mention survives verbatim.
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "quoted text", "pane": None}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "quoted text",
+                "pane": None,
+            }
+        ],
     )
     rc = main(_create_argv() + ["--acceptance", "verify per tg#42"])
     assert rc == 0
@@ -1850,16 +2342,29 @@ def test_acceptance_criterion_msgref_stays_bare_not_expanded(_inject_fake, isola
     assert not any("quoted text" in t for t in texts)
 
 
-def test_change_expands_msgref_and_repeat_change_is_not_duplicated(_inject_fake, isolated_state):
+def test_change_expands_msgref_and_repeat_change_is_not_duplicated(
+    _inject_fake, isolated_state
+):
     main(_create_argv())
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "fix the props bug", "pane": None}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "fix the props bug",
+                "pane": None,
+            }
+        ],
     )
     rc = main(["change", "#1", "--what", "per tg#42 do X"])
     assert rc == 0
     what_after_first = _inject_fake.get("#1").what
-    assert what_after_first.count("tg#42") <= 2  # the mention itself + the quote header, never more
+    assert (
+        what_after_first.count("tg#42") <= 2
+    )  # the mention itself + the quote header, never more
     # re-applying the SAME edit must not pile up a second quote block underneath the first.
     rc = main(["change", "#1", "--what", "per tg#42 do X"])
     assert rc == 0
@@ -1867,14 +2372,25 @@ def test_change_expands_msgref_and_repeat_change_is_not_duplicated(_inject_fake,
     assert what_after_second == what_after_first
 
 
-def test_change_resubmitting_the_full_already_expanded_value_is_not_duplicated(_inject_fake, isolated_state):
+def test_change_resubmitting_the_full_already_expanded_value_is_not_duplicated(
+    _inject_fake, isolated_state
+):
     # task-cli#45 review finding: a read-modify-write flow (read the CURRENT what, tweak it,
     # write the whole thing back) resubmits a value that already contains the quote block --
     # not just the bare mention like the test above. That must not pile up a second quote either.
     main(_create_argv())
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "fix the props bug", "pane": None}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "fix the props bug",
+                "pane": None,
+            }
+        ],
     )
     main(["change", "#1", "--what", "per tg#42 do X"])
     current_what = _inject_fake.get("#1").what
@@ -1896,7 +2412,9 @@ def test_change_not_touching_title_does_not_trigger_the_title_gate(_inject_fake)
     # a pre-existing tg#<id> in the title (created before this gate existed, or edited in the
     # web UI) must not block an UNRELATED edit that leaves the title alone.
     main(_create_argv())
-    _inject_fake.get("#1").title = "see tg#5900"  # simulate a legacy/web-UI-edited title
+    _inject_fake.get(
+        "#1"
+    ).title = "see tg#5900"  # simulate a legacy/web-UI-edited title
     rc = main(["change", "#1", "--why", "updated motivation"])
     assert rc == 0
 
@@ -1906,8 +2424,19 @@ def test_change_not_touching_title_does_not_trigger_the_title_gate(_inject_fake)
 
 def test_create_blocks_single_criterion(capsys, _inject_fake):
     argv = [
-        "create", "--title", "t", "--what", "c", "--why", "b", "--impact", _GOOD_IMPACT,
-        "--if-not-done", "p", "--acceptance", "only one",
+        "create",
+        "--title",
+        "t",
+        "--what",
+        "c",
+        "--why",
+        "b",
+        "--impact",
+        _GOOD_IMPACT,
+        "--if-not-done",
+        "p",
+        "--acceptance",
+        "only one",
     ]
     rc = main(argv)
     out = capsys.readouterr().out
@@ -1947,10 +2476,14 @@ def test_check_with_proof_marks_and_attaches(capsys, _inject_fake):
 
 def test_check_force_records_reason_without_proof(_inject_fake):
     main(_create_argv())
-    rc = main(["check", "#1", "1", "--force", "this is a backend invariant, no UI to shoot"])
+    rc = main(
+        ["check", "#1", "1", "--force", "this is a backend invariant, no UI to shoot"]
+    )
     assert rc == 0
     crit = _inject_fake.get("#1").acceptance[0]
-    assert crit.checked and crit.proof == "" and "backend invariant" in crit.force_reason
+    assert (
+        crit.checked and crit.proof == "" and "backend invariant" in crit.force_reason
+    )
 
 
 def test_check_screenshot_is_an_alias_of_proof(_inject_fake):
@@ -1997,8 +2530,19 @@ def test_check_on_ticket_without_criteria_is_clean_error(capsys, _inject_fake):
     # a ticket created with the acceptance gate skipped has no criteria → a clean error, no crash
     main(
         [
-            "create", "--title", "spike", "--what", "c", "--why", "b", "--impact", _GOOD_IMPACT,
-            "--if-not-done", "p", "--skip-acceptance", "spike, criteria pending",
+            "create",
+            "--title",
+            "spike",
+            "--what",
+            "c",
+            "--why",
+            "b",
+            "--impact",
+            _GOOD_IMPACT,
+            "--if-not-done",
+            "p",
+            "--skip-acceptance",
+            "spike, criteria pending",
         ]
     )
     capsys.readouterr()
@@ -2033,9 +2577,9 @@ def test_classify_change_creates_ticket(capsys, monkeypatch, _inject_fake):
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
     rc = main(["classify", "please add a logout button", "--create"])
     assert rc == 0
@@ -2050,9 +2594,9 @@ def test_classify_create_puts_session_in_labels_not_links(monkeypatch, _inject_f
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
     rc = main(["classify", "please add a logout button", "--create"])
     assert rc == 0
@@ -2061,15 +2605,23 @@ def test_classify_create_puts_session_in_labels_not_links(monkeypatch, _inject_f
     assert "session:testsess" in created.labels
 
 
-def test_classify_create_omits_priority_attention_for_hook_output(capsys, monkeypatch, _inject_fake):
-    _inject_fake.create(Ticket(title="Old active work", labels=["session:testsess"], state=cli.State.IN_PROGRESS))
+def test_classify_create_omits_priority_attention_for_hook_output(
+    capsys, monkeypatch, _inject_fake
+):
+    _inject_fake.create(
+        Ticket(
+            title="Old active work",
+            labels=["session:testsess"],
+            state=cli.State.IN_PROGRESS,
+        )
+    )
     _write_session_touch("testsess", "#1", "Old active work", 1)
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
 
     rc = main(["classify", "please add a logout button", "--create"])
@@ -2080,7 +2632,9 @@ def test_classify_create_omits_priority_attention_for_hook_output(capsys, monkey
     assert "active tasks in this session" not in out
 
 
-def test_classify_update_success_not_masked_by_refetch_failure(capsys, monkeypatch, _inject_fake):
+def test_classify_update_success_not_masked_by_refetch_failure(
+    capsys, monkeypatch, _inject_fake
+):
     from tasklib.backends import BackendError
 
     main(_create_argv())
@@ -2088,16 +2642,20 @@ def test_classify_update_success_not_masked_by_refetch_failure(capsys, monkeypat
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
 
     def _comment(ticket_id: str, body: str) -> None:
         _inject_fake.comments.append((ticket_id, body))
 
     monkeypatch.setattr(_inject_fake, "comment", _comment)
-    monkeypatch.setattr(_inject_fake, "get", lambda _ticket_id: (_ for _ in ()).throw(BackendError("temporary get failed")))
+    monkeypatch.setattr(
+        _inject_fake,
+        "get",
+        lambda _ticket_id: (_ for _ in ()).throw(BackendError("temporary get failed")),
+    )
 
     rc = main(["classify", "append this context", "--update", "#1"])
     out = capsys.readouterr().out
@@ -2107,7 +2665,9 @@ def test_classify_update_success_not_masked_by_refetch_failure(capsys, monkeypat
     assert _inject_fake.comments == [("#1", "(restated) append this context")]
 
 
-def test_classify_create_dedup_matches_against_wrap_stripped_title(capsys, monkeypatch, _inject_fake):
+def test_classify_create_dedup_matches_against_wrap_stripped_title(
+    capsys, monkeypatch, _inject_fake
+):
     # task-cli#45 review finding: the stored ticket's title is ALWAYS wrap-stripped (every
     # ticket this path creates goes through _derive_title_from_message). A repeat inbound
     # message wrapped the SAME way must dedup-comment on that existing ticket, not create a
@@ -2116,19 +2676,35 @@ def test_classify_create_dedup_matches_against_wrap_stripped_title(capsys, monke
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
-    main(["classify", "[TG from Alex tg#100] please add a dark mode toggle to settings", "--create"])
+    main(
+        [
+            "classify",
+            "[TG from Alex tg#100] please add a dark mode toggle to settings",
+            "--create",
+        ]
+    )
     assert len(_inject_fake.list()) == 1
-    _write_session_touch("testsess", "#1", "please add a dark mode toggle to settings", 1)
+    _write_session_touch(
+        "testsess", "#1", "please add a dark mode toggle to settings", 1
+    )
     capsys.readouterr()
-    rc = main(["classify", "[TG from Alex tg#200] please add a dark mode toggle to settings", "--create"])
+    rc = main(
+        [
+            "classify",
+            "[TG from Alex tg#200] please add a dark mode toggle to settings",
+            "--create",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "dedup" in out
-    assert len(_inject_fake.list()) == 1  # still one ticket — the repeat was a comment, not a create
+    assert (
+        len(_inject_fake.list()) == 1
+    )  # still one ticket — the repeat was a comment, not a create
     from tasklib.session import read_entries
 
     assert read_entries("testsess")[-1].ts > 1
@@ -2137,12 +2713,14 @@ def test_classify_create_dedup_matches_against_wrap_stripped_title(capsys, monke
 def test_classify_create_makes_policy_clean_draft(capsys, monkeypatch, _inject_fake):
     # the inbound-create path runs the gates and records every failing one as an auditable
     # auto-skip, so the draft is policy-clean by construction (no silent bypass).
-    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "VERDICT: change")
+    monkeypatch.setattr(
+        cli, "_run_review_just_ask", lambda model, prompt: "VERDICT: change"
+    )
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
     rc = main(["classify", "make the sidebar collapsible", "--create"])
     assert rc == 0
@@ -2153,21 +2731,32 @@ def test_classify_create_makes_policy_clean_draft(capsys, monkeypatch, _inject_f
     assert check_create(created, EnforceConfig()).ok
 
 
-def test_classify_create_expands_msgref_quote_in_what(capsys, monkeypatch, _inject_fake, isolated_state):
+def test_classify_create_expands_msgref_quote_in_what(
+    capsys, monkeypatch, _inject_fake, isolated_state
+):
     # task-cli#45 review finding: classify --create IS a tg-cli hook entry point (an agent runs
     # `task classify "<inbound msg>" --create`) and must expand tg#<id> in `what` the same way
     # cmd_create's --from-message path does -- it must not be the one path that silently drops
     # the quote a reader would otherwise get everywhere else.
     _write_tg_history(
         isolated_state,
-        [{"ts": 1700000000, "message_id": 42, "direction": "user", "from": "Alex", "text": "fix the props bug", "pane": None}],
+        [
+            {
+                "ts": 1700000000,
+                "message_id": 42,
+                "direction": "user",
+                "from": "Alex",
+                "text": "fix the props bug",
+                "pane": None,
+            }
+        ],
     )
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
     # the tg#<id> reference is on a SECOND line so the derived title (first line only) stays
     # clean and the msgref-title gate doesn't fire -- this test is about `what` expansion.
@@ -2177,7 +2766,9 @@ def test_classify_create_expands_msgref_quote_in_what(capsys, monkeypatch, _inje
     assert "fix the props bug" in created.what
 
 
-def test_classify_create_strips_tg_inbound_wrap_from_title(capsys, monkeypatch, _inject_fake):
+def test_classify_create_strips_tg_inbound_wrap_from_title(
+    capsys, monkeypatch, _inject_fake
+):
     # task-cli#45 review finding: `classify --create` is ALSO a tg-cli hook entry point (an
     # inbound message routed straight through classify) and must derive its title the SAME way
     # cmd_create's --from-message path does -- otherwise this path silently creates a ticket
@@ -2185,18 +2776,22 @@ def test_classify_create_strips_tg_inbound_wrap_from_title(capsys, monkeypatch, 
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
-    rc = main(["classify", "[TG from Alex tg#4242] please add a logout button", "--create"])
+    rc = main(
+        ["classify", "[TG from Alex tg#4242] please add a logout button", "--create"]
+    )
     assert rc == 0
     created = _inject_fake.list()[0]
     assert "tg#4242" not in created.title
     assert created.title.startswith("please add a logout button")
 
 
-def test_classify_create_refuses_rather_than_silently_bypass_a_non_skippable_gate(capsys, monkeypatch, _inject_fake):
+def test_classify_create_refuses_rather_than_silently_bypass_a_non_skippable_gate(
+    capsys, monkeypatch, _inject_fake
+):
     # the user's OWN message (not the wrap) starts with a tg#<id> mention that survives wrap-
     # stripping -- the title is still non-compliant. _auto_skip_failing_gates must NOT silently
     # auto-skip msgref-title (it is non-skippable); _classify_create must refuse instead of
@@ -2204,9 +2799,9 @@ def test_classify_create_refuses_rather_than_silently_bypass_a_non_skippable_gat
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
     rc = main(["classify", "tg#99 is broken, please fix it", "--create"])
     out = capsys.readouterr().out
@@ -2215,7 +2810,9 @@ def test_classify_create_refuses_rather_than_silently_bypass_a_non_skippable_gat
     assert _inject_fake.list() == []
 
 
-def test_classify_create_refuses_a_wrap_only_message_with_no_derivable_title(capsys, monkeypatch, _inject_fake):
+def test_classify_create_refuses_a_wrap_only_message_with_no_derivable_title(
+    capsys, monkeypatch, _inject_fake
+):
     # task-cli#45 review finding: a wrap-only inbound message (no content after the wrap --
     # a malformed/truncated hook call) derives an EMPTY title. cmd_create's --from-message path
     # already refuses this (`if not title: raise`); classify --create must refuse the same way
@@ -2223,9 +2820,9 @@ def test_classify_create_refuses_a_wrap_only_message_with_no_derivable_title(cap
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
     rc = main(["classify", "[TG from Alex tg#1234]", "--create"])
     out = capsys.readouterr().out
@@ -2238,9 +2835,9 @@ def test_classify_just_ask_creates_nothing(capsys, monkeypatch, _inject_fake):
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "justAsk")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
-        lambda fallbacks=None, env=None, **_kw: __import__("tasklib.classify", fromlist=["ResolvedModel"]).ResolvedModel(
-            "anthropic", "claude:claude-haiku-4-5"
-        ),
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
     )
     rc = main(["classify", "what does this function do?", "--create"])
     assert rc == 0
@@ -2249,7 +2846,9 @@ def test_classify_just_ask_creates_nothing(capsys, monkeypatch, _inject_fake):
 
 
 def test_classify_no_provider_biases(capsys, monkeypatch, _inject_fake):
-    monkeypatch.setattr("tasklib.classify.resolve_chain", lambda fallbacks=None, env=None, **_kw: None)
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain", lambda fallbacks=None, env=None, **_kw: None
+    )
     rc = main(["classify", "ambiguous message"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -2257,7 +2856,9 @@ def test_classify_no_provider_biases(capsys, monkeypatch, _inject_fake):
     assert "change" in out
 
 
-def test_classify_passes_configured_capability_to_resolve_chain(monkeypatch, _inject_fake):
+def test_classify_passes_configured_capability_to_resolve_chain(
+    monkeypatch, _inject_fake
+):
     # cmd_classify must forward cfg.classify_capability into resolve_chain (rig#8 wiring) — a
     # capability configured in task.yaml has to actually reach the resolver, not be dropped.
     seen = {}
@@ -2268,7 +2869,8 @@ def test_classify_passes_configured_capability_to_resolve_chain(monkeypatch, _in
 
     monkeypatch.setattr("tasklib.classify.resolve_chain", _spy)
     monkeypatch.setattr(
-        "tasklib.config.LoadedConfig.classify_capability", property(lambda self: "reasoning")
+        "tasklib.config.LoadedConfig.classify_capability",
+        property(lambda self: "reasoning"),
     )
     rc = main(["classify", "anything"])
     assert rc == 0
@@ -2310,11 +2912,16 @@ def _pin_local_project_overlay(monkeypatch, coordinate_repo: str = "acme/here") 
     monkeypatch.setattr(
         cli,
         "_current_project_overlay",
-        lambda cfg: (coordinate_repo, {"backend": "github-issues", "github": {"repo": coordinate_repo}}),
+        lambda cfg: (
+            coordinate_repo,
+            {"backend": "github-issues", "github": {"repo": coordinate_repo}},
+        ),
     )
 
 
-def test_session_show_excludes_other_repo_sharing_the_same_session_id(capsys, monkeypatch, _inject_fake):
+def test_session_show_excludes_other_repo_sharing_the_same_session_id(
+    capsys, monkeypatch, _inject_fake
+):
     # task-cli#83 review finding: `cmd_session`'s "show" path called the unscoped `read_ids`
     # directly, so it still leaked a foreign repo's ticket ids for a session id shared across
     # repos — the same underlying bug #83 fixes for `_recent_tickets_block`/
@@ -2322,7 +2929,12 @@ def test_session_show_excludes_other_repo_sharing_the_same_session_id(capsys, mo
     from tasklib.session import record
 
     _pin_local_project_overlay(monkeypatch)
-    record("testsess", "#77", "Unrelated repo's ticket", repo="github-issues:acme/other-repo")
+    record(
+        "testsess",
+        "#77",
+        "Unrelated repo's ticket",
+        repo="github-issues:acme/other-repo",
+    )
     record("testsess", "#10", "This repo's own ticket", repo="github-issues:acme/here")
 
     rc = main(["session"])
@@ -2332,13 +2944,20 @@ def test_session_show_excludes_other_repo_sharing_the_same_session_id(capsys, mo
     assert "#77" not in out
 
 
-def test_session_show_json_excludes_other_repo_sharing_the_same_session_id(capsys, monkeypatch, _inject_fake):
+def test_session_show_json_excludes_other_repo_sharing_the_same_session_id(
+    capsys, monkeypatch, _inject_fake
+):
     import json
 
     from tasklib.session import record
 
     _pin_local_project_overlay(monkeypatch)
-    record("testsess", "#77", "Unrelated repo's ticket", repo="github-issues:acme/other-repo")
+    record(
+        "testsess",
+        "#77",
+        "Unrelated repo's ticket",
+        repo="github-issues:acme/other-repo",
+    )
     record("testsess", "#10", "This repo's own ticket", repo="github-issues:acme/here")
 
     rc = main(["session", "--json"])
@@ -2348,7 +2967,9 @@ def test_session_show_json_excludes_other_repo_sharing_the_same_session_id(capsy
     assert payload["tickets"] == ["#10"]
 
 
-def test_session_show_degrades_to_unfiltered_when_outside_a_repo(capsys, monkeypatch, _inject_fake):
+def test_session_show_degrades_to_unfiltered_when_outside_a_repo(
+    capsys, monkeypatch, _inject_fake
+):
     # `task session` is documented to work outside a repo — a coordinate-resolution failure
     # (genuinely outside a repo, `_current_project_overlay` returning None) must fall back to
     # the pre-#83 unfiltered read, not hide every ticket.
@@ -2362,14 +2983,42 @@ def test_session_show_degrades_to_unfiltered_when_outside_a_repo(capsys, monkeyp
     assert "#5" in out
 
 
-def test_session_show_degrades_to_unfiltered_on_resolution_error(capsys, monkeypatch, _inject_fake):
-    # A resolution failure other than "genuinely outside a repo" (a broken origin remote, a
-    # teamless linear config) must degrade the same way, not raise into a display command.
+def test_session_show_surfaces_clean_error_on_resolution_error(
+    capsys, monkeypatch, _inject_fake
+):
+    # task-cli#83 2nd-round review finding: a RECOGNIZED resolution error (a broken origin
+    # remote, a teamless linear config — `_current_project_overlay` raises `_UserError` for
+    # these) must NOT be conflated with "genuinely outside a repo" and silently unscoped — that
+    # would re-leak ticket ids from every repo sharing the session id. It must surface as the
+    # same clean `error: ...` + exit 2 every other resolution failure in this module gets.
     from tasklib.session import record
 
     record("testsess", "#5", "some ticket")
     monkeypatch.setattr(
-        cli, "_current_project_overlay", lambda cfg: (_ for _ in ()).throw(cli._UserError("broken origin"))
+        cli,
+        "_current_project_overlay",
+        lambda cfg: (_ for _ in ()).throw(cli._UserError("broken origin")),
+    )
+    rc = main(["session"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "error: broken origin" in out
+    assert "#5" not in out
+
+
+def test_session_show_degrades_to_unfiltered_on_unrecognized_error(
+    capsys, monkeypatch, _inject_fake
+):
+    # An UNEXPECTED exception (not one of this module's own recognized resolution-error shapes)
+    # still degrades gracefully — only a genuine, recognized `_UserError` gets the clean-surface
+    # treatment above; a mystery failure must not turn a display command into a hard crash.
+    from tasklib.session import record
+
+    record("testsess", "#5", "some ticket")
+    monkeypatch.setattr(
+        cli,
+        "_current_project_overlay",
+        lambda cfg: (_ for _ in ()).throw(RuntimeError("unexpected")),
     )
     rc = main(["session"])
     out = capsys.readouterr().out
@@ -2406,7 +3055,9 @@ def test_session_bind_records(capsys, _inject_fake):
     assert "#5" in read_ids("testsess")
 
 
-def test_session_bind_degrades_gracefully_outside_a_repo(capsys, monkeypatch, _inject_fake):
+def test_session_bind_degrades_gracefully_outside_a_repo(
+    capsys, monkeypatch, _inject_fake
+):
     # review finding: `bind` had NO backend dependency before task-cli#83 — it must not start
     # hard-failing just because resolving a repo coordinate for the sidecar entry needs
     # config/git context that isn't available (genuinely outside a repo).
@@ -2418,18 +3069,42 @@ def test_session_bind_degrades_gracefully_outside_a_repo(capsys, monkeypatch, _i
     assert "#5" in read_ids("testsess")
 
 
-def test_session_bind_degrades_on_any_resolution_failure_not_just_outside_a_repo(
+def test_session_bind_degrades_on_unrecognized_resolution_failure(
     capsys, monkeypatch, _inject_fake
 ):
-    # bind's degradation must not be narrowly tied to one failure mode — any failure while
-    # resolving a display-only coordinate must never break a command that historically had
-    # zero backend dependency.
+    # An UNEXPECTED exception (not `_UserError`) must never break a command that historically
+    # had zero backend dependency — bind still degrades gracefully for a truly unforeseen
+    # failure mode. Contrast with the RECOGNIZED `_UserError` case below, which must NOT degrade.
     from tasklib.session import read_ids
 
-    monkeypatch.setattr(cli, "_current_project_overlay", lambda cfg: (_ for _ in ()).throw(RuntimeError("unexpected")))
+    monkeypatch.setattr(
+        cli,
+        "_current_project_overlay",
+        lambda cfg: (_ for _ in ()).throw(RuntimeError("unexpected")),
+    )
     rc = main(["session", "bind", "#5"])
     assert rc == 0
     assert "#5" in read_ids("testsess")
+
+
+def test_session_bind_surfaces_clean_error_on_resolution_error(
+    capsys, monkeypatch, _inject_fake
+):
+    # task-cli#83 2nd-round review finding: a RECOGNIZED resolution error (broken origin,
+    # teamless linear config) must fail closed with a clean error, not silently write an
+    # unscoped sidecar entry that disappears once the origin is repaired.
+    from tasklib.session import read_ids
+
+    monkeypatch.setattr(
+        cli,
+        "_current_project_overlay",
+        lambda cfg: (_ for _ in ()).throw(cli._UserError("broken origin")),
+    )
+    rc = main(["session", "bind", "#5"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "error: broken origin" in out
+    assert "#5" not in read_ids("testsess")
 
 
 # ── --due field + daemon dispatch ────────────────────────────────────────────────────
@@ -2474,13 +3149,17 @@ def test_change_rejects_malformed_due(capsys, _inject_fake):
     assert "ISO date" in capsys.readouterr().out
 
 
-def test_daemon_run_honors_disabled_via_cli(capsys, _inject_fake, tmp_path, monkeypatch):
+def test_daemon_run_honors_disabled_via_cli(
+    capsys, _inject_fake, tmp_path, monkeypatch
+):
     # `task daemon run` with a disabled config returns 0 immediately, writing no pid-file
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     from tasklib import daemon as _d
 
     monkeypatch.setattr(
-        _d.DaemonConfig, "from_config", classmethod(lambda cls, cfg: _d.DaemonConfig(enabled=False))
+        _d.DaemonConfig,
+        "from_config",
+        classmethod(lambda cls, cfg: _d.DaemonConfig(enabled=False)),
     )
     rc = main(["daemon", "run"])
     assert rc == 0
@@ -2567,7 +3246,9 @@ def test_daemon_status_json_not_ours(capsys, _inject_fake, tmp_path, monkeypatch
     assert payload["pid"] == 4242
 
 
-def test_daemon_start_is_idempotent_no_double_spawn(capsys, _inject_fake, tmp_path, monkeypatch):
+def test_daemon_start_is_idempotent_no_double_spawn(
+    capsys, _inject_fake, tmp_path, monkeypatch
+):
     import os
     from argparse import Namespace
 
@@ -2577,7 +3258,9 @@ def test_daemon_start_is_idempotent_no_double_spawn(capsys, _inject_fake, tmp_pa
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
     spawned: list = []
-    monkeypatch.setattr(_d, "_spawn_detached", lambda *a, **k: spawned.append(1) or 4242)
+    monkeypatch.setattr(
+        _d, "_spawn_detached", lambda *a, **k: spawned.append(1) or 4242
+    )
     rc = main(["daemon", "start"])
     assert rc == 0
     assert "daemon started" in capsys.readouterr().out
@@ -2589,7 +3272,9 @@ def test_daemon_start_is_idempotent_no_double_spawn(capsys, _inject_fake, tmp_pa
     cfg = _load(Namespace(cwd=".", backend=None, repo=None, config=None))
     paths = _d.paths_for(_daemon_coordinate(cfg))
     _d._write_pid(paths.pid, os.getpid())
-    monkeypatch.setattr(_d, "process_cmdline", lambda _pid: ["python", "-m", "tasklib", "daemon", "run"])
+    monkeypatch.setattr(
+        _d, "process_cmdline", lambda _pid: ["python", "-m", "tasklib", "daemon", "run"]
+    )
     spawned.clear()
     rc = main(["daemon", "start"])
     assert rc == 0
@@ -2601,7 +3286,11 @@ def test_daemon_disabled_does_not_start(capsys, _inject_fake, tmp_path, monkeypa
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     from tasklib import daemon as _d
 
-    monkeypatch.setattr(_d.DaemonConfig, "from_config", classmethod(lambda cls, cfg: _d.DaemonConfig(enabled=False)))
+    monkeypatch.setattr(
+        _d.DaemonConfig,
+        "from_config",
+        classmethod(lambda cls, cfg: _d.DaemonConfig(enabled=False)),
+    )
     spawned: list = []
     monkeypatch.setattr(_d, "_spawn_detached", lambda *a, **k: spawned.append(1))
     rc = main(["daemon", "start"])
@@ -2717,7 +3406,9 @@ def test_notification_disabled_by_config(monkeypatch, _inject_fake):
     assert calls == [], "notification must be suppressed when on_mutation: false"
 
 
-def test_notification_failure_does_not_fail_ticket_op(monkeypatch, _inject_fake, capsys):
+def test_notification_failure_does_not_fail_ticket_op(
+    monkeypatch, _inject_fake, capsys
+):
     from tasklib import daemon as _d
 
     monkeypatch.setattr(_d, "notify", lambda msg, notifier: False)
@@ -2752,14 +3443,18 @@ def test_notification_custom_notifier_stays_plain(monkeypatch, _inject_fake):
     assert "\nhttps://fake/1" in msg
 
 
-def test_notification_tg_format_plain_override_is_not_mutated(monkeypatch, _inject_fake):
+def test_notification_tg_format_plain_override_is_not_mutated(
+    monkeypatch, _inject_fake
+):
     calls = _patch_notify(monkeypatch)
     from tasklib import daemon as _d
 
     monkeypatch.setattr(
         _d.DaemonConfig,
         "from_config",
-        classmethod(lambda cls, cfg: _d.DaemonConfig(notifier=("tg", "--format", "plain"))),
+        classmethod(
+            lambda cls, cfg: _d.DaemonConfig(notifier=("tg", "--format", "plain"))
+        ),
     )
     rc = main(_create_argv())
     assert rc == 0
@@ -2769,7 +3464,9 @@ def test_notification_tg_format_plain_override_is_not_mutated(monkeypatch, _inje
     assert msg.startswith("[task created] #1: Add a thing [todo]")
 
 
-def test_notification_tg_format_equals_html_is_not_duplicated(monkeypatch, _inject_fake):
+def test_notification_tg_format_equals_html_is_not_duplicated(
+    monkeypatch, _inject_fake
+):
     calls = _patch_notify(monkeypatch)
     from tasklib import daemon as _d
 
@@ -2787,12 +3484,18 @@ def test_notification_tg_format_equals_html_is_not_duplicated(monkeypatch, _inje
 
 def test_mutation_message_escapes_href_attributes():
     msg = _mutation_message(
-        Ticket(id="HYP-903", url='https://linear.example/issue/HYP-903?a=1&b="two"', title="Fix"),
+        Ticket(
+            id="HYP-903",
+            url='https://linear.example/issue/HYP-903?a=1&b="two"',
+            title="Fix",
+        ),
         "created",
         "todo",
         html_mode=True,
     )
-    assert 'href="https://linear.example/issue/HYP-903?a=1&amp;b=&quot;two&quot;"' in msg
+    assert (
+        'href="https://linear.example/issue/HYP-903?a=1&amp;b=&quot;two&quot;"' in msg
+    )
 
 
 # ── Links-URL gate + tg#<id> quote warning routing (tg#9179 / tg#9161) ────────────────
@@ -2802,7 +3505,9 @@ def test_change_metadata_only_edit_is_exempt_from_links_url(capsys, _inject_fake
     # a --due/--label edit touches no scanned field → the links-url gate does not fire, so a
     # legacy junk link (Session: session:2) can't block an unrelated metadata edit.
     main(_create_argv())
-    _inject_fake.get("#1").links["Session"] = "session:2"  # legacy junk a real backend read back
+    _inject_fake.get("#1").links["Session"] = (
+        "session:2"  # legacy junk a real backend read back
+    )
     capsys.readouterr()
     assert main(["change", "#1", "--due", "2026-12-31"]) == 0
 
@@ -2815,7 +3520,12 @@ def test_change_touching_text_enforces_links_url(capsys, _inject_fake):
     capsys.readouterr()
     assert main(["change", "#1", "--what", "a real edit"]) == 2
     assert "links-url" in capsys.readouterr().out
-    assert main(["change", "#1", "--what", "a real edit", "--skip-links-url", "legacy junk"]) == 0
+    assert (
+        main(
+            ["change", "#1", "--what", "a real edit", "--skip-links-url", "legacy junk"]
+        )
+        == 0
+    )
 
 
 def test_report_and_die_prints_warnings_to_stderr_only(capsys):
@@ -2823,7 +3533,14 @@ def test_report_and_die_prints_warnings_to_stderr_only(capsys):
     # the caller may then print a --json payload to stdout that a warning line would corrupt.
     from tasklib.policy import PolicyResult, Violation
 
-    result = PolicyResult(warnings=[Violation("msgref-quote", "the body references tg#9 but no quote could be attached")])
+    result = PolicyResult(
+        warnings=[
+            Violation(
+                "msgref-quote",
+                "the body references tg#9 but no quote could be attached",
+            )
+        ]
+    )
     cli._report_and_die(result, "update")  # no violations → does not raise
     cap = capsys.readouterr()
     assert cap.out == ""
@@ -2831,37 +3548,68 @@ def test_report_and_die_prints_warnings_to_stderr_only(capsys):
 
 
 def test_skip_msgref_quote_flag_parses_and_records():
-    ns = build_parser().parse_args([*_create_argv(), "--skip-msgref-quote", "false positive"])
+    ns = build_parser().parse_args(
+        [*_create_argv(), "--skip-msgref-quote", "false positive"]
+    )
     assert ns.skip_msgref_quote == "false positive"
 
 
 def _fake_history(msg_id=42, text="the referenced message"):
     from tasklib.msgrefs import HistoryRecord
 
-    return {msg_id: HistoryRecord(ts=1700000000, message_id=msg_id, direction="user", from_="Alex", text=text, pane=None)}
+    return {
+        msg_id: HistoryRecord(
+            ts=1700000000,
+            message_id=msg_id,
+            direction="user",
+            from_="Alex",
+            text=text,
+            pane=None,
+        )
+    }
 
 
 def test_msgref_quote_deny_at_change_when_resolvable(capsys, _inject_fake, monkeypatch):
     # end-to-end: a backend-authored ticket carries a bare tg#42 (no quote); the message IS in
     # local history, so touching a text field re-scans the body and the close/edit is refused.
     main(_create_argv())
-    _inject_fake.get("#1").what = "per tg#42 do X"  # a bare ref the create gate never expanded
-    monkeypatch.setattr("tasklib.msgrefs.load_history", lambda env=None: _fake_history(42))
+    _inject_fake.get(
+        "#1"
+    ).what = "per tg#42 do X"  # a bare ref the create gate never expanded
+    monkeypatch.setattr(
+        "tasklib.msgrefs.load_history", lambda env=None: _fake_history(42)
+    )
     capsys.readouterr()
     assert main(["change", "#1", "--title", "New title"]) == 2
     assert "msgref-quote" in capsys.readouterr().out
     # the new skip flag waives it through the full CLI path
-    assert main(["change", "#1", "--title", "New title", "--skip-msgref-quote", "version tag"]) == 0
+    assert (
+        main(
+            [
+                "change",
+                "#1",
+                "--title",
+                "New title",
+                "--skip-msgref-quote",
+                "version tag",
+            ]
+        )
+        == 0
+    )
 
 
-def test_msgref_quote_warn_at_change_preserves_json_stdout(capsys, _inject_fake, monkeypatch):
+def test_msgref_quote_warn_at_change_preserves_json_stdout(
+    capsys, _inject_fake, monkeypatch
+):
     # an UNRESOLVABLE reference only warns (to stderr) and never blocks — and the --json payload
     # on stdout stays parseable (the whole point of routing the warning off stdout).
     import json
 
     main(_create_argv())
     _inject_fake.get("#1").what = "per tg#42 do X"
-    monkeypatch.setattr("tasklib.msgrefs.load_history", lambda env=None: {})  # not in history → warn
+    monkeypatch.setattr(
+        "tasklib.msgrefs.load_history", lambda env=None: {}
+    )  # not in history → warn
     capsys.readouterr()
     assert main(["change", "#1", "--title", "New title", "--json"]) == 0
     cap = capsys.readouterr()
@@ -2875,7 +3623,9 @@ def test_msgref_quote_disabled_does_not_read_history(capsys, _inject_fake, monke
 
     main(_create_argv())
     _inject_fake.get("#1").what = "per tg#42 do X"
-    monkeypatch.setattr(cli, "_enforce_config", lambda cfg: EnforceConfig(msgref_quote=False))
+    monkeypatch.setattr(
+        cli, "_enforce_config", lambda cfg: EnforceConfig(msgref_quote=False)
+    )
 
     def _boom(env=None):
         raise AssertionError("history must not be read when the gate is disabled")
@@ -2897,7 +3647,9 @@ def test_msgref_quote_no_refs_does_not_read_history(capsys, _inject_fake, monkey
     assert main(["change", "#1", "--title", "New title"]) == 0
 
 
-def test_msgref_quote_already_skipped_does_not_read_history(capsys, _inject_fake, monkeypatch):
+def test_msgref_quote_already_skipped_does_not_read_history(
+    capsys, _inject_fake, monkeypatch
+):
     # once --skip-msgref-quote is recorded, the gate can't fire, so history is not read.
     main(_create_argv())
     _inject_fake.get("#1").what = "per tg#42 do X"
@@ -2907,7 +3659,19 @@ def test_msgref_quote_already_skipped_does_not_read_history(capsys, _inject_fake
 
     monkeypatch.setattr("tasklib.msgrefs.load_history", _boom)
     capsys.readouterr()
-    assert main(["change", "#1", "--title", "New title", "--skip-msgref-quote", "version tag"]) == 0
+    assert (
+        main(
+            [
+                "change",
+                "#1",
+                "--title",
+                "New title",
+                "--skip-msgref-quote",
+                "version tag",
+            ]
+        )
+        == 0
+    )
 
 
 def test_create_with_active_session_puts_no_link_in_the_links_field(_inject_fake):
@@ -2919,7 +3683,9 @@ def test_create_with_active_session_puts_no_link_in_the_links_field(_inject_fake
     assert any(lbl.startswith("session:") for lbl in t.labels)
 
 
-def test_skip_summary_and_warning_keep_json_stdout_clean(capsys, _inject_fake, monkeypatch):
+def test_skip_summary_and_warning_keep_json_stdout_clean(
+    capsys, _inject_fake, monkeypatch
+):
     # a --json command that BOTH waives a gate (skipped summary) AND carries an untouched
     # unresolvable reference (warning) must still emit parseable JSON on stdout — both diagnostics
     # go to stderr. The reference and the bare HYP ref sit in an UNtouched field so they genuinely
@@ -2927,10 +3693,26 @@ def test_skip_summary_and_warning_keep_json_stdout_clean(capsys, _inject_fake, m
     import json
 
     main(_create_argv())
-    _inject_fake.get("#1").what = "per tg#42 do X, blocked by HYP-789"  # untouched: unresolvable ref + bare ref
-    monkeypatch.setattr("tasklib.msgrefs.load_history", lambda env=None: {})  # tg#42 unresolvable → warn
+    _inject_fake.get(
+        "#1"
+    ).what = (
+        "per tg#42 do X, blocked by HYP-789"  # untouched: unresolvable ref + bare ref
+    )
+    monkeypatch.setattr(
+        "tasklib.msgrefs.load_history", lambda env=None: {}
+    )  # tg#42 unresolvable → warn
     capsys.readouterr()
-    rc = main(["change", "#1", "--title", "New title", "--skip-links", "legacy bare ref", "--json"])
+    rc = main(
+        [
+            "change",
+            "#1",
+            "--title",
+            "New title",
+            "--skip-links",
+            "legacy bare ref",
+            "--json",
+        ]
+    )
     assert rc == 0
     cap = capsys.readouterr()
     json.loads(cap.out)  # stdout is clean JSON, not corrupted by either diagnostic
@@ -2938,22 +3720,33 @@ def test_skip_summary_and_warning_keep_json_stdout_clean(capsys, _inject_fake, m
     assert "skipped gates (justified)" in cap.err  # the skip summary went to stderr
 
 
-def test_skip_msgref_quote_shows_in_the_audit_trail_via_cli(capsys, _inject_fake, monkeypatch):
+def test_skip_msgref_quote_shows_in_the_audit_trail_via_cli(
+    capsys, _inject_fake, monkeypatch
+):
     # a waived msgref-quote must appear in the "skipped gates (justified)" summary like every other
     # skippable gate — even though the CLI skips loading history for it.
     main(_create_argv())
     _inject_fake.get("#1").what = "per tg#42 do X"
-    monkeypatch.setattr("tasklib.msgrefs.load_history", lambda env=None: (_ for _ in ()).throw(AssertionError("no read")))
+    monkeypatch.setattr(
+        "tasklib.msgrefs.load_history",
+        lambda env=None: (_ for _ in ()).throw(AssertionError("no read")),
+    )
     capsys.readouterr()
-    rc = main(["change", "#1", "--title", "New title", "--skip-msgref-quote", "version tag"])
+    rc = main(
+        ["change", "#1", "--title", "New title", "--skip-msgref-quote", "version tag"]
+    )
     assert rc == 0
     assert "skipped gates (justified)" in capsys.readouterr().err
     from tasklib.render import render
 
-    assert "msgref-quote" in render(_inject_fake.get("#1"))  # recorded in the Skipped gates section
+    assert "msgref-quote" in render(
+        _inject_fake.get("#1")
+    )  # recorded in the Skipped gates section
 
 
-def test_skip_msgref_quote_at_create_suppresses_expansion_and_history(capsys, _inject_fake, monkeypatch):
+def test_skip_msgref_quote_at_create_suppresses_expansion_and_history(
+    capsys, _inject_fake, monkeypatch
+):
     # a waived tg#<id> must NOT be expanded into an (unrelated, possibly private) quote, and the
     # history log must not be read at all — the skip governs expansion, not just the gate.
     def _boom(env=None):
@@ -2961,10 +3754,23 @@ def test_skip_msgref_quote_at_create_suppresses_expansion_and_history(capsys, _i
 
     monkeypatch.setattr("tasklib.msgrefs.load_history", _boom)
     argv = [
-        "create", "--title", "Bump", "--what", "bump to tg#2", "--why", "because",
-        "--impact", _GOOD_IMPACT, "--if-not-done", "pain",
-        "--acceptance", "it works", "--acceptance", "empty case",
-        "--skip-msgref-quote", "version tag, not a message ref",
+        "create",
+        "--title",
+        "Bump",
+        "--what",
+        "bump to tg#2",
+        "--why",
+        "because",
+        "--impact",
+        _GOOD_IMPACT,
+        "--if-not-done",
+        "pain",
+        "--acceptance",
+        "it works",
+        "--acceptance",
+        "empty case",
+        "--skip-msgref-quote",
+        "version tag, not a message ref",
     ]
     assert main(argv) == 0
     from tasklib.render import render
@@ -2975,35 +3781,58 @@ def test_skip_msgref_quote_at_create_suppresses_expansion_and_history(capsys, _i
     assert "msgref-quote" in body  # recorded in the Skipped gates section
 
 
-def test_persisted_msgref_skip_does_not_disable_expansion_of_a_new_reference(capsys, _inject_fake, monkeypatch):
+def test_persisted_msgref_skip_does_not_disable_expansion_of_a_new_reference(
+    capsys, _inject_fake, monkeypatch
+):
     # a ticket waived once (msgref-quote in its skips) must still expand a genuinely NEW reference
     # added by a later change — the waiver is not a permanent expansion kill-switch.
     main(_create_argv())
     _inject_fake.get("#1").skips["msgref-quote"] = "waived earlier for a version tag"
-    monkeypatch.setattr("tasklib.msgrefs.load_history", lambda env=None: _fake_history(99, "the new referenced message"))
+    monkeypatch.setattr(
+        "tasklib.msgrefs.load_history",
+        lambda env=None: _fake_history(99, "the new referenced message"),
+    )
     capsys.readouterr()
     assert main(["change", "#1", "--what", "now genuinely per tg#99"]) == 0
     from tasklib.render import render
 
     body = render(_inject_fake.get("#1"))
-    assert "the new referenced message" in body  # tg#99 WAS expanded despite the old waiver
+    assert (
+        "the new referenced message" in body
+    )  # tg#99 WAS expanded despite the old waiver
 
 
-def test_disabling_msgref_quote_config_stops_expansion_and_history(capsys, _inject_fake, monkeypatch):
+def test_disabling_msgref_quote_config_stops_expansion_and_history(
+    capsys, _inject_fake, monkeypatch
+):
     # enforce.msgref_quote: false is the master switch: a tg#<id> in a touched field is neither
     # expanded nor resolved against history — the whole feature is off.
     from tasklib.policy import EnforceConfig
 
-    monkeypatch.setattr(cli, "_enforce_config", lambda cfg: EnforceConfig(msgref_quote=False))
+    monkeypatch.setattr(
+        cli, "_enforce_config", lambda cfg: EnforceConfig(msgref_quote=False)
+    )
 
     def _boom(env=None):
         raise AssertionError("history must not be read when msgref_quote is disabled")
 
     monkeypatch.setattr("tasklib.msgrefs.load_history", _boom)
     argv = [
-        "create", "--title", "Ref", "--what", "per tg#2 do the thing", "--why", "because",
-        "--impact", _GOOD_IMPACT, "--if-not-done", "pain",
-        "--acceptance", "it works", "--acceptance", "empty case",
+        "create",
+        "--title",
+        "Ref",
+        "--what",
+        "per tg#2 do the thing",
+        "--why",
+        "because",
+        "--impact",
+        _GOOD_IMPACT,
+        "--if-not-done",
+        "pain",
+        "--acceptance",
+        "it works",
+        "--acceptance",
+        "empty case",
     ]
     assert main(argv) == 0
     from tasklib.render import render
@@ -3019,8 +3848,14 @@ def test_disabling_msgref_quote_config_stops_expansion_and_history(capsys, _inje
 @pytest.mark.parametrize(
     "title,expected_rejected",
     [
-        ("../outside.txt", False),  # slash gets stripped -> ".._outside.txt", not rejected
-        ("..\\outside.txt", False),  # backslash also stripped, on ANY platform (not just Windows)
+        (
+            "../outside.txt",
+            False,
+        ),  # slash gets stripped -> ".._outside.txt", not rejected
+        (
+            "..\\outside.txt",
+            False,
+        ),  # backslash also stripped, on ANY platform (not just Windows)
         ("..", True),  # bare parent-dir reference with nothing to strip
         (".", True),
         ("", True),
@@ -3062,7 +3897,9 @@ def test_ticket_dict_emits_attachments_truncated_flag():
     from tasklib.model import Attachment, Ticket
 
     ticket = Ticket(
-        attachments=[Attachment(id="1", title="a.png", url="https://uploads.linear.app/1")],
+        attachments=[
+            Attachment(id="1", title="a.png", url="https://uploads.linear.app/1")
+        ],
         attachments_truncated=True,
     )
     d = _ticket_dict(ticket)
@@ -3073,7 +3910,11 @@ def test_ticket_dict_omits_truncated_flag_when_not_truncated():
     from tasklib.cli import _ticket_dict
     from tasklib.model import Attachment, Ticket
 
-    ticket = Ticket(attachments=[Attachment(id="1", title="a.png", url="https://uploads.linear.app/1")])
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="a.png", url="https://uploads.linear.app/1")
+        ]
+    )
     d = _ticket_dict(ticket)
     assert "attachments_truncated" not in d
 
@@ -3104,7 +3945,9 @@ def test_sanitize_attachment_basename_strips_windows_drive_prefix(title):
     # the load-bearing assertion: even using WINDOWS path-join semantics (regardless of the host
     # platform this test suite actually runs on), the sanitized name can never discard dest_dir.
     joined = ntpath.join("downloads", result)
-    assert joined.startswith("downloads"), f"{title!r} sanitized to {result!r}, escaped dest_dir: {joined!r}"
+    assert joined.startswith("downloads"), (
+        f"{title!r} sanitized to {result!r}, escaped dest_dir: {joined!r}"
+    )
 
 
 def test_sanitize_attachment_basename_strips_trailing_dots_and_spaces():
@@ -3113,9 +3956,15 @@ def test_sanitize_attachment_basename_strips_trailing_dots_and_spaces():
     # file on that filesystem — must normalize to the same sanitized name.
     from tasklib.cli import _sanitize_attachment_basename
 
-    assert _sanitize_attachment_basename("shot.png.") == _sanitize_attachment_basename("shot.png")
-    assert _sanitize_attachment_basename("shot.png   ") == _sanitize_attachment_basename("shot.png")
-    assert _sanitize_attachment_basename("shot.png. . .") == _sanitize_attachment_basename("shot.png")
+    assert _sanitize_attachment_basename("shot.png.") == _sanitize_attachment_basename(
+        "shot.png"
+    )
+    assert _sanitize_attachment_basename(
+        "shot.png   "
+    ) == _sanitize_attachment_basename("shot.png")
+    assert _sanitize_attachment_basename(
+        "shot.png. . ."
+    ) == _sanitize_attachment_basename("shot.png")
 
 
 @pytest.mark.parametrize(
@@ -3206,13 +4055,19 @@ def test_unique_attachment_filenames_avoids_collision_with_a_later_original_titl
     from tasklib.model import Attachment
 
     a1 = Attachment(id="1", title="screenshot.png", url="https://uploads.linear.app/1")
-    a2 = Attachment(id="2", title="screenshot-2.png", url="https://uploads.linear.app/2")
+    a2 = Attachment(
+        id="2", title="screenshot-2.png", url="https://uploads.linear.app/2"
+    )
     a3 = Attachment(id="3", title="screenshot.png", url="https://uploads.linear.app/3")
     names = _unique_attachment_filenames([a1, a2, a3])
-    assert len(set(names.values())) == 3  # no two attachments share a destination filename
+    assert (
+        len(set(names.values())) == 3
+    )  # no two attachments share a destination filename
     assert names[id(a1)] == "screenshot.png"
     assert names[id(a2)] == "screenshot-2.png"
-    assert names[id(a3)] == "screenshot-3.png"  # skips -2 (taken by a2's OWN title), takes -3
+    assert (
+        names[id(a3)] == "screenshot-3.png"
+    )  # skips -2 (taken by a2's OWN title), takes -3
 
 
 def test_unique_attachment_filenames_dedupes_case_insensitively():
@@ -3230,7 +4085,9 @@ def test_unique_attachment_filenames_dedupes_case_insensitively():
     names = _unique_attachment_filenames([a1, a2])
     assert names[id(a1)] == "shot.png"
     assert names[id(a2)] != "SHOT.PNG"  # must NOT reuse the exact title verbatim
-    assert names[id(a2)].casefold() != "shot.png".casefold()  # and must not case-fold-collide either
+    assert (
+        names[id(a2)].casefold() != "shot.png".casefold()
+    )  # and must not case-fold-collide either
     assert len(set(names.values())) == 2
 
 
@@ -3273,7 +4130,9 @@ def test_unique_attachment_filenames_id_fallback_goes_through_the_same_sanitizer
 
     a = Attachment(id="CON", title="..", url="https://uploads.linear.app/1")
     names = _unique_attachment_filenames([a])
-    assert names[id(a)] == "attachment"  # both title ("..") and id ("CON") were rejected
+    assert (
+        names[id(a)] == "attachment"
+    )  # both title ("..") and id ("CON") were rejected
 
 
 def test_save_attachments_sanitizes_windows_drive_prefix_end_to_end(tmp_path):
@@ -3304,7 +4163,11 @@ def test_save_attachments_sanitizes_windows_drive_prefix_end_to_end(tmp_path):
         def is_native_attachment_url(self, url):
             return True
 
-    ticket = Ticket(attachments=[Attachment(id="1", title="C:payload.py", url="https://uploads.linear.app/1")])
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="C:payload.py", url="https://uploads.linear.app/1")
+        ]
+    )
     lines = _save_attachments(_FakeBackend(), ticket, str(dest_dir))
 
     saved = list(dest_dir.iterdir())
@@ -3327,7 +4190,11 @@ def test_save_attachments_writes_bytes_and_reports_success(tmp_path):
         def is_native_attachment_url(self, url):
             return True
 
-    ticket = Ticket(attachments=[Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")])
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")
+        ]
+    )
     lines = _save_attachments(_FakeBackend(), ticket, str(tmp_path))
     assert len(lines) == 1
     assert "shot.png" in lines[0]
@@ -3383,7 +4250,11 @@ def test_save_attachments_local_write_failure_reported_not_raised(tmp_path):
     # file path raises NotADirectoryError/FileExistsError (both OSError subclasses).
     blocked = tmp_path / "not-a-dir"
     blocked.write_text("occupied")
-    ticket = Ticket(attachments=[Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")])
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")
+        ]
+    )
 
     lines = _save_attachments(_FakeBackend(), ticket, str(blocked))
     assert len(lines) == 1
@@ -3397,7 +4268,9 @@ def test_save_attachments_backend_without_fetch_method_reports_and_skips(tmp_pat
     class _FakeGithubLikeBackend:
         name = "github-issues"
 
-    ticket = Ticket(attachments=[Attachment(id="1", title="shot.png", url="https://example.com/1")])
+    ticket = Ticket(
+        attachments=[Attachment(id="1", title="shot.png", url="https://example.com/1")]
+    )
     lines = _save_attachments(_FakeGithubLikeBackend(), ticket, str(tmp_path))
     assert len(lines) == 1
     assert "github-issues" in lines[0]
@@ -3426,16 +4299,25 @@ def test_save_attachments_skips_external_urls_when_backend_says_not_native(tmp_p
     ticket = Ticket(
         attachments=[
             Attachment(id="1", title="native.png", url="https://uploads.linear.app/1"),
-            Attachment(id="2", title="external.png", url="https://github.com/user-attachments/assets/2"),
+            Attachment(
+                id="2",
+                title="external.png",
+                url="https://github.com/user-attachments/assets/2",
+            ),
         ]
     )
     lines = _save_attachments(_FakeLinearBackend(), ticket, str(tmp_path))
 
-    assert fetched == ["https://uploads.linear.app/1"]  # the external one was never fetched
+    assert fetched == [
+        "https://uploads.linear.app/1"
+    ]  # the external one was never fetched
     assert (tmp_path / "native.png").read_bytes() == b"bytes"
     assert not (tmp_path / "external.png").exists()
     assert any("native.png" in ln and "✓" in ln for ln in lines)
-    assert any("external.png" in ln and "skipped" in ln and "https://github.com" in ln for ln in lines)
+    assert any(
+        "external.png" in ln and "skipped" in ln and "https://github.com" in ln
+        for ln in lines
+    )
 
 
 def test_save_attachments_skipped_external_does_not_consume_a_name_slot(tmp_path):
@@ -3456,8 +4338,14 @@ def test_save_attachments_skipped_external_does_not_consume_a_name_slot(tmp_path
 
     ticket = Ticket(
         attachments=[
-            Attachment(id="1", title="shot.png", url="https://github.com/user-attachments/assets/1"),  # skipped
-            Attachment(id="2", title="shot.png", url="https://uploads.linear.app/2"),  # native, SAME title
+            Attachment(
+                id="1",
+                title="shot.png",
+                url="https://github.com/user-attachments/assets/1",
+            ),  # skipped
+            Attachment(
+                id="2", title="shot.png", url="https://uploads.linear.app/2"
+            ),  # native, SAME title
         ]
     )
     lines = _save_attachments(_FakeLinearBackend(), ticket, str(tmp_path))
@@ -3488,7 +4376,9 @@ def test_save_attachments_does_not_duplicate_the_truncation_notice(tmp_path):
             return True
 
     ticket = Ticket(
-        attachments=[Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")],
+        attachments=[
+            Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")
+        ],
         attachments_truncated=True,
     )
     lines = _save_attachments(_FakeBackend(), ticket, str(tmp_path))
@@ -3506,9 +4396,13 @@ def test_save_attachments_fails_closed_when_backend_lacks_native_predicate(tmp_p
         name = "mystery-backend"
 
         def fetch_attachment_bytes(self, url):
-            raise AssertionError("must not be called — no native-url predicate to authorize it")
+            raise AssertionError(
+                "must not be called — no native-url predicate to authorize it"
+            )
 
-    ticket = Ticket(attachments=[Attachment(id="1", title="shot.png", url="https://example.com/1")])
+    ticket = Ticket(
+        attachments=[Attachment(id="1", title="shot.png", url="https://example.com/1")]
+    )
     lines = _save_attachments(_FetchOnlyBackend(), ticket, str(tmp_path))
     assert len(lines) == 1
     assert "skipped" in lines[0]
@@ -3532,11 +4426,19 @@ def test_save_attachments_does_not_overwrite_a_pre_existing_file(tmp_path):
         def is_native_attachment_url(self, url):
             return True
 
-    ticket = Ticket(attachments=[Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")])
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")
+        ]
+    )
     lines = _save_attachments(_FakeBackend(), ticket, str(tmp_path))
 
-    assert (tmp_path / "shot.png").read_bytes() == b"MY EXISTING FILE - DO NOT TOUCH"  # untouched
-    assert (tmp_path / "shot-2.png").read_bytes() == b"downloaded-bytes"  # the download landed here instead
+    assert (
+        tmp_path / "shot.png"
+    ).read_bytes() == b"MY EXISTING FILE - DO NOT TOUCH"  # untouched
+    assert (
+        tmp_path / "shot-2.png"
+    ).read_bytes() == b"downloaded-bytes"  # the download landed here instead
     assert any("shot-2.png" in ln and "✓" in ln for ln in lines)
 
 
@@ -3566,7 +4468,11 @@ def test_save_attachments_refuses_to_write_through_a_symlink(tmp_path):
         def is_native_attachment_url(self, url):
             return True
 
-    ticket = Ticket(attachments=[Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")])
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="shot.png", url="https://uploads.linear.app/1")
+        ]
+    )
     lines = _save_attachments(_FakeBackend(), ticket, str(tmp_path))
 
     assert real_target.read_bytes() == b"SECRET - must not be overwritten"  # untouched
@@ -3596,7 +4502,9 @@ def test_write_attachment_exclusive_refuses_to_follow_a_symlink(tmp_path):
     assert real_target.read_bytes() == b"SECRET"  # untouched
 
 
-def test_write_attachment_exclusive_leaves_no_partial_file_on_write_failure(tmp_path, monkeypatch):
+def test_write_attachment_exclusive_leaves_no_partial_file_on_write_failure(
+    tmp_path, monkeypatch
+):
     # review finding: a straight `open(dest_path, "xb")` write that fails PARTWAY (disk-full
     # mid-write) leaves a truncated file already claiming dest_path's name; a retry would then
     # treat that name as taken and save the real bytes under a spurious "-2" name instead. The
@@ -3622,7 +4530,9 @@ def test_write_attachment_exclusive_leaves_no_partial_file_on_write_failure(tmp_
 
     monkeypatch.setattr(os, "fdopen", failing_fdopen)
     with pytest.raises(OSError, match="disk full"):
-        _write_attachment_exclusive(str(tmp_path), dest_path, b"full-content-that-never-lands")
+        _write_attachment_exclusive(
+            str(tmp_path), dest_path, b"full-content-that-never-lands"
+        )
 
     assert not os.path.exists(dest_path)  # ...but dest_path itself was never created
     # the temp file was cleaned up too — no orphaned ".attach-*" litter in dest_dir

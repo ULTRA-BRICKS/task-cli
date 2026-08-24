@@ -31,11 +31,19 @@ class TicketBackend(Protocol):
         """Update an existing ticket (``ticket.id`` set). Returns the updated ``Ticket``."""
         ...
 
-    def list(self, *, labels: list[str] | None = None, state: State | None = None, limit: int = 30) -> list[Ticket]:
+    def list(
+        self,
+        *,
+        labels: list[str] | None = None,
+        state: State | None = None,
+        limit: int = 30,
+    ) -> list[Ticket]:
         """List tickets, optionally filtered by labels/state."""
         ...
 
-    def search(self, query: str, *, state: State | None = None, limit: int = 30) -> list[Ticket]:
+    def search(
+        self, query: str, *, state: State | None = None, limit: int = 30
+    ) -> list[Ticket]:
         """Full-text search over title+body."""
         ...
 
@@ -126,6 +134,45 @@ def backend_coordinate(backend) -> str:
     owner = str(getattr(backend, "owner", "") or "").strip().lower()
     repo = str(getattr(backend, "repo", "") or "").strip().lower()
     return f"github-issues:{owner}/{repo}"
+
+
+def verified_ticket_coordinate(cfg, backend, ticket) -> str:
+    """``ticket``'s REAL coordinate, correcting :func:`backend_coordinate` when the two disagree
+    (task-cli#83 review finding).
+
+    Outside a repo, a Linear ticket id is routed to whichever registered same-team project's
+    config happened to be picked FIRST (``cli._route_id_to_project``) to authenticate/query
+    with — Linear resolves ``get``/``update`` by identifier alone, so that pick can still
+    successfully fetch a ticket that actually lives in a DIFFERENT project on the same team.
+    ``ticket.backend_project_id`` (populated from Linear's own response, when the single-ticket
+    fetch requested it) is the ground truth; if it names a project THIS config also registers
+    under the same team, prefer that project's coordinate over the one initially guessed — so
+    the session-sidecar entry this feeds (task-cli#83) is attributed to the ticket's actual
+    project, not the config that merely happened to be able to fetch it.
+
+    Degrades to the plain :func:`backend_coordinate` whenever there's nothing to correct
+    (GitHub, no reported project id, the report matches what was already configured, or no
+    OTHER registered project claims that id) — pure, never raises.
+    """
+    naive = backend_coordinate(backend)
+    actual_project = str(getattr(ticket, "backend_project_id", "") or "").strip()
+    if backend.name != "linear" or not actual_project:
+        return naive
+    configured_project = str(getattr(backend, "project", "") or "").strip()
+    if actual_project == configured_project:
+        return naive
+    from ..projects import projects_from_config
+
+    team = str(getattr(backend, "team_key", "") or "").strip().upper()
+    for project in projects_from_config(getattr(cfg, "data", None) or {}):
+        if project.backend != "linear":
+            continue
+        lin = project.overlay.get("linear", {})
+        if str(lin.get("team", "")).strip().upper() != team:
+            continue
+        if str(lin.get("project", "")).strip() == actual_project:
+            return project.coordinate
+    return naive
 
 
 def get_backend(config, *, env: dict | None = None):
