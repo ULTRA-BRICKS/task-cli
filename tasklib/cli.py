@@ -3353,7 +3353,7 @@ def cmd_classify(args: argparse.Namespace) -> int:
         print(_warn(f"  no classifier provider available; biasing to {verdict.value}"))
     else:
         output = _run_review_just_ask(resolved.model_arg, build_prompt(args.text))
-        verdict = parse_verdict(output, bias=bias)
+        verdict = parse_verdict(output, bias=bias, message=args.text)
 
     from .logging import log_event
 
