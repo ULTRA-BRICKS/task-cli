@@ -129,8 +129,12 @@ class Ticket:
     acceptance: list[Criterion] = field(default_factory=list)
     screenshots: list[Screenshot] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
-    links: dict[str, str] = field(default_factory=dict)  # URLs only, e.g. {"PR": "https://…", "Issue": "https://…"}
-    skips: dict[str, str] = field(default_factory=dict)  # gate -> justification (escape hatch)
+    links: dict[str, str] = field(
+        default_factory=dict
+    )  # URLs only, e.g. {"PR": "https://…", "Issue": "https://…"}
+    skips: dict[str, str] = field(
+        default_factory=dict
+    )  # gate -> justification (escape hatch)
     state: State = State.TODO
 
     # populated only when the ticket exists in a backend
@@ -190,11 +194,26 @@ class Ticket:
     # fetched" instead of silently presenting a partial list as the complete set.
     attachments_truncated: bool = False
 
+    # Also appended last (same reasoning as ``due`` above). The backend-native project/container
+    # id this ticket ACTUALLY lives in, when the backend can report one distinct from whatever
+    # project its own configured query scope resolved to (Linear only, for now; "" for GitHub and
+    # for a not-yet-fetched ticket). task-cli#83 review finding: when multiple registered Linear
+    # projects share a team, an outside-repo id lookup picks a project's config deterministically
+    # to authenticate/query with, but Linear resolves `get`/`update` by identifier alone — the
+    # ticket can genuinely belong to a DIFFERENT project on that team than the one whose config
+    # happened to be picked. This field lets a caller re-derive the ticket's real coordinate
+    # (`backends.verified_ticket_coordinate`) instead of trusting the picked backend's own static
+    # config, which task-cli#83's session-sidecar attribution needs to be honest.
+    backend_project_id: str = ""
+
     def __post_init__(self) -> None:
         # Coerce plain-string criteria to unchecked Criterion objects. This keeps construction
         # ergonomic (`Ticket(acceptance=["a", "b"])`) while the rest of the code — render, parse,
         # the gates, the `check` command — always works in terms of Criterion (text/checked/proof).
-        self.acceptance = [c if isinstance(c, Criterion) else Criterion(text=str(c)) for c in self.acceptance]
+        self.acceptance = [
+            c if isinstance(c, Criterion) else Criterion(text=str(c))
+            for c in self.acceptance
+        ]
 
     @property
     def is_ui(self) -> bool:

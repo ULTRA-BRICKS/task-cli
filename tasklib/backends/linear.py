@@ -76,10 +76,13 @@ def _safe_urlparse(url: str):
     """
     try:
         parsed = urlparse(url)
-        _ = parsed.port  # property access validates port syntax (raises ValueError if malformed)
+        _ = (
+            parsed.port
+        )  # property access validates port syntax (raises ValueError if malformed)
     except ValueError:
         return None
     return parsed
+
 
 # Map a Linear workflow-state ``type`` onto our normalized State.
 _TYPE_TO_STATE = {
@@ -126,7 +129,9 @@ class LinearBackend:
         lin = config.section("linear")
         team = str(lin.get("team", "")).strip()
         if not team:
-            raise BackendError("linear backend requires a team key (set linear.team in task.yaml)")
+            raise BackendError(
+                "linear backend requires a team key (set linear.team in task.yaml)"
+            )
         creds = linear_key(env)
         return cls(
             api_key=creds.api_key,
@@ -142,7 +147,9 @@ class LinearBackend:
     def _gql(self, query: str, variables: dict | None = None):
         payload = {"query": query, "variables": variables or {}}
         try:
-            result = request_json(API_URL, method="POST", headers=self._headers(), payload=payload)
+            result = request_json(
+                API_URL, method="POST", headers=self._headers(), payload=payload
+            )
         except AmbiguousHttpError as exc:
             # see the matching comment in github_issues.py: this must stay its own, distinctly-
             # typed wrapper rather than falling through to the generic BackendError below.
@@ -182,7 +189,9 @@ class LinearBackend:
         for fallback in ("unstarted", "backlog", "started"):
             if fallback in self._states_by_type:
                 return self._states_by_type[fallback]
-        raise BackendError(f"linear: team {self.team_key} has no workflow state for {state.value}")
+        raise BackendError(
+            f"linear: team {self.team_key} has no workflow state for {state.value}"
+        )
 
     def _label_ids(self, names: list[str]) -> list[str]:
         """Resolve label names → ids, CREATING any that don't exist yet.
@@ -234,7 +243,9 @@ class LinearBackend:
                 subtitle=str(a.get("subtitle") or ""),
             )
             for a in (attachments_node.get("nodes") or [])
-            if isinstance(a, dict)  # review finding: a null ENTRY inside `nodes` (same "unusual
+            if isinstance(
+                a, dict
+            )  # review finding: a null ENTRY inside `nodes` (same "unusual
             # but possible GraphQL shape" class the container-level `or {}` guards defend
             # against) would otherwise raise AttributeError on `a.get(...)`.
         ]
@@ -257,13 +268,22 @@ class LinearBackend:
             # review finding: `first:250` is a cap, not exhaustive pagination — surface the
             # truncation explicitly (via `pageInfo.hasNextPage`) rather than silently presenting
             # a partial list as "all of the ticket's attachments". See `cli._save_attachments`.
-            attachments_truncated=bool((attachments_node.get("pageInfo") or {}).get("hasNextPage")),
+            attachments_truncated=bool(
+                (attachments_node.get("pageInfo") or {}).get("hasNextPage")
+            ),
+            # task-cli#83 review finding: this ticket's ACTUAL project, as Linear reports it —
+            # NOT necessarily `self.project` (the project this backend instance was configured/
+            # authenticated to query with). Populated on every fetch path that requests
+            # `project{id}` — the single-ticket path (`_ISSUE_FIELDS`) AND the bulk `list`/
+            # `search` paths (they already request it separately, for their own team/project
+            # filtering — see their query strings above). Empty ONLY for `create()`'s response,
+            # which never requests `project{id}` (a just-created ticket's project is already
+            # known from the mutation's own `projectId` input, nothing to look up).
+            backend_project_id=str((node.get("project") or {}).get("id") or ""),
         )
         return parse(node.get("description") or "", base)
 
-    _ISSUE_FIELDS_BASE = (
-        "id identifier url title description dueDate updatedAt state{type name} labels{nodes{name}} creator{id}"
-    )
+    _ISSUE_FIELDS_BASE = "id identifier url title description dueDate updatedAt state{type name} labels{nodes{name}} creator{id}"
     # review finding: Linear's `attachments` connection defaults to a 50-item page — an issue
     # with 51+ attachments would silently lose everything past the first page. `first: 250` is
     # not exhaustive cursor-based pagination (a genuinely unbounded connection would still need
@@ -275,7 +295,16 @@ class LinearBackend:
     # `_issue_by_identifier`) — `list`/`search` (the bulk, N-tickets-at-once paths) use the base
     # set. Pulling up to 250 attachment sub-objects PER ticket into every `task list`/`find` call
     # would be a real payload/latency regression for a field almost no list consumer needs.
-    _ISSUE_FIELDS = _ISSUE_FIELDS_BASE + " attachments(first:250){nodes{id title url subtitle} pageInfo{hasNextPage}}"
+    #
+    # `project{id}` (task-cli#83 review finding): needed so `_node_to_ticket` can report the
+    # ticket's REAL project, distinct from whichever project's config this backend instance was
+    # constructed/authenticated with — a single cheap scalar, unlike `attachments`, so no reason
+    # to withhold it from the bulk fields too, but it's added here (not `_ISSUE_FIELDS_BASE`)
+    # simply because the single-ticket path is the only one that currently needs it consumed.
+    _ISSUE_FIELDS = (
+        _ISSUE_FIELDS_BASE
+        + " project{id} attachments(first:250){nodes{id title url subtitle} pageInfo{hasNextPage}}"
+    )
 
     # ── protocol ──────────────────────────────────────────────────────────────────
     def create(self, ticket: Ticket) -> Ticket:
@@ -358,10 +387,14 @@ class LinearBackend:
         data = self._gql(
             # base fields — the bulk N-tickets-at-once path; see _ISSUE_FIELDS's own comment.
             "query($filter:IssueFilter,$n:Int){issues(filter:$filter,first:$n,"
-            "orderBy:updatedAt){nodes{" + self._ISSUE_FIELDS_BASE + " team{key} project{id}}}}",
+            "orderBy:updatedAt){nodes{"
+            + self._ISSUE_FIELDS_BASE
+            + " team{key} project{id}}}}",
             {"filter": flt, "n": min(limit, 100)},
         )
-        tickets = [self._node_to_ticket(n) for n in data.get("issues", {}).get("nodes", [])]
+        tickets = [
+            self._node_to_ticket(n) for n in data.get("issues", {}).get("nodes", [])
+        ]
         if state is not None:
             tickets = [t for t in tickets if t.state == state]
         return tickets[:limit]
@@ -382,7 +415,9 @@ class LinearBackend:
         nodes = data.get("searchIssues", {}).get("nodes", [])
         nodes = [n for n in nodes if (n.get("team") or {}).get("key") == self.team_key]
         if self.project:
-            nodes = [n for n in nodes if (n.get("project") or {}).get("id") == self.project]
+            nodes = [
+                n for n in nodes if (n.get("project") or {}).get("id") == self.project
+            ]
         tickets = [self._node_to_ticket(n) for n in nodes]
         if state is not None:
             tickets = [t for t in tickets if t.state == state]
@@ -412,7 +447,11 @@ class LinearBackend:
         node = self._issue_by_identifier(ticket_id)
         issue_id = node["id"]
         if "://" in file_path:
-            self._register_attachment(issue_id, title=os.path.basename(file_path) or "attachment", url=file_path)
+            self._register_attachment(
+                issue_id,
+                title=os.path.basename(file_path) or "attachment",
+                url=file_path,
+            )
             return file_path
         if self.attachment_mode == "link":
             raise BackendError(
@@ -434,7 +473,9 @@ class LinearBackend:
         # bare AttributeError from `.get("success")` on None (review finding, same class as the
         # read-path `attachments`/`pageInfo` guards above).
         if not (data.get("attachmentCreate") or {}).get("success"):
-            raise BackendError(f"linear: attachmentCreate returned success=false for issue {issue_id}")
+            raise BackendError(
+                f"linear: attachmentCreate returned success=false for issue {issue_id}"
+            )
 
     def _upload_and_attach(self, issue_id: str, file_path: str) -> str:
         """The real native-upload path: Linear's ``fileUpload`` mutation returns a short-lived
@@ -453,13 +494,19 @@ class LinearBackend:
             with open(file_path, "rb") as f:
                 body = f.read()
         except OSError as exc:
-            raise BackendError(f"linear: cannot read {file_path} for upload: {exc}") from exc
+            raise BackendError(
+                f"linear: cannot read {file_path} for upload: {exc}"
+            ) from exc
 
         data = self._gql(
             "mutation($contentType:String!,$filename:String!,$size:Int!){"
             "fileUpload(contentType:$contentType,filename:$filename,size:$size){"
             "success uploadFile{assetUrl uploadUrl headers{key value}}}}",
-            {"contentType": content_type, "filename": os.path.basename(file_path), "size": len(body)},
+            {
+                "contentType": content_type,
+                "filename": os.path.basename(file_path),
+                "size": len(body),
+            },
         )
         # `or {}`: a present-but-null `fileUpload` must not raise a bare AttributeError on the
         # `.get("success")` below (review finding, same class as the guards above).
@@ -469,11 +516,19 @@ class LinearBackend:
         # that escapes `_attach_screenshots`'s BackendError-only best-effort catch, crashing a
         # command whose create/update already succeeded. Validate the whole shape up front.
         upload_file = res.get("uploadFile") if res.get("success") else None
-        if not isinstance(upload_file, dict) or not upload_file.get("uploadUrl") or not upload_file.get("assetUrl"):
-            raise BackendError(f"linear: fileUpload returned a malformed response: {res!r}")
+        if (
+            not isinstance(upload_file, dict)
+            or not upload_file.get("uploadUrl")
+            or not upload_file.get("assetUrl")
+        ):
+            raise BackendError(
+                f"linear: fileUpload returned a malformed response: {res!r}"
+            )
         put_headers = _parse_upload_headers(upload_file.get("headers"))
         if put_headers is None:
-            raise BackendError(f"linear: fileUpload returned malformed upload headers: {upload_file.get('headers')!r}")
+            raise BackendError(
+                f"linear: fileUpload returned malformed upload headers: {upload_file.get('headers')!r}"
+            )
         put_headers["Content-Type"] = content_type
         try:
             # review finding: same_host_redirects_only=True here too, for consistency with
@@ -482,14 +537,24 @@ class LinearBackend:
             # redirecting the file BYTES to an attacker-controlled host is still worth refusing
             # (the screenshot content itself could be sensitive).
             request_bytes(
-                upload_file["uploadUrl"], method="PUT", headers=put_headers, data=body, same_host_redirects_only=True
+                upload_file["uploadUrl"],
+                method="PUT",
+                headers=put_headers,
+                data=body,
+                same_host_redirects_only=True,
             )
         except AmbiguousHttpError as exc:
-            raise AmbiguousBackendError(f"linear: upload PUT for {file_path}: {exc}") from exc
+            raise AmbiguousBackendError(
+                f"linear: upload PUT for {file_path}: {exc}"
+            ) from exc
         except HttpError as exc:
-            raise BackendError(f"linear: upload PUT for {file_path} failed: {exc} {exc.body}".strip()) from exc
+            raise BackendError(
+                f"linear: upload PUT for {file_path} failed: {exc} {exc.body}".strip()
+            ) from exc
         asset_url = upload_file["assetUrl"]
-        self._register_attachment(issue_id, title=os.path.basename(file_path), url=asset_url)
+        self._register_attachment(
+            issue_id, title=os.path.basename(file_path), url=asset_url
+        )
         return asset_url
 
     def is_native_attachment_url(self, url: str) -> bool:
@@ -556,17 +621,30 @@ class LinearBackend:
         # `_safe_urlparse` catches both and never raises, so THIS is where either kind gets
         # converted into the same clean BackendError as any other refusal.
         if parsed is None:
-            raise BackendError(f"linear: refusing to fetch attachment with an unparseable url {url!r}")
+            raise BackendError(
+                f"linear: refusing to fetch attachment with an unparseable url {url!r}"
+            )
         if parsed.scheme not in ("http", "https"):
-            raise BackendError(f"linear: refusing to fetch attachment with scheme {parsed.scheme!r} ({url!r})")
+            raise BackendError(
+                f"linear: refusing to fetch attachment with scheme {parsed.scheme!r} ({url!r})"
+            )
         is_linear_asset = self.is_native_attachment_url(url)
         headers = self._headers() if is_linear_asset else {}
         try:
-            return request_bytes(url, method="GET", headers=headers, same_host_redirects_only=is_linear_asset)
+            return request_bytes(
+                url,
+                method="GET",
+                headers=headers,
+                same_host_redirects_only=is_linear_asset,
+            )
         except AmbiguousHttpError as exc:
-            raise AmbiguousBackendError(f"linear: fetch attachment {url}: {exc}") from exc
+            raise AmbiguousBackendError(
+                f"linear: fetch attachment {url}: {exc}"
+            ) from exc
         except HttpError as exc:
-            raise BackendError(f"linear: fetch attachment {url} failed: {exc} {exc.body}".strip()) from exc
+            raise BackendError(
+                f"linear: fetch attachment {url} failed: {exc} {exc.body}".strip()
+            ) from exc
 
     def transition(self, ticket_id: str, state: State) -> Ticket:
         ticket = self.get(ticket_id)

@@ -37,7 +37,9 @@ def _gh_config(tmp_path, projects: str) -> str:
 # ── outside a repo, no registry → 3-part errors, never a crash ──────────────────────
 
 
-def test_list_outside_repo_no_registry_errors_with_guidance(capsys, tmp_path, monkeypatch):
+def test_list_outside_repo_no_registry_errors_with_guidance(
+    capsys, tmp_path, monkeypatch
+):
     rc = main(["list", "-C", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 2
@@ -48,8 +50,21 @@ def test_list_outside_repo_no_registry_errors_with_guidance(capsys, tmp_path, mo
 
 def test_create_outside_repo_gives_3part_error(capsys, tmp_path):
     rc = main(
-        ["create", "-C", str(tmp_path), "--title", "t", "--why", "w", "--impact", "i",
-         "--if-not-done", "c", "--acceptance", "a"]
+        [
+            "create",
+            "-C",
+            str(tmp_path),
+            "--title",
+            "t",
+            "--why",
+            "w",
+            "--impact",
+            "i",
+            "--if-not-done",
+            "c",
+            "--acceptance",
+            "a",
+        ]
     )
     out = capsys.readouterr().out
     assert rc == 2
@@ -65,17 +80,34 @@ def test_read_outside_repo_unroutable_id_errors(capsys, tmp_path):
     assert "cannot resolve which project" in out
 
 
-def test_create_outside_repo_linear_backend_gives_linear_3part_error(capsys, tmp_path, monkeypatch):
+def test_create_outside_repo_linear_backend_gives_linear_3part_error(
+    capsys, tmp_path, monkeypatch
+):
     # with the global backend set to linear but no team resolvable, `create` outside a repo
     # must give the LINEAR-flavored HOW (not the GitHub --repo one). Covers the linear branch.
     cfg_home = tmp_path / "config"
     d = cfg_home / "task-cli"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "config.yaml").write_text("version: 1\nbackend: linear\nlinear: {team: ''}\n", encoding="utf-8")
+    (d / "config.yaml").write_text(
+        "version: 1\nbackend: linear\nlinear: {team: ''}\n", encoding="utf-8"
+    )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
     rc = main(
-        ["create", "-C", str(tmp_path), "--title", "t", "--why", "w", "--impact", "i",
-         "--if-not-done", "c", "--acceptance", "a"]
+        [
+            "create",
+            "-C",
+            str(tmp_path),
+            "--title",
+            "t",
+            "--why",
+            "w",
+            "--impact",
+            "i",
+            "--if-not-done",
+            "c",
+            "--acceptance",
+            "a",
+        ]
     )
     out = capsys.readouterr().out
     assert rc == 2
@@ -83,7 +115,9 @@ def test_create_outside_repo_linear_backend_gives_linear_3part_error(capsys, tmp
     assert "linear.team" in out  # the linear HOW, not the github --repo one
 
 
-def test_list_in_repo_with_broken_remote_surfaces_error_not_outside_repo(capsys, tmp_path):
+def test_list_in_repo_with_broken_remote_surfaces_error_not_outside_repo(
+    capsys, tmp_path
+):
     # INSIDE a git repo but the origin is an unsupported URL: this is a real error, NOT
     # "outside a repo" / "no projects". It must surface (exit 2, clean message), never be masked
     # as the empty cross-project view. Regression for the codex P2 (BackendError swallowed).
@@ -93,7 +127,15 @@ def test_list_in_repo_with_broken_remote_surfaces_error_not_outside_repo(capsys,
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(
-        ["git", "-C", str(repo), "remote", "add", "origin", "https://example.com/not-github"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/not-github",
+        ],
         check=True,
     )
     rc = main(["list", "-C", str(repo)])
@@ -104,7 +146,9 @@ def test_list_in_repo_with_broken_remote_surfaces_error_not_outside_repo(capsys,
     assert "remote" in out.lower() or "github" in out.lower()
 
 
-def test_list_in_repo_linear_missing_team_surfaces_config_error_not_outside_repo(capsys, tmp_path):
+def test_list_in_repo_linear_missing_team_surfaces_config_error_not_outside_repo(
+    capsys, tmp_path
+):
     # INSIDE a git repo whose task.yaml selects `backend: linear` but omits `linear.team`: this
     # is a real, actionable in-repo misconfiguration. It must surface the backend's "requires a
     # team key" error (exit 2), NOT be demoted to the "outside a repo" / "no projects" path.
@@ -174,7 +218,9 @@ def test_list_outside_repo_groups_by_project(capsys, tmp_path, monkeypatch):
     from tasklib.backends import BackendError
 
     store = {
-        "acme/frontend": [Ticket(title="Fix header", state=State.IN_PROGRESS, id="#12")],
+        "acme/frontend": [
+            Ticket(title="Fix header", state=State.IN_PROGRESS, id="#12")
+        ],
         "acme/backend": [
             Ticket(title="DB migration", state=State.TODO, id="#7"),
             Ticket(title="Rate limit", state=State.DONE, id="#3"),
@@ -210,7 +256,10 @@ def test_list_outside_repo_json_is_structured(capsys, tmp_path, monkeypatch):
     store = {"acme/frontend": [Ticket(title="Fix header", state=State.TODO, id="#12")]}
     monkeypatch.setattr("tasklib.backends.get_backend", _ByCoordBackend.factory(store))
     monkeypatch.setenv(
-        "XDG_CONFIG_HOME", _gh_config(tmp_path, "projects:\n  - {name: acme/frontend, repo: acme/frontend}\n")
+        "XDG_CONFIG_HOME",
+        _gh_config(
+            tmp_path, "projects:\n  - {name: acme/frontend, repo: acme/frontend}\n"
+        ),
     )
     rc = main(["list", "-C", str(tmp_path), "--json"])
     out = capsys.readouterr().out
@@ -245,17 +294,27 @@ def test_find_outside_repo_searches_all_projects_grouped(capsys, tmp_path, monke
     assert "acme/backend" in out and "#2" in out
 
 
-def test_gantt_outside_repo_flattens_projects_onto_one_axis(capsys, tmp_path, monkeypatch):
+def test_gantt_outside_repo_flattens_projects_onto_one_axis(
+    capsys, tmp_path, monkeypatch
+):
     # unlike `list` (grouped per project), `gantt` flattens every project's tickets onto ONE
     # timeline. Assert tickets from >1 project both appear as rows, keyed by their id prefix.
     store = {
-        "acme/frontend": [Ticket(title="Fix header", state=State.IN_PROGRESS, id="#12", due="2026-07-01")],
-        "acme/backend": [Ticket(title="DB migration", state=State.TODO, id="#7", due="2026-06-15")],
+        "acme/frontend": [
+            Ticket(
+                title="Fix header", state=State.IN_PROGRESS, id="#12", due="2026-07-01"
+            )
+        ],
+        "acme/backend": [
+            Ticket(title="DB migration", state=State.TODO, id="#7", due="2026-06-15")
+        ],
     }
     monkeypatch.setattr("tasklib.backends.get_backend", _ByCoordBackend.factory(store))
     monkeypatch.setenv(
         "XDG_CONFIG_HOME",
-        _gh_config(tmp_path, "projects:\n  - {repo: acme/frontend}\n  - {repo: acme/backend}\n"),
+        _gh_config(
+            tmp_path, "projects:\n  - {repo: acme/frontend}\n  - {repo: acme/backend}\n"
+        ),
     )
     rc = main(["gantt", "-C", str(tmp_path), "--json"])
     out = capsys.readouterr().out
@@ -283,13 +342,17 @@ def test_grouped_list_is_paged_on_tty(capsys, tmp_path, monkeypatch):
     from tasklib import cli as _cli
 
     store = {
-        "acme/frontend": [Ticket(title="Fix header", state=State.IN_PROGRESS, id="#12")],
+        "acme/frontend": [
+            Ticket(title="Fix header", state=State.IN_PROGRESS, id="#12")
+        ],
         "acme/backend": [Ticket(title="DB migration", state=State.TODO, id="#7")],
     }
     monkeypatch.setattr("tasklib.backends.get_backend", _ByCoordBackend.factory(store))
     monkeypatch.setenv(
         "XDG_CONFIG_HOME",
-        _gh_config(tmp_path, "projects:\n  - {repo: acme/frontend}\n  - {repo: acme/backend}\n"),
+        _gh_config(
+            tmp_path, "projects:\n  - {repo: acme/frontend}\n  - {repo: acme/backend}\n"
+        ),
     )
     sink = tmp_path / "sink.txt"
     fake_pager = tmp_path / "pg.sh"
@@ -307,7 +370,9 @@ def test_grouped_list_is_paged_on_tty(capsys, tmp_path, monkeypatch):
     assert "acme/backend" in paged and "#7" in paged
 
 
-def test_read_outside_repo_routes_to_single_github_project(capsys, tmp_path, monkeypatch):
+def test_read_outside_repo_routes_to_single_github_project(
+    capsys, tmp_path, monkeypatch
+):
     # exactly one github project registered → a `#id` routes there unambiguously.
     class _Get:
         def __call__(self, cfg, env=None):
@@ -317,7 +382,9 @@ def test_read_outside_repo_routes_to_single_github_project(capsys, tmp_path, mon
     class _One:
         def get(self, tid):
             assert tid == "#42"
-            return Ticket(title="The one", what="body", state=State.TODO, id="#42", url="u")
+            return Ticket(
+                title="The one", what="body", state=State.TODO, id="#42", url="u"
+            )
 
     monkeypatch.setattr("tasklib.backends.get_backend", _Get())
     monkeypatch.setenv(
@@ -333,7 +400,8 @@ def test_read_outside_repo_ambiguous_github_id_errors(capsys, tmp_path, monkeypa
     # two github projects → a bare `#id` is ambiguous → honest 3-part error, no guess.
     monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: object())
     monkeypatch.setenv(
-        "XDG_CONFIG_HOME", _gh_config(tmp_path, "projects:\n  - {repo: a/one}\n  - {repo: a/two}\n")
+        "XDG_CONFIG_HOME",
+        _gh_config(tmp_path, "projects:\n  - {repo: a/one}\n  - {repo: a/two}\n"),
     )
     rc = main(["read", "#9", "-C", str(tmp_path)])
     out = capsys.readouterr().out
@@ -351,7 +419,9 @@ def test_status_outside_repo_routes_linear_id_by_team(capsys, tmp_path, monkeypa
 
     class _Lin:
         def get(self, tid):
-            return Ticket(title="Linear one", state=State.IN_PROGRESS, id="HYP-3", url="u")
+            return Ticket(
+                title="Linear one", state=State.IN_PROGRESS, id="HYP-3", url="u"
+            )
 
     monkeypatch.setattr("tasklib.backends.get_backend", _Get())
     monkeypatch.setenv(
@@ -367,7 +437,9 @@ def test_status_outside_repo_routes_linear_id_by_team(capsys, tmp_path, monkeypa
     assert "HYP-3" in out and "in-progress" in out
 
 
-def test_read_outside_repo_two_same_team_linear_projects_routes_deterministically(capsys, tmp_path, monkeypatch):
+def test_read_outside_repo_two_same_team_linear_projects_routes_deterministically(
+    capsys, tmp_path, monkeypatch
+):
     # two HYP projects (different Linear projects, same team). A Linear id is team-scoped and
     # get/update ignore project, so the id resolves via either — route to the first, NOT "ambiguous".
     seen = {}
@@ -396,7 +468,9 @@ def test_read_outside_repo_two_same_team_linear_projects_routes_deterministicall
     out = capsys.readouterr().out
     assert rc == 0
     assert "HYP-7" in out
-    assert seen["team"] == "HYP" and seen["project"] == "alpha"  # the FIRST same-team match
+    assert (
+        seen["team"] == "HYP" and seen["project"] == "alpha"
+    )  # the FIRST same-team match
 
 
 # ── in-repo session fallback (session-vs-all messaging) ─────────────────────────────
@@ -431,7 +505,10 @@ class _SessionFake:
 def test_list_in_repo_no_session_falls_back_to_all(capsys, tmp_path, monkeypatch):
     _pin_current_repo(monkeypatch)
     backend = _SessionFake(
-        all_tickets=[Ticket(title="A", state=State.TODO, id="#1"), Ticket(title="B", state=State.TODO, id="#2")],
+        all_tickets=[
+            Ticket(title="A", state=State.TODO, id="#1"),
+            Ticket(title="B", state=State.TODO, id="#2"),
+        ],
         session_tickets=[],
     )
     monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: backend)
@@ -458,11 +535,16 @@ def test_list_in_repo_session_with_no_tickets_falls_back(capsys, tmp_path, monke
     assert "#1" in out
 
 
-def test_list_in_repo_session_with_tickets_scopes_no_fallback_line(capsys, tmp_path, monkeypatch):
+def test_list_in_repo_session_with_tickets_scopes_no_fallback_line(
+    capsys, tmp_path, monkeypatch
+):
     _pin_current_repo(monkeypatch)
     monkeypatch.setenv("TASK_SESSION", "sess-mine")
     backend = _SessionFake(
-        all_tickets=[Ticket(title="A", state=State.TODO, id="#1"), Ticket(title="Mine", state=State.TODO, id="#9")],
+        all_tickets=[
+            Ticket(title="A", state=State.TODO, id="#1"),
+            Ticket(title="Mine", state=State.TODO, id="#9"),
+        ],
         session_tickets=[Ticket(title="Mine", state=State.TODO, id="#9")],
     )
     monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: backend)
@@ -494,7 +576,9 @@ def test_list_all_in_repo_uses_grouped_view(capsys, tmp_path, monkeypatch):
     assert "github-issues" in out
 
 
-def test_list_all_marks_current_even_when_repo_is_in_registry(capsys, tmp_path, monkeypatch):
+def test_list_all_marks_current_even_when_repo_is_in_registry(
+    capsys, tmp_path, monkeypatch
+):
     # the cwd repo is ALSO a registry entry (under its own label). It must still be flagged
     # (current) and report current:true in JSON — currentness tracks by coordinate, not by
     # registry-explicitness. Regression for the codex P2 (synthetic suppression dropped current).
@@ -523,3 +607,149 @@ def test_list_all_marks_current_even_when_repo_is_in_registry(capsys, tmp_path, 
     assert by_name["acme/other"]["current"] is False
     # not double-listed (the synthetic current project was suppressed by coordinate)
     assert sum(1 for g in payload if g["current"]) == 1
+
+
+# ── outside a repo, same-team Linear id routing → session-sidecar attribution ────────
+# task-cli#83 2nd-round review finding (codex + Opus, independently): the unit tests for
+# `verified_ticket_coordinate` in test_backends.py don't pin that `_record_session_touch`
+# actually ROUTES through it — reverting that one call site back to `_safe_backend_coordinate`
+# would leave the whole suite green without these end-to-end tests.
+
+
+class _MisroutedLinearBackend:
+    """Simulates the actual task-cli#83 bug: constructed for whichever same-team project
+    `_route_id_to_project` picked FIRST (`self.project`), but `get`/`transition` return a
+    ticket that genuinely lives in a DIFFERENT project on that team (`ticket.backend_project_id`)
+    — exactly what real Linear does (identifier-only resolution, no project cross-check).
+
+    Holds a registry of tickets by id (not just one) so a multi-ticket session — needed to
+    exercise `_session_attention_notice`'s read-back of an EARLIER mutation while a LATER one
+    is in flight — can be simulated too."""
+
+    name = "linear"
+
+    def __init__(self, team_key: str, project: str, tickets: dict[str, Ticket]) -> None:
+        self.team_key = team_key
+        self.project = project
+        self._tickets = tickets
+
+    def get(self, ticket_id):
+        return self._tickets[ticket_id]
+
+    def transition(self, ticket_id, state):
+        ticket = self._tickets[ticket_id]
+        ticket.state = state
+        return ticket
+
+    def session_tickets(self, label, *, limit=30):
+        # 4th-round review finding (codex): a real `LinearBackend.session_tickets()` calls
+        # `list()`, which filters to `self.project` WHEN ONE IS PINNED (see linear.py's
+        # `list()`) — a project-pinned registry entry's own tickets can never see a DIFFERENT
+        # project's ticket through this call at all, regardless of what
+        # `verified_ticket_coordinate` later does with whatever IS returned. Enforcing that
+        # same filter here keeps this fake honest instead of silently masking that constraint.
+        matches = [t for t in self._tickets.values() if label in t.labels]
+        if self.project:
+            matches = [t for t in matches if t.backend_project_id == self.project]
+        return matches[:limit]
+
+
+def _misrouted_linear_backend_factory(tickets: dict[str, Ticket]):
+    def get_backend(cfg, env=None):
+        team = str(cfg.section("linear").get("team", "")).strip()
+        project = str(cfg.section("linear").get("project", "")).strip()
+        return _MisroutedLinearBackend(team, project, tickets)
+
+    return get_backend
+
+
+def _misrouted_project_config(tmp_path) -> str:
+    return _gh_config(
+        tmp_path,
+        "projects:\n"
+        "  - {name: proj-a, backend: linear, team: hyp, project: proj-a}\n"
+        "  - {name: proj-b, backend: linear, team: hyp, project: proj-b}\n",
+    )
+
+
+def test_status_outside_repo_same_team_linear_records_touch_under_actual_project(
+    monkeypatch, tmp_path
+):
+    from tasklib.session import read_entries
+
+    monkeypatch.setenv("TASK_SESSION", "testsess")
+    # `_route_id_to_project` picks the FIRST same-team match — "proj-a", registered first —
+    # to authenticate/query with. The ticket it fetches actually lives in "proj-b".
+    ticket = Ticket(
+        id="HYP-1", title="misrouted", state=State.TODO, labels=["session:testsess"]
+    )
+    ticket.backend_project_id = "proj-b"
+    monkeypatch.setattr(
+        "tasklib.backends.get_backend",
+        _misrouted_linear_backend_factory({"HYP-1": ticket}),
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", _misrouted_project_config(tmp_path))
+
+    rc = main(["status", "HYP-1", "in-progress", "-C", str(tmp_path)])
+    assert rc == 0
+    entries = read_entries("testsess")
+    # the session-sidecar entry must be attributed to the ticket's REAL project ("proj-b"),
+    # not "proj-a" (the config `_backend_for_id` merely happened to authenticate/query with).
+    assert any(e.id == "HYP-1" and e.repo == "linear:HYP/proj-b" for e in entries)
+    assert not any(e.id == "HYP-1" and e.repo == "linear:HYP/proj-a" for e in entries)
+
+
+def test_status_outside_repo_same_team_linear_attention_notice_surfaces_earlier_misrouted_touch(
+    capsys, monkeypatch, tmp_path
+):
+    # task-cli#83 2nd-round review finding (Opus): the WRITE side (`_record_session_touch`)
+    # records a misrouted ticket under its ACTUAL project, but the READ side
+    # (`_session_attention_notice`) used to filter by a single NAIVE backend coordinate — the
+    # two would never agree, so a just-touched misrouted ticket silently vanished from its own
+    # session's attention notice.
+    #
+    # task-cli#83 4th-round review finding (codex): a REAL `LinearBackend.session_tickets()`
+    # calls `list()`, which filters server-side to `self.project` whenever one is pinned — so a
+    # backend constructed against a PROJECT-PINNED registry entry can never even SEE a ticket
+    # that actually lives in a different project, regardless of what the coordinate-correction
+    # logic does afterward. The correction only has anything to act on when the routed-to
+    # registry entry is TEAM-ONLY (no `project:` pinned) — Linear then returns every team ticket
+    # unfiltered, and different tickets in that unfiltered set can genuinely report different
+    # `backend_project_id`s. So this scenario needs TWO registry entries: a team-only one that
+    # `_route_id_to_project` picks first (routing/fetching is unfiltered by project), and a
+    # SEPARATE project-pinned entry purely so `verified_ticket_coordinate`'s registry lookup has
+    # something to match "proj-b" against and produce a real corrected coordinate.
+    monkeypatch.setenv("TASK_SESSION", "testsess")
+    hyp1 = Ticket(
+        id="HYP-1", title="first", state=State.TODO, labels=["session:testsess"]
+    )
+    hyp1.backend_project_id = "proj-b"
+    hyp2 = Ticket(
+        id="HYP-2", title="second", state=State.TODO, labels=["session:testsess"]
+    )
+    hyp2.backend_project_id = "proj-b"
+    monkeypatch.setattr(
+        "tasklib.backends.get_backend",
+        _misrouted_linear_backend_factory({"HYP-1": hyp1, "HYP-2": hyp2}),
+    )
+    monkeypatch.setenv(
+        "XDG_CONFIG_HOME",
+        _gh_config(
+            tmp_path,
+            "projects:\n"
+            "  - {name: team-wide, backend: linear, team: hyp}\n"
+            "  - {name: proj-b, backend: linear, team: hyp, project: proj-b}\n",
+        ),
+    )
+
+    rc = main(["status", "HYP-1", "in-progress", "-C", str(tmp_path)])
+    assert rc == 0
+    capsys.readouterr()  # discard the first command's own output
+
+    rc = main(["status", "HYP-2", "in-progress", "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # HYP-1's earlier touch must still be visible — this is exactly what silently broke when
+    # the read side used a naive (unrouted) coordinate instead of HYP-1's own verified one.
+    assert "HYP-1" in out
+    assert "attention" in out.lower() or "recently touched" in out.lower()

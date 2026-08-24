@@ -164,13 +164,25 @@ def test_github_search_post_filters_by_state(monkeypatch):
     be = GitHubIssuesBackend(owner="o", repo="r", token="t")
     rows = {
         "items": [
-            {"number": 1, "title": "a", "state": "open", "labels": [{"name": "status:in-progress"}]},
-            {"number": 2, "title": "b", "state": "open", "labels": [{"name": "status:todo"}]},
+            {
+                "number": 1,
+                "title": "a",
+                "state": "open",
+                "labels": [{"name": "status:in-progress"}],
+            },
+            {
+                "number": 2,
+                "title": "b",
+                "state": "open",
+                "labels": [{"name": "status:todo"}],
+            },
         ]
     }
     monkeypatch.setattr(be, "_call", lambda url, **kw: rows)
     out = be.search("x", state=State.IN_PROGRESS)
-    assert [t.id for t in out] == ["#1"]  # only the in-progress one survives the post-filter
+    assert [t.id for t in out] == [
+        "#1"
+    ]  # only the in-progress one survives the post-filter
 
 
 def test_github_attach_posts_reference_comment(monkeypatch):
@@ -219,7 +231,14 @@ def test_github_row_to_ticket_maps_reporter_from_issue_author():
     from tasklib.backends.github_issues import GitHubIssuesBackend
 
     be = GitHubIssuesBackend(owner="o", repo="r", token="t")
-    row = {"number": 1, "title": "a", "state": "open", "labels": [], "body": "", "user": {"login": "alex"}}
+    row = {
+        "number": 1,
+        "title": "a",
+        "state": "open",
+        "labels": [],
+        "body": "",
+        "user": {"login": "alex"},
+    }
     assert be._row_to_ticket(row).reporter == "alex"
 
 
@@ -238,9 +257,17 @@ def test_github_row_to_ticket_marks_provider_closed_when_label_lags_native_state
     from tasklib.backends.github_issues import GitHubIssuesBackend
 
     be = GitHubIssuesBackend(owner="o", repo="r", token="t")
-    row = {"number": 1, "title": "a", "state": "closed", "labels": [{"name": "status:todo"}], "body": ""}
+    row = {
+        "number": 1,
+        "title": "a",
+        "state": "closed",
+        "labels": [{"name": "status:todo"}],
+        "body": "",
+    }
     ticket = be._row_to_ticket(row)
-    assert ticket.state.value == "todo"  # unchanged — label still wins for the derived state
+    assert (
+        ticket.state.value == "todo"
+    )  # unchanged — label still wins for the derived state
     assert ticket.provider_closed is True
 
 
@@ -284,7 +311,9 @@ def test_issue_number_removeprefix_not_lstrip():
     from tasklib.backends.github_issues import _issue_number
 
     assert _issue_number("#1") == "1"
-    assert _issue_number("##1") == "#1"  # removeprefix drops exactly one '#', not all of them
+    assert (
+        _issue_number("##1") == "#1"
+    )  # removeprefix drops exactly one '#', not all of them
 
 
 def test_linear_label_ids_creates_missing_labels(monkeypatch):
@@ -301,14 +330,22 @@ def test_linear_label_ids_creates_missing_labels(monkeypatch):
         if "issueLabelCreate" in query:
             name = variables["input"]["name"]
             created.append(name)
-            return {"issueLabelCreate": {"success": True, "issueLabel": {"id": f"new-{name}", "name": name}}}
+            return {
+                "issueLabelCreate": {
+                    "success": True,
+                    "issueLabel": {"id": f"new-{name}", "name": name},
+                }
+            }
         return {}
 
     monkeypatch.setattr(be, "_gql", fake_gql)
     ids = be._label_ids(["ui", "session:abc", "needs-triage"])
     assert "lbl-ui" in ids
     assert "new-session:abc" in ids and "new-needs-triage" in ids
-    assert created == ["session:abc", "needs-triage"]  # only the missing ones were created
+    assert created == [
+        "session:abc",
+        "needs-triage",
+    ]  # only the missing ones were created
 
 
 def test_linear_node_to_ticket_seeds_native_due_date(monkeypatch):
@@ -359,6 +396,75 @@ def test_linear_issue_fields_requests_attachments_beyond_default_page_size():
     assert "attachments(first:250)" in LinearBackend._ISSUE_FIELDS
 
 
+def test_linear_issue_fields_requests_project_id():
+    # task-cli#83 2nd-round review finding: the single-ticket fetch must request the issue's
+    # OWN project so `_node_to_ticket` can report it distinct from this backend's configured
+    # query scope. Pin the query shape so a regression (someone drops `project{id}`) fails here.
+    from tasklib.backends.linear import LinearBackend
+
+    assert "project{id}" in LinearBackend._ISSUE_FIELDS
+
+
+def test_linear_node_to_ticket_reports_actual_project_id():
+    # task-cli#83 2nd-round review finding: a same-team, different-project ticket must be
+    # distinguishable from the backend's own configured project after a fetch.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP", project="proj-a")
+    node = {
+        "identifier": "HYP-7",
+        "title": "t",
+        "url": "https://linear/HYP-7",
+        "description": "",
+        "state": {"type": "unstarted"},
+        "labels": {"nodes": []},
+        "project": {
+            "id": "proj-b"
+        },  # NOT proj-a — genuinely a different project on the team
+    }
+    assert be._node_to_ticket(node).backend_project_id == "proj-b"
+
+
+def test_linear_node_to_ticket_backend_project_id_empty_when_absent():
+    # review finding: `list`/`search` DO request `project{id}` too (for their own team/project
+    # filtering, see their query strings) — the only real path whose response never carries it
+    # is `create()`'s. This test just pins the degrade-gracefully behavior for a raw node that
+    # happens to omit the key (e.g. a malformed/partial response), not "the bulk paths never
+    # send it" — `_node_to_ticket` itself is fetch-path-agnostic, it only reads what's given.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    node = {
+        "identifier": "HYP-7",
+        "title": "t",
+        "url": "https://linear/HYP-7",
+        "description": "",
+        "state": {"type": "unstarted"},
+        "labels": {"nodes": []},
+    }
+    assert be._node_to_ticket(node).backend_project_id == ""
+
+
+def test_linear_node_to_ticket_reports_project_id_from_list_shaped_node():
+    # review finding: confirm `backend_project_id` IS populated from a `list`/`search`-shaped
+    # node too (they request `project{id}` alongside `team{key}`) — not just the single-ticket
+    # `get`/`update` shape covered above.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP", project="proj-a")
+    node = {
+        "identifier": "HYP-7",
+        "title": "t",
+        "url": "https://linear/HYP-7",
+        "description": "",
+        "state": {"type": "unstarted"},
+        "labels": {"nodes": []},
+        "team": {"key": "HYP"},
+        "project": {"id": "proj-b"},
+    }
+    assert be._node_to_ticket(node).backend_project_id == "proj-b"
+
+
 def test_linear_list_query_requests_updated_at(monkeypatch):
     # test_linear_node_to_ticket_maps_updated_at above injects `updatedAt` directly into a hand
     # built node, so it would keep passing even if `_ISSUE_FIELDS` stopped requesting the field
@@ -403,7 +509,9 @@ def test_linear_body_due_overrides_native_due_date():
     from tasklib.render import render
 
     be = LinearBackend(api_key="k", team_key="HYP")
-    body = render(Ticket(title="t", what="w", due="2026-10-10"))  # body Due = 2026-10-10
+    body = render(
+        Ticket(title="t", what="w", due="2026-10-10")
+    )  # body Due = 2026-10-10
     node = {
         "identifier": "HYP-8",
         "title": "t",
@@ -519,10 +627,22 @@ def test_linear_search_filters_results_to_team(monkeypatch):
         return {
             "searchIssues": {
                 "nodes": [
-                    {"identifier": "HYP-1", "title": "mine", "team": {"key": "HYP"}, "project": None,
-                     "state": {"type": "started"}, "labels": {"nodes": []}},
-                    {"identifier": "OTH-9", "title": "theirs", "team": {"key": "OTH"}, "project": None,
-                     "state": {"type": "started"}, "labels": {"nodes": []}},
+                    {
+                        "identifier": "HYP-1",
+                        "title": "mine",
+                        "team": {"key": "HYP"},
+                        "project": None,
+                        "state": {"type": "started"},
+                        "labels": {"nodes": []},
+                    },
+                    {
+                        "identifier": "OTH-9",
+                        "title": "theirs",
+                        "team": {"key": "OTH"},
+                        "project": None,
+                        "state": {"type": "started"},
+                        "labels": {"nodes": []},
+                    },
                 ]
             }
         }
@@ -671,7 +791,9 @@ def test_linear_current_user_returns_none_on_backend_error(monkeypatch):
 
 
 @pytest.mark.parametrize("bad_response", [None, [], "viewer", 42])
-def test_linear_current_user_returns_none_on_non_dict_response(monkeypatch, bad_response):
+def test_linear_current_user_returns_none_on_non_dict_response(
+    monkeypatch, bad_response
+):
     """`_gql` is typed to return a dict, but a malformed response or a third-party override
     could hand back something else — mirror the `isinstance(row, dict)` guard the GitHub
     backend already has for its own `/user` call (review finding: `current_user` must never
@@ -695,7 +817,9 @@ def test_linear_current_user_returns_none_on_non_dict_viewer(monkeypatch, bad_vi
 
     be = LinearBackend(api_key="k", team_key="HYP")
 
-    monkeypatch.setattr(be, "_gql", lambda query, variables=None: {"viewer": bad_viewer})
+    monkeypatch.setattr(
+        be, "_gql", lambda query, variables=None: {"viewer": bad_viewer}
+    )
     assert be.current_user() is None
 
 
@@ -709,7 +833,9 @@ def test_github_call_wraps_ambiguous_http_error(monkeypatch):
     be = GitHubIssuesBackend(owner="o", repo="r", token="t")
     monkeypatch.setattr(
         "tasklib.backends.github_issues.request_json",
-        lambda *a, **kw: (_ for _ in ()).throw(AmbiguousHttpError("status 201 was already returned")),
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AmbiguousHttpError("status 201 was already returned")
+        ),
     )
     with pytest.raises(AmbiguousBackendError) as exc:
         be._call("https://api.github.com/repos/o/r/issues", method="POST")
@@ -738,7 +864,9 @@ def test_linear_gql_wraps_ambiguous_http_error(monkeypatch):
     be = LinearBackend(api_key="k", team_key="HYP")
     monkeypatch.setattr(
         "tasklib.backends.linear.request_json",
-        lambda *a, **kw: (_ for _ in ()).throw(AmbiguousHttpError("status 200 was already returned")),
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AmbiguousHttpError("status 200 was already returned")
+        ),
     )
     with pytest.raises(AmbiguousBackendError):
         be._gql("mutation { issueCreate { success } }")
@@ -796,7 +924,15 @@ def test_linear_attach_hosted_url_registers_regardless_of_mode(monkeypatch):
         result = be.attach("HYP-1", "https://github.com/user-attachments/assets/abc")
         assert result == "https://github.com/user-attachments/assets/abc"
         create_calls = [v for q, v in calls if "attachmentCreate" in q]
-        assert create_calls == [{"input": {"issueId": "internal-1", "title": "abc", "url": "https://github.com/user-attachments/assets/abc"}}]
+        assert create_calls == [
+            {
+                "input": {
+                    "issueId": "internal-1",
+                    "title": "abc",
+                    "url": "https://github.com/user-attachments/assets/abc",
+                }
+            }
+        ]
 
 
 def test_linear_attach_link_mode_local_path_raises_backend_error(monkeypatch):
@@ -811,7 +947,9 @@ def test_linear_attach_link_mode_local_path_raises_backend_error(monkeypatch):
         be.attach("HYP-1", "/tmp/shot.png")
 
 
-def test_linear_attach_hosted_url_registration_rejected_raises_backend_error(monkeypatch):
+def test_linear_attach_hosted_url_registration_rejected_raises_backend_error(
+    monkeypatch,
+):
     # review finding (missing test): attachmentCreate returning success=false for the
     # ALREADY-HOSTED-URL path must raise, not silently report the ref as attached.
     from tasklib.backends import BackendError
@@ -865,7 +1003,9 @@ def test_linear_attach_native_mode_uploads_and_registers(monkeypatch, tmp_path):
                     "uploadFile": {
                         "assetUrl": "https://uploads.linear.app/asset-1",
                         "uploadUrl": "https://storage.googleapis.com/signed-put-url",
-                        "headers": [{"key": "x-goog-content-length-range", "value": "20,20"}],
+                        "headers": [
+                            {"key": "x-goog-content-length-range", "value": "20,20"}
+                        ],
                     },
                 }
             },
@@ -874,8 +1014,18 @@ def test_linear_attach_native_mode_uploads_and_registers(monkeypatch, tmp_path):
     )
     put_calls = []
 
-    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
-        put_calls.append((url, method, dict(headers or {}), data, same_host_redirects_only))
+    def fake_request_bytes(
+        url,
+        *,
+        method="GET",
+        headers=None,
+        data=None,
+        timeout=60,
+        same_host_redirects_only=False,
+    ):
+        put_calls.append(
+            (url, method, dict(headers or {}), data, same_host_redirects_only)
+        )
         return b""
 
     monkeypatch.setattr("tasklib.backends.linear.request_bytes", fake_request_bytes)
@@ -894,10 +1044,20 @@ def test_linear_attach_native_mode_uploads_and_registers(monkeypatch, tmp_path):
     # cross-host/downgrade redirect, even though this request carries no Authorization header.
     assert put_redirects_guarded is True
     create_calls = [v for q, v in calls if "attachmentCreate" in q]
-    assert create_calls == [{"input": {"issueId": "internal-1", "title": "shot.png", "url": "https://uploads.linear.app/asset-1"}}]
+    assert create_calls == [
+        {
+            "input": {
+                "issueId": "internal-1",
+                "title": "shot.png",
+                "url": "https://uploads.linear.app/asset-1",
+            }
+        }
+    ]
 
 
-def test_linear_attach_native_mode_upload_put_failure_raises_backend_error(monkeypatch, tmp_path):
+def test_linear_attach_native_mode_upload_put_failure_raises_backend_error(
+    monkeypatch, tmp_path
+):
     from tasklib.backends import BackendError
     from tasklib.backends.http import HttpError
     from tasklib.backends.linear import LinearBackend
@@ -914,7 +1074,11 @@ def test_linear_attach_native_mode_upload_put_failure_raises_backend_error(monke
             "fileUpload": {
                 "fileUpload": {
                     "success": True,
-                    "uploadFile": {"assetUrl": "https://uploads.linear.app/asset-1", "uploadUrl": "https://signed", "headers": []},
+                    "uploadFile": {
+                        "assetUrl": "https://uploads.linear.app/asset-1",
+                        "uploadUrl": "https://signed",
+                        "headers": [],
+                    },
                 }
             },
         },
@@ -927,7 +1091,9 @@ def test_linear_attach_native_mode_upload_put_failure_raises_backend_error(monke
         be.attach("HYP-1", str(png))
 
 
-def test_linear_attach_native_mode_malformed_upload_url_raises_backend_error_not_raw_crash(monkeypatch, tmp_path):
+def test_linear_attach_native_mode_malformed_upload_url_raises_backend_error_not_raw_crash(
+    monkeypatch, tmp_path
+):
     # review finding (PR #90 round 5, Fable/k3): the signed uploadUrl in fileUpload's response is
     # LINEAR'S OWN data, not something this process fully controls either — a bracket-malformed
     # value ("https://[bad") used to crash _upload_and_attach with a raw ValueError from
@@ -965,7 +1131,9 @@ def test_linear_attach_native_mode_malformed_upload_url_raises_backend_error_not
         be.attach("HYP-1", str(png))
 
 
-def test_linear_attach_native_mode_upload_put_ambiguous_failure_raises_ambiguous_backend_error(monkeypatch, tmp_path):
+def test_linear_attach_native_mode_upload_put_ambiguous_failure_raises_ambiguous_backend_error(
+    monkeypatch, tmp_path
+):
     # the connection-dropped-mid-read case (status already landed, bytes may have uploaded
     # server-side with nothing pointing at them since attachmentCreate never ran) must surface
     # as AmbiguousBackendError, not the generic BackendError every other failure funnels into —
@@ -986,14 +1154,20 @@ def test_linear_attach_native_mode_upload_put_ambiguous_failure_raises_ambiguous
             "fileUpload": {
                 "fileUpload": {
                     "success": True,
-                    "uploadFile": {"assetUrl": "https://uploads.linear.app/asset-1", "uploadUrl": "https://signed", "headers": []},
+                    "uploadFile": {
+                        "assetUrl": "https://uploads.linear.app/asset-1",
+                        "uploadUrl": "https://signed",
+                        "headers": [],
+                    },
                 }
             },
         },
     )
     monkeypatch.setattr(
         "tasklib.backends.linear.request_bytes",
-        lambda *a, **kw: (_ for _ in ()).throw(AmbiguousHttpError("status 200 was already returned")),
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AmbiguousHttpError("status 200 was already returned")
+        ),
     )
     with pytest.raises(AmbiguousBackendError, match="upload PUT"):
         be.attach("HYP-1", str(png))
@@ -1004,13 +1178,31 @@ def test_linear_attach_native_mode_upload_put_ambiguous_failure_raises_ambiguous
     [
         {"fileUpload": {"success": True, "uploadFile": None}},
         {"fileUpload": {"success": True}},  # uploadFile key missing entirely
-        {"fileUpload": {"success": True, "uploadFile": {"assetUrl": "https://uploads.linear.app/x"}}},  # no uploadUrl
-        {"fileUpload": {"success": True, "uploadFile": {"uploadUrl": "https://signed"}}},  # no assetUrl
+        {
+            "fileUpload": {
+                "success": True,
+                "uploadFile": {"assetUrl": "https://uploads.linear.app/x"},
+            }
+        },  # no uploadUrl
+        {
+            "fileUpload": {
+                "success": True,
+                "uploadFile": {"uploadUrl": "https://signed"},
+            }
+        },  # no assetUrl
         {"fileUpload": {"success": True, "uploadFile": "not-a-dict"}},
     ],
-    ids=["null-uploadfile", "missing-uploadfile-key", "missing-uploadurl", "missing-asseturl", "non-dict-uploadfile"],
+    ids=[
+        "null-uploadfile",
+        "missing-uploadfile-key",
+        "missing-uploadurl",
+        "missing-asseturl",
+        "non-dict-uploadfile",
+    ],
 )
-def test_linear_attach_native_mode_malformed_fileupload_response_raises_cleanly(monkeypatch, tmp_path, file_upload_response):
+def test_linear_attach_native_mode_malformed_fileupload_response_raises_cleanly(
+    monkeypatch, tmp_path, file_upload_response
+):
     # review finding: `success: true` alone doesn't guarantee a well-formed `uploadFile` — a
     # bare KeyError/TypeError from blindly indexing it would escape _attach_screenshots's
     # BackendError-only best-effort catch and crash an already-successful create/update.
@@ -1024,7 +1216,10 @@ def test_linear_attach_native_mode_malformed_fileupload_response_raises_cleanly(
     _linear_gql_stub(
         monkeypatch,
         be,
-        {"issue(id": {"issue": {"id": "internal-1"}}, "fileUpload": file_upload_response},
+        {
+            "issue(id": {"issue": {"id": "internal-1"}},
+            "fileUpload": file_upload_response,
+        },
     )
     with pytest.raises(BackendError, match="malformed"):
         be.attach("HYP-1", str(png))
@@ -1039,9 +1234,17 @@ def test_linear_attach_native_mode_malformed_fileupload_response_raises_cleanly(
         [{"key": 1, "value": "y"}],  # non-string key
         ["not-a-dict"],
     ],
-    ids=["non-list", "missing-value", "missing-key", "non-string-key", "non-dict-entry"],
+    ids=[
+        "non-list",
+        "missing-value",
+        "missing-key",
+        "non-string-key",
+        "non-dict-entry",
+    ],
 )
-def test_linear_attach_native_mode_malformed_upload_headers_raises_cleanly(monkeypatch, tmp_path, bad_headers):
+def test_linear_attach_native_mode_malformed_upload_headers_raises_cleanly(
+    monkeypatch, tmp_path, bad_headers
+):
     # `headers: null` is deliberately NOT in this list — _parse_upload_headers treats an absent/
     # null headers value as "no extra headers" (valid, see test_parse_upload_headers_empty_and_
     # none_are_valid), the same as an empty list; it is these genuinely malformed SHAPES that
@@ -1081,9 +1284,9 @@ def test_parse_upload_headers_empty_and_none_are_valid():
 
     assert _parse_upload_headers(None) == {}
     assert _parse_upload_headers([]) == {}
-    assert _parse_upload_headers([{"key": "Content-Disposition", "value": 'attachment; filename="x"'}]) == {
-        "Content-Disposition": 'attachment; filename="x"'
-    }
+    assert _parse_upload_headers(
+        [{"key": "Content-Disposition", "value": 'attachment; filename="x"'}]
+    ) == {"Content-Disposition": 'attachment; filename="x"'}
 
 
 def test_linear_is_native_attachment_url():
@@ -1091,8 +1294,13 @@ def test_linear_is_native_attachment_url():
 
     be = LinearBackend(api_key="k", team_key="HYP")
     assert be.is_native_attachment_url("https://uploads.linear.app/abc") is True
-    assert be.is_native_attachment_url("http://uploads.linear.app/abc") is False  # plaintext
-    assert be.is_native_attachment_url("https://github.com/user-attachments/assets/abc") is False
+    assert (
+        be.is_native_attachment_url("http://uploads.linear.app/abc") is False
+    )  # plaintext
+    assert (
+        be.is_native_attachment_url("https://github.com/user-attachments/assets/abc")
+        is False
+    )
     assert be.is_native_attachment_url("file:///etc/passwd") is False
 
 
@@ -1117,7 +1325,9 @@ def test_linear_is_native_attachment_url_normalizes_port_and_case():
     assert be.is_native_attachment_url("https://UPLOADS.LINEAR.APP/asset-1") is True
     # a genuinely DIFFERENT host is still rejected — this fix normalizes port/case, it does not
     # loosen the host comparison itself.
-    assert be.is_native_attachment_url("https://not-uploads.linear.app/asset-1") is False
+    assert (
+        be.is_native_attachment_url("https://not-uploads.linear.app/asset-1") is False
+    )
 
 
 def test_linear_fetch_attachment_bytes_handles_unparseable_url():
@@ -1139,7 +1349,9 @@ def test_linear_is_native_attachment_url_rejects_invalid_port():
 
     be = LinearBackend(api_key="k", team_key="HYP")
     assert be.is_native_attachment_url("https://uploads.linear.app:bad/asset") is False
-    assert be.is_native_attachment_url("https://uploads.linear.app:443/asset") is True  # a VALID port still passes
+    assert (
+        be.is_native_attachment_url("https://uploads.linear.app:443/asset") is True
+    )  # a VALID port still passes
 
 
 def test_linear_fetch_attachment_bytes_reports_invalid_port_as_backend_error():
@@ -1169,11 +1381,17 @@ def test_save_attachments_reports_malformed_port_url_as_skipped_not_crashed(tmp_
 
     be = LinearBackend(api_key="k", team_key="HYP")
     ticket = Ticket(
-        attachments=[Attachment(id="1", title="shot.png", url="https://uploads.linear.app:bad/asset")]
+        attachments=[
+            Attachment(
+                id="1", title="shot.png", url="https://uploads.linear.app:bad/asset"
+            )
+        ]
     )
     lines = _save_attachments(be, ticket, str(tmp_path))
     assert any("skipped" in ln for ln in lines)
-    assert not any("✗" in ln for ln in lines)  # not treated as a failed fetch attempt either
+    assert not any(
+        "✗" in ln for ln in lines
+    )  # not treated as a failed fetch attempt either
     assert list(tmp_path.iterdir()) == []  # nothing was written
 
 
@@ -1192,11 +1410,18 @@ def test_safe_urlparse_returns_none_on_invalid_port():
     from tasklib.backends.linear import _safe_urlparse
 
     assert _safe_urlparse("https://uploads.linear.app:bad/asset") is None
-    assert _safe_urlparse("https://uploads.linear.app:99999999/asset") is None  # out of range
-    assert _safe_urlparse("https://uploads.linear.app:443/asset") is not None  # a VALID port is fine
+    assert (
+        _safe_urlparse("https://uploads.linear.app:99999999/asset") is None
+    )  # out of range
+    assert (
+        _safe_urlparse("https://uploads.linear.app:443/asset") is not None
+    )  # a VALID port is fine
 
 
-@pytest.mark.parametrize("bad_scheme_url", ["file:///etc/passwd", "ftp://uploads.linear.app/x", "data:text/plain,hi"])
+@pytest.mark.parametrize(
+    "bad_scheme_url",
+    ["file:///etc/passwd", "ftp://uploads.linear.app/x", "data:text/plain,hi"],
+)
 def test_linear_fetch_attachment_bytes_rejects_non_http_schemes(bad_scheme_url):
     # review finding (SSRF/local-file-read): an attachment url is tracker-owned data; urlopen
     # also understands file:/ftp:/data: schemes, so a malicious/malformed attachment url must be
@@ -1222,12 +1447,24 @@ def test_linear_node_to_ticket_parses_attachments():
         "description": "",
         "attachments": {
             "nodes": [
-                {"id": "a1", "title": "shot.png", "url": "https://uploads.linear.app/asset-1", "subtitle": None},
+                {
+                    "id": "a1",
+                    "title": "shot.png",
+                    "url": "https://uploads.linear.app/asset-1",
+                    "subtitle": None,
+                },
             ]
         },
     }
     ticket = be._node_to_ticket(node)
-    assert ticket.attachments == [Attachment(id="a1", title="shot.png", url="https://uploads.linear.app/asset-1", subtitle="")]
+    assert ticket.attachments == [
+        Attachment(
+            id="a1",
+            title="shot.png",
+            url="https://uploads.linear.app/asset-1",
+            subtitle="",
+        )
+    ]
     assert ticket.attachments_truncated is False
 
 
@@ -1246,7 +1483,12 @@ def test_linear_node_to_ticket_skips_null_entries_in_attachments_nodes():
         "description": "",
         "attachments": {
             "nodes": [
-                {"id": "a1", "title": "shot.png", "url": "https://uploads.linear.app/1", "subtitle": None},
+                {
+                    "id": "a1",
+                    "title": "shot.png",
+                    "url": "https://uploads.linear.app/1",
+                    "subtitle": None,
+                },
                 None,
             ]
         },
@@ -1270,7 +1512,14 @@ def test_linear_node_to_ticket_surfaces_attachment_truncation():
         "title": "t",
         "description": "",
         "attachments": {
-            "nodes": [{"id": "a1", "title": "shot.png", "url": "https://uploads.linear.app/1", "subtitle": None}],
+            "nodes": [
+                {
+                    "id": "a1",
+                    "title": "shot.png",
+                    "url": "https://uploads.linear.app/1",
+                    "subtitle": None,
+                }
+            ],
             "pageInfo": {"hasNextPage": True},
         },
     }
@@ -1295,7 +1544,9 @@ def test_linear_issue_fields_base_excludes_attachments():
     assert "attachments" in LinearBackend._ISSUE_FIELDS
 
 
-def test_linear_list_and_search_queries_use_base_fields_without_attachments(monkeypatch):
+def test_linear_list_and_search_queries_use_base_fields_without_attachments(
+    monkeypatch,
+):
     from tasklib.backends.linear import LinearBackend
 
     be = LinearBackend(api_key="k", team_key="HYP")
@@ -1304,7 +1555,11 @@ def test_linear_list_and_search_queries_use_base_fields_without_attachments(monk
 
     def fake_gql(query, variables=None):
         queries.append(query)
-        return {"issues": {"nodes": []}} if "issues(" in query else {"searchIssues": {"nodes": []}}
+        return (
+            {"issues": {"nodes": []}}
+            if "issues(" in query
+            else {"searchIssues": {"nodes": []}}
+        )
 
     monkeypatch.setattr(be, "_gql", fake_gql)
     be.list()
@@ -1329,7 +1584,13 @@ def test_linear_create_uses_base_fields_without_attachments(monkeypatch):
         return {
             "issueCreate": {
                 "success": True,
-                "issue": {"id": "i1", "identifier": "HYP-1", "url": "https://x", "title": "t", "description": ""},
+                "issue": {
+                    "id": "i1",
+                    "identifier": "HYP-1",
+                    "url": "https://x",
+                    "title": "t",
+                    "description": "",
+                },
             }
         }
 
@@ -1350,7 +1611,15 @@ def test_linear_get_and_update_still_use_full_fields_with_attachments(monkeypatc
 
     def fake_gql(query, variables=None):
         queries.append(query)
-        return {"issue": {"id": "i1", "identifier": "HYP-1", "url": "https://x", "title": "t", "description": ""}}
+        return {
+            "issue": {
+                "id": "i1",
+                "identifier": "HYP-1",
+                "url": "https://x",
+                "title": "t",
+                "description": "",
+            }
+        }
 
     monkeypatch.setattr(be, "_gql", fake_gql)
     be.get("HYP-1")
@@ -1366,7 +1635,15 @@ def test_linear_fetch_attachment_bytes_sends_authorization_header(monkeypatch):
     be = LinearBackend(api_key="lin_api_secret", team_key="HYP")
     seen = {}
 
-    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+    def fake_request_bytes(
+        url,
+        *,
+        method="GET",
+        headers=None,
+        data=None,
+        timeout=60,
+        same_host_redirects_only=False,
+    ):
         seen["url"] = url
         seen["method"] = method
         seen["headers"] = headers
@@ -1392,7 +1669,15 @@ def test_linear_fetch_attachment_bytes_omits_auth_for_non_linear_host(monkeypatc
     be = LinearBackend(api_key="lin_api_secret", team_key="HYP")
     seen = {}
 
-    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+    def fake_request_bytes(
+        url,
+        *,
+        method="GET",
+        headers=None,
+        data=None,
+        timeout=60,
+        same_host_redirects_only=False,
+    ):
         seen["headers"] = headers
         seen["same_host_redirects_only"] = same_host_redirects_only
         return b"data"
@@ -1404,7 +1689,9 @@ def test_linear_fetch_attachment_bytes_omits_auth_for_non_linear_host(monkeypatc
     assert seen["same_host_redirects_only"] is False
 
 
-def test_linear_fetch_attachment_bytes_omits_auth_for_plaintext_http_linear_host(monkeypatch):
+def test_linear_fetch_attachment_bytes_omits_auth_for_plaintext_http_linear_host(
+    monkeypatch,
+):
     # review finding: the hostname check alone isn't enough — a plain http://uploads.linear.app
     # URL (spoofed/malformed, Linear itself never hands one out) must also NOT get the API key.
     from tasklib.backends.linear import LinearBackend
@@ -1412,7 +1699,15 @@ def test_linear_fetch_attachment_bytes_omits_auth_for_plaintext_http_linear_host
     be = LinearBackend(api_key="lin_api_secret", team_key="HYP")
     seen = {}
 
-    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+    def fake_request_bytes(
+        url,
+        *,
+        method="GET",
+        headers=None,
+        data=None,
+        timeout=60,
+        same_host_redirects_only=False,
+    ):
         seen["headers"] = headers
         seen["same_host_redirects_only"] = same_host_redirects_only
         return b"data"
@@ -1432,7 +1727,166 @@ def test_linear_fetch_attachment_bytes_wraps_http_error(monkeypatch):
     be = LinearBackend(api_key="k", team_key="HYP")
     monkeypatch.setattr(
         "tasklib.backends.linear.request_bytes",
-        lambda *a, **kw: (_ for _ in ()).throw(HttpError(401, "HTTP 401", "unauthorized")),
+        lambda *a, **kw: (_ for _ in ()).throw(
+            HttpError(401, "HTTP 401", "unauthorized")
+        ),
     )
     with pytest.raises(BackendError, match="401"):
         be.fetch_attachment_bytes("https://uploads.linear.app/asset-1")
+
+
+# ── backend_coordinate (task-cli#83) ────────────────────────────────────────────────
+
+
+def test_backend_coordinate_github_matches_project_coordinate_shape():
+    from tasklib.backends import backend_coordinate
+    from tasklib.projects import Project
+
+    be = GitHubIssuesBackend(owner="Acme", repo="Widgets", token="t")
+    project = Project(
+        name="x", backend="github-issues", overlay={"github": {"repo": "Acme/Widgets"}}
+    )
+    assert backend_coordinate(be) == project.coordinate == "github-issues:acme/widgets"
+
+
+def test_backend_coordinate_linear_with_project_matches_project_coordinate_shape():
+    from tasklib.backends import backend_coordinate
+    from tasklib.backends.linear import LinearBackend
+    from tasklib.projects import Project
+
+    be = LinearBackend(api_key="k", team_key="hyp", project="proj-1")
+    project = Project(
+        name="x",
+        backend="linear",
+        overlay={"linear": {"team": "hyp", "project": "proj-1"}},
+    )
+    assert backend_coordinate(be) == project.coordinate == "linear:HYP/proj-1"
+
+
+def test_backend_coordinate_linear_without_project():
+    from tasklib.backends import backend_coordinate
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="hyp")
+    assert backend_coordinate(be) == "linear:HYP"
+
+
+def test_backend_coordinate_distinguishes_different_repos():
+    from tasklib.backends import backend_coordinate
+
+    a = GitHubIssuesBackend(owner="acme", repo="one", token="t")
+    b = GitHubIssuesBackend(owner="acme", repo="two", token="t")
+    assert backend_coordinate(a) != backend_coordinate(b)
+
+
+# ── verified_ticket_coordinate (task-cli#83, 2nd-round review finding) ──────────────
+
+
+class _FakeCfg:
+    """Minimal `cfg` stand-in — `verified_ticket_coordinate` only reads `.data` (the raw config
+    mapping `projects_from_config` parses), never anything backend-specific."""
+
+    def __init__(self, data: dict) -> None:
+        self.data = data
+
+
+def test_verified_ticket_coordinate_corrects_same_team_project_misattribution():
+    # task-cli#83 review finding: outside a repo, a Linear id is routed to whichever registered
+    # same-team project's config was picked FIRST to authenticate/query with — but Linear
+    # resolves get/update by identifier alone, so the ticket can genuinely live in a DIFFERENT
+    # project on that team. The backend the id was routed through ("proj-a") is NOT where the
+    # fetched ticket actually lives ("proj-b") — the coordinate must reflect the ticket's real
+    # project, found by matching `backend_project_id` against the OTHER registered project.
+    from tasklib.backends import verified_ticket_coordinate
+    from tasklib.backends.linear import LinearBackend
+
+    cfg = _FakeCfg(
+        {
+            "projects": [
+                {
+                    "backend": "linear",
+                    "team": "hyp",
+                    "project": "proj-a",
+                    "name": "Proj A",
+                },
+                {
+                    "backend": "linear",
+                    "team": "hyp",
+                    "project": "proj-b",
+                    "name": "Proj B",
+                },
+            ]
+        }
+    )
+    backend = LinearBackend(
+        api_key="k", team_key="hyp", project="proj-a"
+    )  # routed here first
+    ticket = Ticket(
+        id="HYP-1", title="t", backend_project_id="proj-b"
+    )  # actually lives here
+
+    assert verified_ticket_coordinate(cfg, backend, ticket) == "linear:HYP/proj-b"
+
+
+def test_verified_ticket_coordinate_matches_when_routing_already_correct():
+    from tasklib.backends import backend_coordinate, verified_ticket_coordinate
+    from tasklib.backends.linear import LinearBackend
+
+    cfg = _FakeCfg(
+        {"projects": [{"backend": "linear", "team": "hyp", "project": "proj-a"}]}
+    )
+    backend = LinearBackend(api_key="k", team_key="hyp", project="proj-a")
+    ticket = Ticket(id="HYP-1", title="t", backend_project_id="proj-a")
+
+    assert (
+        verified_ticket_coordinate(cfg, backend, ticket)
+        == backend_coordinate(backend)
+        == "linear:HYP/proj-a"
+    )
+
+
+def test_verified_ticket_coordinate_degrades_when_actual_project_not_registered():
+    # The ticket's real project differs from the one routed to, but no OTHER registered project
+    # claims it — nothing to correct to, so fall back to the naive (still possibly wrong, but not
+    # worse than before) coordinate rather than inventing one.
+    from tasklib.backends import backend_coordinate, verified_ticket_coordinate
+    from tasklib.backends.linear import LinearBackend
+
+    cfg = _FakeCfg(
+        {"projects": [{"backend": "linear", "team": "hyp", "project": "proj-a"}]}
+    )
+    backend = LinearBackend(api_key="k", team_key="hyp", project="proj-a")
+    ticket = Ticket(id="HYP-1", title="t", backend_project_id="proj-unregistered")
+
+    assert verified_ticket_coordinate(cfg, backend, ticket) == backend_coordinate(
+        backend
+    )
+
+
+def test_verified_ticket_coordinate_ignores_github_backend():
+    from tasklib.backends import backend_coordinate, verified_ticket_coordinate
+
+    cfg = _FakeCfg({})
+    backend = GitHubIssuesBackend(owner="acme", repo="widgets", token="t")
+    ticket = Ticket(id="#1", title="t", backend_project_id="proj-b")
+
+    assert verified_ticket_coordinate(cfg, backend, ticket) == backend_coordinate(
+        backend
+    )
+
+
+def test_verified_ticket_coordinate_no_op_when_ticket_reports_no_project():
+    # A ticket fetched via a path that didn't request `project{id}` (or a non-Linear backend)
+    # has an empty `backend_project_id` — nothing to correct against, degrade to naive.
+    from tasklib.backends import backend_coordinate, verified_ticket_coordinate
+    from tasklib.backends.linear import LinearBackend
+
+    cfg = _FakeCfg(
+        {"projects": [{"backend": "linear", "team": "hyp", "project": "proj-b"}]}
+    )
+    backend = LinearBackend(api_key="k", team_key="hyp", project="proj-a")
+    ticket = Ticket(id="HYP-1", title="t")  # backend_project_id defaults to ""
+
+    assert verified_ticket_coordinate(cfg, backend, ticket) == backend_coordinate(
+        backend
+    )
