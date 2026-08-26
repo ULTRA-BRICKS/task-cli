@@ -59,6 +59,8 @@ task status <id> [<new-state>]     # read or transition state (works outside a r
 task classify "<text>" [--create]  # change|actionable|justAsk via review; --create makes/dedups a ticket
 task session [show|bind <id>]      # show/bind the current session and its tickets
 task daemon start|stop|status|run  # the due-date reminder watcher (see Daemon below)
+task audit [<id>] [--revert]       # reconciliation backstop — flags a Done ticket that never
+#   passed the close gates (see Audit below)
 ```
 
 Global flags: `-C/--cwd`, `--backend`, `--repo`, `--config`, `--json`, and the per-gate escape
@@ -90,6 +92,67 @@ The loop is fail-soft: a backend error, a malformed ticket, or a down notifier i
 caught and logged — the daemon keeps running. De-dupe is per `(ticket, due-date)`, so a ticket
 is reminded once; a changed due date re-fires. One daemon per repo coordinate (the state files
 are keyed by it). Tunables live in a `daemon:` config block (see Configuration).
+
+### Audit — catching a Done ticket that bypassed task-cli
+
+`task done` / `task change --done` / `task status <id> done` all run the full close-gate set
+(every acceptance criterion checked WITH a proof, screenshots for UI tickets, etc.) before ever
+writing the ticket to Done. But a ticket can *reach* Done a different way entirely: Linear's own
+GitHub-PR-link automation, and GitHub's native "Closes #123" issue auto-close, write the closed
+state straight to the backend the instant a linked PR merges — task-cli is never invoked, so
+none of its gates ever run. This is exactly how ticket HYP-1347 was closed in August 2026, with
+all 4 acceptance criteria still unchecked and no screenshot attached — nobody ran `task done`,
+Linear's own PR-merge automation closed it.
+
+`task audit` is the backstop: it re-runs the same close gates against tickets that are already
+sitting in Done, after the fact.
+
+```
+task audit                 # scan the most recent Done tickets (default: 50) for gate violations
+task audit --limit 200     # scan more — capped at 100 per backend page, see note below
+task audit <id>            # audit one specific ticket
+task audit --revert        # additionally move each STILL-noncompliant ticket back to
+#   in-review (re-checked immediately before acting, not the scan's snapshot), with a comment
+#   explaining exactly which gate(s) it fails
+task audit --json          # machine-readable findings (for a cron job / dashboard)
+```
+
+**`--limit` is capped at 100 per run — there is no pagination yet.** Both backends fetch one
+page (`min(limit, 100)`); `--limit 200` still audits at most 100 tickets, and any Done ticket
+past that page (in a repo with 100+ closed tickets since the last audit) is invisible to that
+run until it ages into the window. Run audit often enough that your close rate never outpaces
+one page, or pass a repo-appropriate `--limit`.
+
+**GitHub Issues backend: a known blind spot.** `task audit` is fully effective against Linear
+(HYP-1347's own backend — Linear's normalized state IS the native truth, so there is nothing
+to diverge). On the GitHub Issues backend, state is derived LABEL-FIRST (`_derive_state`): if a
+GitHub-native `Closes #123` auto-close flips an issue to native-closed while its managed
+`status:<state>` label is still active (e.g. `status:in-review`), the ticket keeps reading as
+that active state and `task audit` does not currently see it as Done at all. Deciding how to
+fix this (trust `Ticket.provider_closed` instead of the label, or re-prioritize
+`_derive_state` itself) has blast radius across `list`/`find`/the stale-ticket nudge, not just
+audit, so it is tracked as a separate follow-up rather than folded into this feature.
+
+**A finding is not proof the ticket bypassed task-cli — read it before automating on it.** It
+only means the ticket does not satisfy today's gates. The likely cause is an out-of-band close
+(the reason this command exists), but a second real cause is policy drift: if a gate in
+`policy.py` is tightened later (a stricter `acceptance_min`, a newly-required quality check, …),
+a ticket that legitimately passed `task done` under the OLD rules can retroactively fail here.
+For that reason, **the recommended cron setup is report-only**: schedule plain `task audit
+--json` (no `--revert`) and alert a human on a non-empty `findings` array; use `--revert`
+yourself, by hand, after you've read the findings — not as something a cron job runs
+unattended.
+
+Exit code is `0` when every scanned Done ticket passes, `1` when at least one does not — same
+exit-code discipline `list`/`find` use, so a cron job can alert on it directly. `--json` always
+emits the same shape (`scanned`, `findings`, `reverted`, `revert_errors`) whether or not any
+findings exist, so a consumer never has to special-case the clean run. There is currently no
+automatic scheduling built in (task-cli has no server component to run it from) — wire it into
+a periodic job yourself, e.g. a daily cron / `CronCreate` entry. A gate that was legitimately
+waived with a recorded `--skip-<gate>` at close time is never re-flagged here — the audit
+reuses the exact same gate logic (`policy.check_done`) the close commands already run, so an
+audited waiver is honored, not re-litigated (as long as the gate is still enabled in config —
+see the caveat above about a gate's own rules changing over time).
 
 ### Timeline view (`task gantt`)
 

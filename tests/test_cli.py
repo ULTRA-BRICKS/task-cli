@@ -4621,3 +4621,346 @@ def test_write_attachment_exclusive_writes_full_bytes_on_success(tmp_path):
     _write_attachment_exclusive(str(tmp_path), dest_path, b"the-real-bytes")
     assert open(dest_path, "rb").read() == b"the-real-bytes"
     assert [n for n in os.listdir(str(tmp_path)) if n.startswith(".attach-")] == []
+
+
+# ── audit: the reconciliation backstop for a Done ticket that never passed the close ──
+# gates (HYP-1347, Aug 2026 — a ticket closed by Linear's/GitHub's own PR-merge auto-close,
+# entirely outside task-cli, with unchecked acceptance criteria and no screenshot).
+
+
+def _force_done_bypassing_gates(fake, ticket_id="#1"):
+    """Simulate an out-of-band close (Linear/GitHub PR-merge auto-close): flip the backend's
+    stored state straight to DONE, the same way an external integration would — WITHOUT going
+    through any of task-cli's own gated commands."""
+    from tasklib.model import State
+
+    ticket = fake.get(ticket_id)
+    ticket.state = State.DONE
+    fake._store[ticket_id] = ticket
+
+
+def test_audit_clean_when_no_done_tickets(capsys, _inject_fake):
+    main(_create_argv())
+    capsys.readouterr()
+    rc = main(["audit"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "clean" in out
+
+
+def test_audit_flags_a_ticket_closed_outside_task_cli(capsys, _inject_fake):
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    capsys.readouterr()
+    rc = main(["audit"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "#1" in out
+    assert "acceptance-checked" in out
+
+
+def test_audit_does_not_flag_a_ticket_closed_through_task_cli(capsys, _inject_fake):
+    main(_create_argv())
+    _ready_to_close(_inject_fake)
+    main(["done", "#1"])
+    capsys.readouterr()
+    rc = main(["audit"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "clean" in out
+
+
+def test_audit_by_id_scopes_to_one_ticket(capsys, _inject_fake):
+    main(_create_argv(**{"--title": "one"}))
+    main(_create_argv(**{"--title": "two"}))
+    _force_done_bypassing_gates(_inject_fake, "#1")
+    _force_done_bypassing_gates(_inject_fake, "#2")
+    capsys.readouterr()
+    rc = main(["audit", "#1"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "#1" in out
+    assert "#2" not in out
+
+
+def test_audit_json_output(capsys, _inject_fake):
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    capsys.readouterr()
+    rc = main(["audit", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    import json
+
+    payload = json.loads(out)
+    assert payload["findings"][0]["id"] == "#1"
+    assert any(v["gate"] == "acceptance-checked" for v in payload["findings"][0]["violations"])
+
+
+def test_audit_revert_moves_ticket_back_to_in_review_with_comment(capsys, _inject_fake):
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    capsys.readouterr()
+    rc = main(["audit", "--revert"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "reverted" in out
+    assert _inject_fake.get("#1").state.value == "in-review"
+    assert any("acceptance-checked" in body for _tid, body in _inject_fake.comments)
+
+
+def test_audit_without_revert_leaves_ticket_in_done(capsys, _inject_fake):
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    capsys.readouterr()
+    main(["audit"])
+    assert _inject_fake.get("#1").state.value == "done"
+
+
+def test_audit_json_schema_is_identical_when_clean(capsys, _inject_fake):
+    # a cron/dashboard consumer must never have to special-case the clean run's JSON shape.
+    main(_create_argv())
+    capsys.readouterr()
+    rc = main(["audit", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    import json
+
+    payload = json.loads(out)
+    assert payload["findings"] == []
+    assert payload["reverted"] == []
+    assert payload["revert_errors"] == []
+    assert payload["scanned"] == 0
+
+
+def test_audit_rejects_non_positive_limit(capsys, _inject_fake):
+    capsys.readouterr()
+    rc = main(["audit", "--limit", "0"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "--limit" in out
+
+    capsys.readouterr()
+    rc = main(["audit", "--limit", "-5"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "--limit" in out
+
+
+def test_audit_list_converts_ambiguous_backend_error_to_clean_refusal(
+    capsys, _inject_fake, monkeypatch
+):
+    # review finding: AmbiguousBackendError is deliberately NOT a BackendError subclass, and
+    # main() doesn't catch it — an uncaught one crashed `task audit --json` with a raw
+    # traceback instead of emitting the documented JSON shape (bad for the recommended
+    # report-only cron usage). The list() fetch is read-only, so collapsing it into a clean
+    # refusal is safe: nothing was mutated either way.
+    from tasklib.backends import AmbiguousBackendError
+
+    def boom(**kw):
+        raise AmbiguousBackendError("connection dropped mid-read")
+
+    monkeypatch.setattr(_inject_fake, "list", boom)
+    capsys.readouterr()
+    rc = main(["audit"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "connection dropped mid-read" in out
+
+
+def test_audit_by_id_converts_ambiguous_backend_error_to_clean_refusal(
+    capsys, _inject_fake, monkeypatch
+):
+    from tasklib.backends import AmbiguousBackendError
+
+    main(_create_argv())
+
+    def boom(ticket_id):
+        raise AmbiguousBackendError("connection dropped mid-read")
+
+    monkeypatch.setattr(_inject_fake, "get", boom)
+    capsys.readouterr()
+    rc = main(["audit", "#1"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "connection dropped mid-read" in out
+
+
+def test_audit_revert_records_ambiguous_transition_outcome_distinctly(
+    capsys, _inject_fake, monkeypatch
+):
+    # the transition() call is a WRITE — an ambiguous outcome means it may have already
+    # landed, so it must never be worded like an ordinary clean failure (that conflation is
+    # exactly what the distinct exception type exists to prevent).
+    from tasklib.backends import AmbiguousBackendError
+
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+
+    def boom(ticket_id, state):
+        raise AmbiguousBackendError("connection dropped mid-write")
+
+    monkeypatch.setattr(_inject_fake, "transition", boom)
+    capsys.readouterr()
+    rc = main(["audit", "--revert"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "outcome unknown" in out
+    assert "verify #1" in out
+
+
+def test_audit_by_id_on_non_done_ticket_is_not_silently_reported_clean(capsys, _inject_fake):
+    # a fresh ticket defaults to todo; auditing it by id must say it wasn't audited, not print
+    # the same "N Done ticket(s) checked, 0 noncompliant" a genuinely clean Done ticket gets —
+    # that phrasing would wrongly imply the gates were actually re-run against it.
+    main(_create_argv())
+    capsys.readouterr()
+    rc = main(["audit", "#1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not Done" in out
+    assert "0 noncompliant" not in out
+
+
+def test_audit_by_id_on_non_done_ticket_keeps_json_shape(capsys, _inject_fake):
+    # the by-id early return must stay valid, --json-shaped JSON — a plain-text message here
+    # would break a `task audit <id> --json | jq` consumer (review finding).
+    main(_create_argv())
+    capsys.readouterr()
+    rc = main(["audit", "#1", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    import json
+
+    payload = json.loads(out)
+    assert payload["findings"] == []
+    assert payload["reverted"] == []
+    assert payload["revert_errors"] == []
+    assert "not Done" in payload["note"]
+
+
+def test_audit_revert_records_a_failed_transition_without_aborting_the_batch(
+    capsys, _inject_fake, monkeypatch
+):
+    # `_audit_revert`'s docstring promises "one backend failure must not abort the rest of the
+    # batch" — this is the one path that wasn't actually exercised: a transition() failure on
+    # ticket #1 must not prevent ticket #2 from being reverted, and must surface in
+    # revert_errors / the printed report rather than silently dropping the finding.
+    from tasklib.backends import BackendError
+
+    main(_create_argv(**{"--title": "one"}))
+    main(_create_argv(**{"--title": "two"}))
+    _force_done_bypassing_gates(_inject_fake, "#1")
+    _force_done_bypassing_gates(_inject_fake, "#2")
+
+    real_transition = _inject_fake.transition
+
+    def flaky_transition(ticket_id, state):
+        if ticket_id == "#1":
+            raise BackendError("simulated transition failure")
+        return real_transition(ticket_id, state)
+
+    monkeypatch.setattr(_inject_fake, "transition", flaky_transition)
+    capsys.readouterr()
+    rc = main(["audit", "--revert"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert _inject_fake.get("#1").state.value == "done"  # failed revert — left untouched
+    assert _inject_fake.get("#2").state.value == "in-review"  # the other one still landed
+    assert "failed to revert #1" in out
+    assert "simulated transition failure" in out
+
+
+def test_audit_does_not_flag_ticket_closed_with_a_recorded_gate_skip(capsys, _inject_fake):
+    # closing a UI ticket with a legitimately-waived screenshot gate must not be re-flagged —
+    # the skip is persisted on the ticket (the ## Skipped gates section) and check_done, which
+    # audit reuses unmodified, already honors it via apply_skips.
+    main(_create_argv())
+    main(["change", "#1", "--label", "ui"])
+    _ready_to_close(_inject_fake)
+    main(["done", "#1", "--skip-screenshots", "no UI change, backend-only"])
+    capsys.readouterr()
+    rc = main(["audit"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "clean" in out
+
+
+def test_audit_revert_skips_ticket_fixed_since_the_scan(_inject_fake):
+    # TOCTOU: the revert must re-check the CURRENT backend state immediately before acting, not
+    # the stale snapshot the scan collected — a ticket fixed for real between the two must be
+    # left alone, not silently reopened.
+    from tasklib.audit import audit_done_tickets
+    from tasklib.cli import _audit_revert
+    from tasklib.policy import EnforceConfig
+
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    cfg_e = EnforceConfig()
+    stale_findings = audit_done_tickets([_inject_fake.get("#1")], cfg_e)
+    assert stale_findings  # sanity: the scan snapshot really was noncompliant
+
+    # someone genuinely fixes it (checks every criterion with proof) AFTER the scan snapshot
+    # but BEFORE the revert call below acts on it.
+    main(["check", "#1", "1", "--proof", "shot.png"])
+    main(["check", "#1", "2", "--proof", "shot.png"])
+
+    reverted, errors = _audit_revert(None, _inject_fake, stale_findings, cfg_e, None)
+    assert reverted == []
+    assert errors == []
+    assert _inject_fake.get("#1").state.value == "done"  # left alone — it was already fixed
+
+
+def test_audit_revert_survives_a_comment_failure(capsys, _inject_fake, monkeypatch):
+    # the state fix (Done -> in-review) must land even if posting the explanatory comment
+    # afterwards fails — a comment failure must never be mistaken for a revert failure.
+    from tasklib.backends import BackendError
+
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    capsys.readouterr()
+
+    def boom(ticket_id, body):
+        raise BackendError("comment endpoint down")
+
+    monkeypatch.setattr(_inject_fake, "comment", boom)
+    rc = main(["audit", "--revert"])
+    result = capsys.readouterr()
+    assert rc == 1
+    assert _inject_fake.get("#1").state.value == "in-review"
+    assert "reverted" in result.out
+    assert "failed to post explanation" in result.err
+
+
+def test_audit_flags_unquoted_resolvable_msgref_reference(_inject_fake, monkeypatch):
+    # regression: audit must thread resolvable_ids through the SAME as `task done` does. An
+    # otherwise close-ready ticket carrying a bare tg#42 (resolvable in local history) must be
+    # flagged — the gate only WARNS (never blocks) when resolvability can't be proven, i.e.
+    # resolvable_ids=None, so this only fails if the CLI forgets to load/thread history.
+    from tasklib.model import State
+
+    main(_create_argv())
+    _ready_to_close(_inject_fake)
+    ticket = _inject_fake.get("#1")
+    ticket.what = "per tg#42 do X"  # a bare ref `create` never expanded
+    ticket.state = State.DONE  # simulate it reaching Done anyway (out-of-band close)
+    monkeypatch.setattr("tasklib.msgrefs.load_history", lambda env=None: _fake_history(42))
+
+    rc = main(["audit"])
+    assert rc == 1
+
+
+def test_audit_does_not_flag_unresolvable_msgref_reference(_inject_fake, monkeypatch):
+    # the mirror case: the SAME bare reference, but unresolvable in local history — the gate
+    # degrades to a warning (never blocks), so the otherwise-complete ticket stays clean.
+    from tasklib.model import State
+
+    main(_create_argv())
+    _ready_to_close(_inject_fake)
+    ticket = _inject_fake.get("#1")
+    ticket.what = "per tg#42 do X"
+    ticket.state = State.DONE
+    monkeypatch.setattr("tasklib.msgrefs.load_history", lambda env=None: {})
+
+    rc = main(["audit"])
+    assert rc == 0
