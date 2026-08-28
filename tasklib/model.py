@@ -225,6 +225,20 @@ class Ticket:
         """The acceptance criteria still unchecked — what blocks a close (the on-done gate)."""
         return [c for c in self.acceptance if not c.checked]
 
+    def unmet_criteria(self) -> list[Criterion]:
+        """Acceptance criteria that would fail the on-done close gate right now: unchecked,
+        OR checked without either a visual proof or a recorded force reason — the same two
+        conditions `policy.py`'s `unchecked_criteria_violation` enforces at close time. A
+        wider net than `unchecked_criteria()` alone: a checked-but-unproven box is just as
+        much a violation of "every criterion is verifiably met" as an unchecked one. Used by
+        `mark-shipped` to detect a ticket that reached State.DONE without ever passing that
+        gate (e.g. an external integration closed it) — see `cli.py`'s `_shipped_comment`."""
+        return [
+            c
+            for c in self.acceptance
+            if not c.checked or (not c.proof and not c.force_reason)
+        ]
+
     def session_label(self) -> str | None:
         """The ``session:<id>`` label if present, else ``None``."""
         for label in self.labels:

@@ -697,10 +697,18 @@ def unchecked_criteria_violation(ticket: Ticket, cfg: EnforceConfig) -> Violatio
     """
     if not cfg.acceptance_checked:
         return None
-    unchecked = [c for c in ticket.acceptance if not c.checked]
-    unproven = [c for c in ticket.acceptance if c.checked and not c.proof and not c.force_reason]
-    if not unchecked and not unproven:
+    # `Ticket.unmet_criteria()` (model.py) is the single source of truth for "would this
+    # criterion fail the close gate" — unchecked, OR checked without a proof/force_reason
+    # (review finding: an earlier version of `mark-shipped`'s HYP-1295 warning reimplemented
+    # this predicate by hand in `cli.py`, which could silently drift from this gate if either
+    # copy changed alone). Partitioned back into unchecked/unproven here only for the
+    # human-readable message below; by construction every "checked" member of `unmet` has no
+    # proof and no force_reason (that's the only way a checked criterion lands in `unmet`).
+    unmet = ticket.unmet_criteria()
+    if not unmet:
         return None
+    unchecked = [c for c in unmet if not c.checked]
+    unproven = [c for c in unmet if c.checked]
     parts: list[str] = []
     if unchecked:
         parts.append(f"{len(unchecked)} unchecked: " + "; ".join(c.text for c in unchecked))

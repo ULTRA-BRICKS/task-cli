@@ -122,20 +122,163 @@ def test_mark_shipped_cancelled_ticket_honors_json_flag(capsys, _inject_fake):
 
 
 def test_mark_shipped_on_a_done_ticket_gets_a_reference_comment_not_acceptance_framing(_inject_fake):
-    created = _seed(_inject_fake, state=State.DONE)
+    """A ticket that's legitimately Done — every criterion checked — gets the calm reference
+    note, not a warning. (Unchecked-while-Done is a distinct scenario, see the
+    HYP-1295 tests below.)"""
+    created = _seed(
+        _inject_fake,
+        state=State.DONE,
+        acceptance=[Criterion(text="it works", checked=True, proof="shot.png")],
+    )
     main(["mark-shipped", created.id, "--pr", _PR_URL])
     assert len(_inject_fake.comments) == 1
     _, body = _inject_fake.comments[0]
     assert "already Done" in body
     assert "does NOT close" not in body
+    assert "WARNING" not in body
 
 
 def test_mark_shipped_on_a_done_ticket_prints_a_reference_note_not_acceptance_nudge(capsys, _inject_fake):
-    created = _seed(_inject_fake, state=State.DONE)
+    created = _seed(
+        _inject_fake,
+        state=State.DONE,
+        acceptance=[Criterion(text="it works", checked=True, proof="shot.png")],
+    )
     main(["mark-shipped", created.id, "--pr", _PR_URL])
     out = capsys.readouterr().out
     assert "already Done" in out
     assert "acceptance needed" not in out
+
+
+def test_mark_shipped_on_a_done_ticket_with_unchecked_criteria_warns_in_the_comment(_inject_fake):
+    """HYP-1295 (2026-08-19): a PR body used a GitHub/Linear magic-close keyword ("Closes
+    HYP-1295") against a ticket whose acceptance included a post-merge publish step. Linear's
+    own GitHub integration auto-transitioned the issue to Done the moment the PR merged —
+    entirely outside task-cli, so rule 2 (no close with unchecked boxes) never ran. By the
+    time `mark-shipped` runs, the ticket already reads DONE with unchecked criteria. That
+    combination must be surfaced loudly on the tracker, not filed under the calm reference
+    note used for a legitimately-Done ticket."""
+    created = _seed(_inject_fake, state=State.DONE)  # default acceptance is unchecked
+    main(["mark-shipped", created.id, "--pr", _PR_URL])
+    assert len(_inject_fake.comments) == 1
+    _, body = _inject_fake.comments[0]
+    assert "WARNING" in body
+    assert "unchecked" in body
+    assert "already Done — recorded here for reference." not in body
+
+
+def test_mark_shipped_on_a_done_ticket_with_unchecked_criteria_warns_in_the_printed_output(
+    capsys, _inject_fake
+):
+    created = _seed(_inject_fake, state=State.DONE)
+    main(["mark-shipped", created.id, "--pr", _PR_URL])
+    out = capsys.readouterr().out
+    assert "unchecked" in out
+    assert "reopen" in out
+
+
+def test_mark_shipped_on_a_done_ticket_lists_only_the_still_unmet_criterion(capsys, _inject_fake):
+    """Partial case (review finding): 2 criteria, 1 checked-with-proof, 1 unchecked. The
+    warning must name only the outstanding one, at its REAL position in the full acceptance
+    list — not the position of the always-filtered `unmet` list — since that number is meant
+    to be fed straight to `task check <id> <n>`, which indexes the full list. Criterion 1 is
+    the checked/proven one, criterion 2 is the unmet one, so the warning must say `[2]`, not
+    the `[1]` an earlier (buggy) version of this test wrongly pinned."""
+    created = _seed(
+        _inject_fake,
+        state=State.DONE,
+        acceptance=[
+            Criterion(text="it works", checked=True, proof="shot.png"),
+            Criterion(text="handles the empty case"),
+        ],
+    )
+    main(["mark-shipped", created.id, "--pr", _PR_URL])
+    _, body = _inject_fake.comments[0]
+    assert "[2] handles the empty case" in body
+    assert "it works" not in body.split("WARNING", 1)[1]
+
+
+def test_mark_shipped_on_a_done_ticket_with_a_checked_but_unproven_criterion_warns_too(_inject_fake):
+    """A criterion CHECKED without a proof or a force_reason fails the exact same on-done
+    close gate (`policy.py`'s `unchecked_criteria_violation`) as an unchecked one — a ticket
+    externally closed with that shape must not be waved through as legitimately Done."""
+    created = _seed(
+        _inject_fake,
+        state=State.DONE,
+        acceptance=[Criterion(text="publish release", checked=True)],  # no proof, no force_reason
+    )
+    main(["mark-shipped", created.id, "--pr", _PR_URL])
+    _, body = _inject_fake.comments[0]
+    assert "WARNING" in body
+    assert "publish release" in body
+
+
+def test_mark_shipped_json_output_reports_done_with_unmet_criteria(capsys, _inject_fake):
+    import json
+
+    created = _seed(_inject_fake, state=State.DONE)  # default acceptance is unchecked
+    main(["mark-shipped", created.id, "--pr", _PR_URL, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["done_with_unmet_criteria"] == ["it works", "handles the empty case"]
+
+
+def test_mark_shipped_on_a_done_ticket_with_a_forced_checked_criterion_does_not_warn(_inject_fake):
+    """Boundary the earlier version of this change left untested (review finding): a checked
+    criterion with NO proof but a recorded ``force_reason`` is a legitimate close per
+    `policy.py` (the `--force "<reason>"` escape) — it must NOT be treated as unmet."""
+    created = _seed(
+        _inject_fake,
+        state=State.DONE,
+        acceptance=[
+            Criterion(text="it works", checked=True, force_reason="no visual surface, pure logic")
+        ],
+    )
+    main(["mark-shipped", created.id, "--pr", _PR_URL])
+    _, body = _inject_fake.comments[0]
+    assert "WARNING" not in body
+    assert "already Done" in body
+
+
+def test_mark_shipped_retry_on_a_legitimately_done_ticket_stays_idempotent(_inject_fake):
+    """A ticket that's genuinely Done (every criterion checked+proven) posts exactly one
+    comment across two identical mark-shipped calls — the new Done-with-unmet clause must
+    not disturb the existing already-recorded idempotency for the normal, non-broken case."""
+    created = _seed(
+        _inject_fake,
+        state=State.DONE,
+        acceptance=[Criterion(text="it works", checked=True, proof="shot.png")],
+    )
+    main(["mark-shipped", created.id, "--pr", _PR_URL])
+    assert len(_inject_fake.comments) == 1
+    rc = main(["mark-shipped", created.id, "--pr", _PR_URL])
+    assert rc == 0
+    assert len(_inject_fake.comments) == 1  # no second comment
+
+
+def test_mark_shipped_respects_a_disabled_acceptance_checked_gate(tmp_path, _inject_fake):
+    """A repo with `enforce.acceptance_checked: false` never treats unchecked/unproven
+    criteria as a close-gate violation (`policy.unchecked_criteria_violation` returns
+    ``None`` there) — mark-shipped must not contradict that configured contract with a false
+    Done-with-unmet warning."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/acme/widgets"],
+        check=True,
+    )
+    (repo / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\nenforce:\n  acceptance_checked: false\n",
+        encoding="utf-8",
+    )
+    created = _seed(_inject_fake, state=State.DONE)  # default acceptance is unchecked
+    rc = main(["mark-shipped", created.id, "--pr", _PR_URL, "--cwd", str(repo)])
+    assert rc == 0
+    _, body = _inject_fake.comments[0]
+    assert "WARNING" not in body
+    assert "already Done" in body
 
 
 def test_mark_shipped_rejects_a_non_url_pr(capsys, _inject_fake):
@@ -461,6 +604,7 @@ def test_mark_shipped_json_output(capsys, _inject_fake):
         "replaced_pr": None,
         "commit_url": None,
         "unchecked_criteria": ["it works", "handles the empty case"],
+        "done_with_unmet_criteria": [],
     }
 
 

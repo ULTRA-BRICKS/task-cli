@@ -2945,35 +2945,97 @@ def _commit_url_from_pr(pr_url: str, commit_sha: str) -> str | None:
     return f"https://github.com/{owner}/{repo}/commit/{commit_sha}"
 
 
+def _done_with_unmet_warning(ticket: Ticket, unmet: list[Criterion]) -> str:
+    """The single message body for the "Done but not really" invariant violation (HYP-1295,
+    2026-08-19) — shared by the durable tracker comment (`_shipped_comment`) and the CLI
+    output (`_acceptance_instructions`) so the two never drift into different prose or
+    different criteria lists (review finding: an earlier version duplicated near-identical
+    text and passed only a *count* to the comment, so the actionable detail — which criteria
+    — reached CLI stdout but not the tracker, the audience that actually needed it).
+
+    Numbers each listed criterion by its REAL 1-based position in ``ticket.acceptance``
+    (review finding: an earlier version enumerated the already-filtered ``unmet`` list
+    instead, so e.g. `[checked, unchecked]` printed the unchecked one as `[1]` — the wrong
+    number to feed `task check <id> <n>`, which indexes the full list). Filters by object
+    identity (``id(c)``), not equality, since two criteria can legitimately share text.
+
+    Names the LIKELY cause (an external integration — e.g. Linear's GitHub auto-close firing
+    on a "Closes"/"Fixes"/"Resolves" keyword in a PR body — transitioning the ticket to Done
+    the instant a referencing PR merges, entirely outside task-cli, so
+    `strict-ticket-discipline` rule 2 never got a chance to fire) as a hedged possibility, not
+    an assertion of fact (review finding: a human closing the ticket by hand without checkbox
+    hygiene produces the identical state, and this durable comment must not misattribute
+    that)."""
+    unmet_ids = {id(c) for c in unmet}
+    lines = [
+        f"{ticket.id} is Done but {len(unmet)} acceptance criterion/criteria "
+        "are not fully verified (unchecked, or checked without a proof/force reason):"
+    ]
+    lines.extend(
+        f"  [{i}] {c.text}"
+        for i, c in enumerate(ticket.acceptance, start=1)
+        if id(c) in unmet_ids
+    )
+    lines.append(
+        "This can happen when an external integration (e.g. Linear's GitHub auto-close on a "
+        "'Closes'/'Fixes'/'Resolves' PR-body keyword) closes the ticket on merge before "
+        "task-cli's own close gate runs — or from a manual close that skipped the checklist. "
+        f"Verify these for real; run `task read {ticket.id}`, then either check each with "
+        "proof or reopen the ticket."
+    )
+    return "\n".join(lines)
+
+
 def _shipped_comment(
-    ticket_id: str, pr_url: str, commit_sha: str, *, already_closed: bool
+    ticket: Ticket,
+    pr_url: str,
+    commit_sha: str,
+    *,
+    already_closed: bool,
+    unmet_despite_closed: list[Criterion] | None = None,
 ) -> str:
     """The durable backend comment recorded on a shipped ticket — the point of it is to make
     the merge visible on the tracker itself (not just in task-cli's own state). For a ticket
     that's already Done, the "this does NOT close" framing would be actively misleading (it's
-    already closed), so that ticket gets a plain reference note instead."""
+    already closed), so that ticket gets a plain reference note instead — UNLESS it's Done
+    with unmet criteria (see `_done_with_unmet_warning`), which gets a loud warning instead."""
     lines = [f"Shipped: merged via {pr_url}."]
     if commit_sha:
         lines.append(f"Merge commit: {commit_sha}")
     if already_closed:
-        lines.append("The ticket is already Done — recorded here for reference.")
+        if unmet_despite_closed:
+            lines.append("WARNING: " + _done_with_unmet_warning(ticket, unmet_despite_closed))
+        else:
+            lines.append("The ticket is already Done — recorded here for reference.")
     else:
         lines.append(
             "This does NOT close the ticket — acceptance still needs proof. "
-            f"Run `task read {ticket_id}` for the outstanding criteria, then `task check`/`task done`."
+            f"Run `task read {ticket.id}` for the outstanding criteria, then `task check`/`task done`."
         )
     return "\n".join(lines)
 
 
-def _acceptance_instructions(ticket: Ticket) -> list[str]:
+def _acceptance_instructions(ticket: Ticket, *, acceptance_checked_gate: bool = True) -> list[str]:
     """The human-readable checklist printed after `mark-shipped`: what still stands between
     this merge and a genuine `task done` (strict-ticket-discipline rules 2/3 — a close needs
     every criterion CHECKED with a visual proof; a merge alone proves nothing about that).
 
     A ticket that's already Done gets a one-line reference note instead — printing "acceptance
     needed" advice about a ticket that is, by definition, already accepted would be nonsense.
+    UNLESS it's Done with unmet criteria still sitting on it (see `_done_with_unmet_warning`,
+    HYP-1295) — that combination is itself an invariant violation, so it gets the same warning
+    treatment as the tracker comment, not the calm note.
+
+    ``acceptance_checked_gate`` (review finding) mirrors `enforce.acceptance_checked` from
+    this project's `task.yaml`: a repo that has deliberately DISABLED the on-done
+    unchecked-criteria gate (`policy.unchecked_criteria_violation` returns ``None`` there) has
+    a configured contract where an externally-closed ticket with unchecked boxes is NOT a
+    violation — `mark-shipped` must not contradict that contract with a false warning.
     """
     if ticket.state is State.DONE:
+        unmet_while_done = ticket.unmet_criteria() if acceptance_checked_gate else []
+        if unmet_while_done:
+            return [_warn(_done_with_unmet_warning(ticket, unmet_while_done))]
         return [
             _dim(
                 f"{ticket.id} is already Done — this merge was recorded for reference only."
@@ -3018,6 +3080,8 @@ def _record_shipped_pr(
     commit_sha: str,
     commit_url: str | None,
     existing_pr: str | None,
+    *,
+    acceptance_checked_gate: bool = True,
 ) -> tuple[Ticket, bool]:
     """Post the shipped comment, persist the PR link (+ derived commit link), and move
     TODO/IN_PROGRESS to IN_REVIEW. Returns ``(updated_ticket, moved_to_review)``.
@@ -3047,6 +3111,14 @@ def _record_shipped_pr(
     caller — which already computed it for the idempotency check — rather than recomputed here
     (review finding: two call sites deriving the same fact from the same ticket is a needless
     second source of truth).
+
+    ``acceptance_checked_gate`` — see `_acceptance_instructions`'s docstring; a repo with
+    `enforce.acceptance_checked: false` never treats unchecked/unproven criteria as a
+    violation, so the Done-with-unmet warning must not fire there either.
+
+    The Done-with-unmet warning (HYP-1295) fires on THIS call's own read of the ticket only —
+    a close landing after this command returns is invisible to it. `gh ship` invokes
+    `mark-shipped` once per merge, so there is no retry to catch that case anyway.
     """
     from .backends import BackendError
 
@@ -3055,11 +3127,18 @@ def _record_shipped_pr(
         validate_transition(ticket.state, State.IN_REVIEW)
 
     already_closed = ticket.state is State.DONE
+    unmet_despite_closed = (
+        ticket.unmet_criteria() if already_closed and acceptance_checked_gate else []
+    )
     try:
         backend.comment(
             ticket.id,
             _shipped_comment(
-                ticket.id, pr_url, commit_sha, already_closed=already_closed
+                ticket,
+                pr_url,
+                commit_sha,
+                already_closed=already_closed,
+                unmet_despite_closed=unmet_despite_closed,
             ),
         )
     except BackendError as exc:
@@ -3194,6 +3273,7 @@ def _print_mark_shipped_result(
     replaced_pr: str | None,
     as_json: bool,
     instructions: list[str],
+    acceptance_checked_gate: bool = True,
 ) -> None:
     """The human/`--json` output for `mark-shipped` — split out of the command purely to keep
     the command itself under the file's function-length target."""
@@ -3214,6 +3294,18 @@ def _print_mark_shipped_result(
                     "unchecked_criteria": [
                         c.text for c in updated.unchecked_criteria()
                     ],
+                    # Non-empty only when state is DONE with criteria that wouldn't pass the
+                    # on-done close gate (HYP-1295) — the structured signal a scripted caller
+                    # (gh ship / task-cli's own hooks) can act on without parsing prose; the
+                    # human-facing warning lives in the tracker comment + `instructions` above.
+                    # Empty when `enforce.acceptance_checked` is disabled for this project
+                    # (review finding) — that gate is what defines "wouldn't pass", so a repo
+                    # that turned it off has no such notion.
+                    "done_with_unmet_criteria": (
+                        [c.text for c in updated.unmet_criteria()]
+                        if updated.state is State.DONE and acceptance_checked_gate
+                        else []
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -3293,6 +3385,14 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     # AFTER a successful update() but BEFORE the TG notify below would leave `already_recorded`
     # true on any retry and the notification permanently skipped (the durable link + comment
     # survive either way, so the impact is a missed best-effort ping, not a lost record).
+    #
+    # `acceptance_checked_gate` mirrors `enforce.acceptance_checked` from this project's
+    # `task.yaml` — a repo that disabled that gate never treats unchecked/unproven criteria as
+    # a violation, so the Done-with-unmet warning (see `_acceptance_instructions`/
+    # `_record_shipped_pr`) must not fire there either. It does not add an `already_recorded`
+    # clause — the warning fires on this call's own read only (see `_record_shipped_pr`'s
+    # docstring).
+    acceptance_checked_gate = _enforce_config(cfg).acceptance_checked
     existing_pr = _stored_pr_url(ticket)
     already_recorded = (
         existing_pr == pr_url
@@ -3303,7 +3403,13 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
         updated, moved_to_review = ticket, False
     else:
         updated, moved_to_review = _record_shipped_pr(
-            backend, ticket, pr_url, commit_sha, commit_url, existing_pr
+            backend,
+            ticket,
+            pr_url,
+            commit_sha,
+            commit_url,
+            existing_pr,
+            acceptance_checked_gate=acceptance_checked_gate,
         )
         _record_session_touch(cfg, backend, updated)
         from .logging import log_event
@@ -3325,7 +3431,8 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
         moved_to_review=moved_to_review,
         replaced_pr=replaced_pr,
         as_json=args.json,
-        instructions=_acceptance_instructions(updated),
+        instructions=_acceptance_instructions(updated, acceptance_checked_gate=acceptance_checked_gate),
+        acceptance_checked_gate=acceptance_checked_gate,
     )
     return 0
 
