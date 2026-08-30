@@ -297,6 +297,146 @@ def test_join_bullet_blocks_does_not_absorb_column_zero_pasted_image():
     assert links == {"PR": "https://github.com/o/r/pull/1"}
 
 
+def test_join_bullet_blocks_does_not_absorb_unrelated_image_below_complete_criterion():
+    # GitHub PR review finding (task-cli#107): a bullet only accepts a continuation when ITS
+    # OWN content ends with an open template marker. An unchecked criterion with no dangling
+    # "— proof:" marker is already complete — an unrelated indented image immediately below
+    # it (e.g. a human illustrating a DIFFERENT criterion, or general context) must not be
+    # absorbed into its text.
+    body = _body_with_section(
+        "Acceptance criteria",
+        "\n- [ ] a criterion with no proof yet\n\n"
+        "  ![unrelated](https://user-images.githubusercontent.com/x.png)\n",
+    )
+    crits = parse(body).acceptance
+    assert len(crits) == 1
+    assert crits[0].checked is False
+    assert crits[0].text == "a criterion with no proof yet"
+
+
+def test_join_bullet_blocks_does_not_absorb_second_image_below_inline_screenshot():
+    # GitHub PR review finding (task-cli#107): a screenshot bullet whose image is already
+    # inline (`kind: ![alt](ref)`) is complete — it doesn't end with a trailing colon, so a
+    # SECOND, unrelated indented image immediately below it must not join (which would
+    # otherwise make the primary image regex fail and store the first image's own Markdown
+    # wrapper as the ref, double-wrapping on the next render).
+    body = _body_with_section(
+        "Screenshots",
+        "\n- implementation: ![implementation](https://uploads.example/first.png)\n\n"
+        "  ![unrelated](https://uploads.example/second.png)\n",
+    )
+    shots = parse(body).screenshots
+    assert len(shots) == 1
+    assert shots[0].ref == "https://uploads.example/first.png"
+
+
+def test_join_bullet_blocks_bounds_open_bullet_to_one_image_then_one_caption():
+    # GitHub PR review finding (task-cli#107 review thread): an open bullet's continuation
+    # chain is bounded to AT MOST one image, then at most one caption/proof line — a SECOND
+    # unrelated image immediately below a genuinely open bullet must not also join (which
+    # would make the primary image regex fail and store the first image's own Markdown
+    # wrapper as the ref, double-wrapping on the next render).
+    body = _body_with_section(
+        "Screenshots",
+        "\n- implementation:\n\n"
+        "  ![implementation](https://uploads.linear.app/first)\n\n"
+        "  ![unrelated second image](https://user-images.githubusercontent.com/x.png)\n",
+    )
+    shots = parse(body).screenshots
+    assert len(shots) == 1
+    assert shots[0].ref == "https://uploads.linear.app/first"
+
+
+def test_hand_added_caption_below_an_already_complete_bullet_is_dropped_not_joined():
+    # Pins the deliberate trade-off documented on _join_bullet_blocks (review finding,
+    # task-cli#107 review thread): once a bullet is already complete (image already inline),
+    # it never accepts ANY further continuation, even a caption-shaped "— ..." line — a real
+    # regression would silently reopen this without a red test.
+    body = _body_with_section(
+        "Screenshots",
+        "\n- implementation: ![implementation](https://uploads.example/first.png)\n\n"
+        "  — hand-added caption\n",
+    )
+    shots = parse(body).screenshots
+    assert len(shots) == 1
+    assert shots[0].caption == ""
+
+
+def test_join_bullet_blocks_accepts_at_most_one_caption_after_the_image():
+    # The other half of the bounded chain (test_..._bounds_open_bullet_to_one_image_then_one
+    # _caption above covers the image-side bound): a THIRD continuation line — a second
+    # caption after image+caption — must not also join, or the greedy caption capture would
+    # be polluted with it.
+    body = _body_with_section(
+        "Screenshots",
+        "\n- implementation:\n\n"
+        "  ![implementation](https://uploads.linear.app/first)\n\n"
+        "  — first caption\n\n"
+        "  — second unrelated caption\n",
+    )
+    shots = parse(body).screenshots
+    assert len(shots) == 1
+    assert shots[0].caption == "first caption"
+
+
+def test_caption_without_a_preceding_image_below_an_open_bullet_is_dropped():
+    # review finding (task-cli#107 review thread): the confirmed shapes always show the
+    # image FIRST, then optionally a caption — a "— ..." line reaching an open bullet with
+    # no image joined yet doesn't match any confirmed shape and must not join.
+    body = _body_with_section("Screenshots", "\n- implementation:\n\n  — caption with no image\n")
+    assert parse(body).screenshots == []
+
+
+def test_unchecked_criterion_ending_in_proof_marker_text_never_opens():
+    # GitHub PR review finding (task-cli#107 Codex pass): Linear's confirmed proof
+    # continuation only ever occurs for a CHECKED criterion (a proof is only ever set
+    # together with checking it off, via `cmd_check`). An UNCHECKED criterion whose own
+    # hand-typed text happens to literally end in "— proof:" must not be treated as awaiting
+    # a continuation — an unrelated indented image below it must not be absorbed as a
+    # phantom proof (which unchecked criteria don't even render, silently dropping it).
+    body = _body_with_section(
+        "Acceptance criteria",
+        "\n- [ ] preserve literal marker — proof:\n\n"
+        "  ![unrelated](https://example.test/u.png)\n",
+    )
+    crits = parse(body).acceptance
+    assert len(crits) == 1
+    assert crits[0].checked is False
+    assert crits[0].text == "preserve literal marker — proof:"
+    assert crits[0].proof == ""
+
+
+def test_criterion_proof_image_never_accepts_a_further_caption_line():
+    # review finding (task-cli#107 review thread): a Criterion's confirmed continuation
+    # sample is exactly ONE line (the proof image) — unlike Screenshots, it never grows a
+    # second caption line. A "— ..." line immediately below a joined proof image must not
+    # join, or the proof ref gets polluted with it.
+    body = _body_with_section(
+        "Acceptance criteria",
+        "\n- [X] a criterion with a proof — proof:\n\n"
+        "  ![proof](https://uploads.linear.app/x)\n\n"
+        "  — an unrelated note\n",
+    )
+    crits = parse(body).acceptance
+    assert len(crits) == 1
+    assert crits[0].proof == "https://uploads.linear.app/x"
+
+
+def test_is_open_bullet_requires_a_confirmed_shape_not_any_trailing_colon():
+    # review finding (task-cli#107 review thread): "ends with a colon" is too broad — a
+    # criterion or caption whose own text legitimately ends in a colon for an unrelated
+    # reason (e.g. introducing a checklist) must NOT be treated as "awaiting a continuation",
+    # or an unrelated indented image immediately below it would still glue on and corrupt it.
+    body = _body_with_section(
+        "Acceptance criteria",
+        "\n- [ ] run the checklist:\n\n"
+        "  ![unrelated](https://user-images.githubusercontent.com/x.png)\n",
+    )
+    crits = parse(body).acceptance
+    assert len(crits) == 1
+    assert crits[0].text == "run the checklist:"
+
+
 def test_join_bullet_blocks_does_not_glue_distant_indented_image_after_prose():
     # review finding: an indented image/caption line joins its bullet only when it
     # IMMEDIATELY follows (across blank lines only) — a column-0 prose line in between must
