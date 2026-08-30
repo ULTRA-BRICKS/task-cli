@@ -2886,7 +2886,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     """
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
+    from .logging import log_event
 
     try:
         ticket = backend.get(args.id)
@@ -2906,7 +2907,23 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     crit.checked = True
     if proofs:
-        crit.proof = proofs[0]
+        # Durably attach the FIRST proof before embedding it in the body (HYP-1355): a raw
+        # local path (or an unauthenticated-on-fetch backend URL) embedded directly in the
+        # criterion text is never actually viewable by anyone reading the ticket — attach()
+        # is the backend's contract for turning a ref into something durable (a real hosted
+        # URL, or a registered Linear attachment echoing its own asset URL back), so USE that
+        # return value as the body reference instead of discarding it. Best-effort: if the
+        # durable attach itself fails, fall back to the raw ref rather than losing the proof
+        # entirely (matches _attach_screenshots' existing best-effort contract below). The
+        # fallback is logged (review finding) — a silent fallback here means the operator's
+        # printed proof_note and the actually-embedded ref can quietly disagree.
+        try:
+            crit.proof = backend.attach(ticket.id, proofs[0])
+        except (BackendError, AmbiguousBackendError) as exc:
+            crit.proof = proofs[0]
+            log_event(
+                "criterion.proof_attach_failed", ticket_id=ticket.id, error=str(exc)
+            )
         crit.force_reason = ""
     else:
         crit.proof = ""
@@ -2917,12 +2934,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         _attach_screenshots(
             backend,
             updated.id,
-            [Screenshot(ref=p, kind="implementation") for p in proofs],
+            [Screenshot(ref=p, kind="implementation") for p in proofs[1:]],
         )
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
-
-    from .logging import log_event
 
     _record_session_touch(cfg, backend, updated)
     log_event(
@@ -2930,7 +2945,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         ticket_id=updated.id,
         forced=bool(force_reason and not proofs),
     )
-    proof_note = f"proof {proofs[0]}" if proofs else f"forced ({force_reason})"
+    # crit.proof, not proofs[0]: when the durable attach succeeded, crit.proof is the
+    # embedded ref (may differ from the raw proofs[0] the caller passed) — the printed note
+    # must match what's actually in the ticket body, not what the operator typed (review
+    # finding).
+    proof_note = f"proof {crit.proof}" if proofs else f"forced ({force_reason})"
     remaining = len(updated.unchecked_criteria())
     print(
         _ok(f"checked {crit.text!r} on {updated.id}  ({proof_note}; {remaining} left)")
