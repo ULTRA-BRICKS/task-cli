@@ -25,7 +25,9 @@ this is a personal-tooling config, not a hostile-input parser.
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,20 @@ VALID_BACKENDS = {"github-issues", "linear"}
 #              session-scoped and 401 for a non-browser viewer, so hyperide's own mitigation is to
 #              link out to the PR's `#screenshots` section instead of embedding/uploading an image.
 VALID_ATTACHMENT_MODES = {"link", "native"}
+
+# Highest-precedence override for `linear.attachment_mode` — set on ONE machine to beat even a
+# repo-committed pin (hyperide's `task.yaml` pins "link" for everyone, HYP-1248; tg#11652 asked
+# for a personal override without touching that shared file). Mirrors this ecosystem's other
+# per-machine env overrides (RIG_TMUX_DRY_RUN, RIG_TG_CTL_DRY_RUN).
+ATTACHMENT_MODE_ENV_VAR = "TASK_CLI_ATTACHMENT_MODE"
+
+# A single DNS label: alnum, optionally hyphenated, never starting/ending in a hyphen (RFC 1123).
+_HOSTNAME_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+# A label that's purely numeric (any getaddrinfo-legacy base): plain decimal digits, or a
+# `0x`-prefixed hex literal. See the trusted_attachment_hosts IP-literal-bypass check in
+# validate() for why this needs to be checked per-LABEL, not on the whole string.
+_NUMERIC_OR_HEX_LABEL_RE = re.compile(r"^(0x[0-9a-f]+|[0-9]+)$")
 
 
 class ConfigError(ValueError):
@@ -86,7 +102,21 @@ _RIG_TASK_ALIASES: dict[str, tuple[str, ...]] = {
 # OWN top-level version), and passing it through would make it fail-closed, so a future rig
 # bumping a stray task.version would crash an older task-cli — the opposite of forward-compat.
 _RIG_TASK_PASSTHROUGH = frozenset(
-    {"backend", "github", "linear", "projects", "enforce", "classify", "session"}
+    {
+        "backend",
+        "github",
+        "linear",
+        "projects",
+        "enforce",
+        "classify",
+        "session",
+        # review finding: omitting this contradicted the README's own claim that the "full
+        # native shape... nested under rig.yaml task:" includes trusted_attachment_hosts — a
+        # rig-provisioned repo (the canonical path — rig writes this block, per AGENTS.md)
+        # setting it there was silently warned-and-ignored by rig_task_overlay, exactly the
+        # "silently never-match" failure this whole feature exists to eliminate.
+        "trusted_attachment_hosts",
+    }
 )
 
 
@@ -172,6 +202,11 @@ DEFAULTS: dict[str, Any] = {
     "backend": "github-issues",
     "github": {"repo": "auto", "default_labels": ["agent"]},
     "linear": {"team": "", "project": "", "attachment_mode": "native"},
+    # Extra hostnames (repo-configured) `_save_attachments` treats as safe to auto-fetch bytes
+    # from even though they aren't the tracker's own native asset domain — e.g. a repo's own
+    # GitHub Pages host. Empty by default (secure-by-default: unchanged behavior). Fetched
+    # WITHOUT the tracker's auth header — see LoadedConfig.trusted_attachment_hosts.
+    "trusted_attachment_hosts": [],
     "enforce": {
         "acceptance_criteria": "required",
         "motivation": "required",
@@ -319,6 +354,27 @@ class LoadedConfig:
         return str(self.section("linear").get("attachment_mode", "native"))
 
     @property
+    def trusted_attachment_hosts(self) -> frozenset[str]:
+        """Extra hostnames (repo-configured, top-level ``trusted_attachment_hosts:``) that
+        ``_save_attachments`` treats as safe to auto-fetch bytes from, even though they are not
+        a backend's own native asset domain — e.g. a repo's own GitHub Pages host, which a
+        narrower native-asset check has no way to recognize as first-party.
+
+        Fetched WITHOUT the backend's auth header — this list only widens the FETCH decision in
+        ``_save_attachments``, never ``is_native_attachment_url`` itself (which stays the sole
+        gate for "does this URL get the tracker's credentials attached" — see
+        ``backends/linear.py``'s ``fetch_attachment_bytes`` docstring). Every entry here is
+        already validated (``validate()``): a blank/whitespace-only entry, or one carrying a
+        scheme/path/port/userinfo, is rejected at config-load time rather than silently never
+        matching — this property only lowercases/strips whitespace off an already-valid list.
+        Empty by default (secure-by-default, unchanged old behavior).
+        """
+        raw = self.data.get("trusted_attachment_hosts") or []
+        if not isinstance(raw, list):
+            return frozenset()
+        return frozenset(str(h).strip().lower() for h in raw if str(h).strip())
+
+    @property
     def session_detect(self) -> tuple[str, ...]:
         raw = self.section("session").get("detect")
         if isinstance(raw, list) and raw:
@@ -340,15 +396,18 @@ def load(
     """Cascade-load config for ``repo_root``, layered over the built-in :data:`DEFAULTS`.
 
     Layer order (later wins): defaults → global → ``rig.yaml`` ``task:`` block → ``task.yaml``
-    → ``--config P`` (the last replaces the ``task.yaml`` layer). The ``rig.yaml`` block is the
-    canonical per-repo tracker selector (rig provisions it); a native ``task.yaml`` still wins
-    so a repo that keeps one is unaffected. The result is validated (fail-closed on
+    → ``--config P`` (the last replaces the ``task.yaml`` layer) → the
+    ``TASK_CLI_ATTACHMENT_MODE`` env var (highest precedence — a personal, per-machine override
+    that beats even a repo-committed pin; see :data:`ATTACHMENT_MODE_ENV_VAR`). The ``rig.yaml``
+    block is the canonical per-repo tracker selector (rig provisions it); a native ``task.yaml``
+    still wins so a repo that keeps one is unaffected. The result is validated (fail-closed on
     backend/version) before return. With no config file at all the built-in defaults are
     returned (the zero-config GitHub-Issues path).
     """
     import copy
 
     repo_root = repo_root.resolve()
+    env = os.environ if env is None else env
     # deepcopy: DEFAULTS has nested dicts; a shallow dict(DEFAULTS) would share them, so a
     # later mutation (e.g. cli `--repo` writing cfg.data["github"]["repo"]) would leak into
     # the module-global DEFAULTS for the whole process (and contaminate across main() calls).
@@ -404,6 +463,28 @@ def load(
             merged = _deep_merge(merged, _load_yaml(rpath))
             layers.append(f"repo:{rpath}")
 
+    # Highest-precedence layer: a personal, per-machine override for the Linear attachment
+    # strategy (tg#11652) — set TASK_CLI_ATTACHMENT_MODE=native on one machine to beat even a
+    # repo-committed pin (e.g. hyperide's task.yaml pins "link" for everyone, HYP-1248) without
+    # touching that shared file or affecting any other machine/user. Still goes through the SAME
+    # validate() call below as every other layer, so a value ALSO invalid for any other reason
+    # (e.g. a future stricter check on attachment_mode) still fails closed there too — but
+    # review finding: relying SOLELY on that generic post-merge error means a bad env value
+    # produces "linear.attachment_mode must be one of [...], got 'carrier-pigeon'" with no
+    # mention of TASK_CLI_ATTACHMENT_MODE, and cfg.layers (which WOULD show the env source) is
+    # never built because validate() raises before LoadedConfig() exists — a user auditing
+    # task.yaml/rig.yaml for the typo finds nothing wrong there and has no pointer to check their
+    # shell env. Validate the override eagerly, right here, so the error names its actual source.
+    override = str(env.get(ATTACHMENT_MODE_ENV_VAR, "")).strip()
+    if override:
+        if override not in VALID_ATTACHMENT_MODES:
+            raise ConfigError(
+                f"{ATTACHMENT_MODE_ENV_VAR}={override!r} must be one of "
+                f"{sorted(VALID_ATTACHMENT_MODES)}"
+            )
+        merged = _deep_merge(merged, {"linear": {"attachment_mode": override}})
+        layers.append(f"env:{ATTACHMENT_MODE_ENV_VAR}={override}")
+
     validate(merged)
     return LoadedConfig(data=merged, repo_root=repo_root, layers=layers)
 
@@ -438,3 +519,92 @@ def validate(data: dict[str, Any]) -> None:
         # raw TypeError from the `in` check against the (unhashable-safe) set.
         if not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES:
             raise ConfigError(f"linear.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)}, got {mode!r}")
+
+    if "trusted_attachment_hosts" in data:
+        hosts = data["trusted_attachment_hosts"]
+        if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
+            raise ConfigError(
+                f"trusted_attachment_hosts must be a list of strings, got {hosts!r}"
+            )
+        # review finding: this is a security-relevant knob (it decides which hosts
+        # `_save_attachments` auto-fetches from) — a copy-paste mistake here must fail LOUD, the
+        # same way `linear.attachment_mode` does above, not silently never-match at fetch time.
+        # review finding, round 2: a character BLACKLIST here (reject only "/@:\\") still let
+        # plenty of non-hostname shapes through unrejected (a "?query", a "#fragment", an
+        # internal space, bracket/quote characters) — all of which parse fine as a config
+        # string but can never equal `urlparse(url).hostname`, so every attachment on that host
+        # would just keep printing "skipped" with no clue why. An ALLOWLIST (RFC 1123 hostname
+        # label shape) closes that instead of chasing individual bad characters one review round
+        # at a time. Also rejects a blank/whitespace-only entry here — `LoadedConfig.
+        # trusted_attachment_hosts` is the ONE place that still strips/lowercases a (now
+        # guaranteed valid-shape) entry, not where blanks get filtered.
+        for h in hosts:
+            stripped = h.strip().lower()
+            # review finding, round 3 (P1): a bare IP LITERAL — e.g. `169.254.169.254`, the
+            # AWS/GCP/Azure cloud-metadata endpoint — passes the RFC-1123 label regex below
+            # unchanged (every segment of a dotted-quad is a valid alnum label), so a
+            # config-level typo or a deliberately hostile `rig.yaml`/`task.yaml` edit could
+            # allowlist auto-fetching from an internal address with zero further checks. This
+            # knob exists to name a specific first-party DOMAIN (a repo's GitHub Pages host);
+            # it never has a legitimate reason to hold a bare IP, public or private — reject
+            # every IP-literal shape outright rather than trying to enumerate "bad" ranges
+            # (RFC1918/loopback/link-local today, someone's internal /8 tomorrow).
+            try:
+                ipaddress.ip_address(stripped)
+            except ValueError:
+                pass
+            else:
+                raise ConfigError(
+                    "trusted_attachment_hosts entries must be DNS hostnames, not IP "
+                    f"literals (SSRF risk — e.g. a cloud metadata address), got {h!r}"
+                )
+            # review finding, rounds 4-5 (P1, fixed twice more narrowly before this): `ipaddress.
+            # ip_address()` is STRICT — it only recognizes canonical decimal-dotted-quad/
+            # colon-hex notation, and rejects (raises ValueError on, i.e. does NOT catch)
+            # non-canonical numeric encodings that OS resolvers (`getaddrinfo`, and by extension
+            # `urllib`) have historically still accepted as real addresses. A round-4 fix caught
+            # only a WHOLE-STRING bare-decimal or WHOLE-STRING `0x...` form, missing a MIXED,
+            # PER-LABEL case: `127.0x1` (label "127" is plain decimal, label "0x1" is hex — a
+            # real getaddrinfo-accepted encoding of 127.0.0.1) has no single whole-string
+            # classification that either round-3 or round-4's checks catch, but every one of its
+            # labels is individually numeric/hex-numeric. Check PER LABEL instead of the whole
+            # string: if every dot-separated label is purely decimal digits or a `0x`-prefixed
+            # hex literal, the entry cannot be a legitimate DNS hostname (a real one always has
+            # at least one label containing an actual letter outside that shape) regardless of
+            # which base/notation/mix any one label uses — this one check subsumes the
+            # whole-string bare-decimal and whole-string-hex cases it replaces (a single-label
+            # host IS "every label", so `2130706433`/`0x7f000001` still match here too).
+            ip_check_labels = stripped.split(".") if stripped else []
+            if ip_check_labels and all(
+                _NUMERIC_OR_HEX_LABEL_RE.match(lbl) for lbl in ip_check_labels
+            ):
+                raise ConfigError(
+                    "trusted_attachment_hosts entries must be DNS hostnames, not IP "
+                    f"literals (SSRF risk — e.g. a cloud metadata address), got {h!r}"
+                )
+            # review finding, round 4: "localhost" resolves to loopback and is not an IP
+            # literal in any sense `ipaddress`/the check above would catch, but is just as
+            # unambiguously not a legitimate first-party domain for this knob.
+            # review finding, round 6: the bare-string check alone missed two real aliases —
+            # `attacker.localhost` (RFC 6761 §6.3 formally reserves the ENTIRE `.localhost` TLD
+            # as always resolving to loopback — not a guess, a standard) and
+            # `localhost.localdomain` (a long-standing glibc/Linux default-hostname convention,
+            # still common in `/etc/hosts`). Both verified as real bypasses before this fix.
+            # review finding, round 8: the round-6 check was itself asymmetric with its own
+            # rationale — it rejected `attacker.localhost` and the exact string
+            # `localhost.localdomain`, but not a SUBDOMAIN of that second alias
+            # (`attacker.localhost.localdomain`), even though the same `/etc/hosts`+
+            # search-domain setups that resolve the bare alias resolve that too.
+            if stripped == "localhost" or stripped.endswith(
+                (".localhost", ".localhost.localdomain", ".localdomain")
+            ):
+                raise ConfigError(
+                    "trusted_attachment_hosts entries must be a first-party DNS domain, not "
+                    f"a loopback alias like 'localhost' (SSRF risk), got {h!r}"
+                )
+            labels = stripped.split(".") if stripped else []
+            if not labels or not all(_HOSTNAME_LABEL_RE.match(lbl) for lbl in labels):
+                raise ConfigError(
+                    "trusted_attachment_hosts entries must be bare hostnames (letters, "
+                    f"digits, hyphens, dots only — no scheme/path/port/userinfo), got {h!r}"
+                )

@@ -4433,6 +4433,60 @@ def test_save_attachments_backend_without_fetch_method_reports_and_skips(tmp_pat
     assert not (tmp_path / "shot.png").exists()
 
 
+def test_save_attachments_no_native_predicate_still_fetches_trusted_host(tmp_path):
+    # review finding: a backend with fetch_attachment_bytes but NO is_native_attachment_url
+    # attribute used to fail CLOSED unconditionally (is_native is None -> always skip). The
+    # trusted-host allowlist deliberately widens that: a configured host is a REPO-level trust
+    # decision independent of what any one backend can confirm about itself.
+    from tasklib.cli import _save_attachments
+    from tasklib.model import Attachment, Ticket
+
+    class _FakeBackendNoNativePredicate:
+        name = "linear"
+
+        def fetch_attachment_bytes(self, url):
+            return b"bytes"
+
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="shot.png", url="https://hyperide.github.io/shot.png")
+        ]
+    )
+    lines = _save_attachments(
+        _FakeBackendNoNativePredicate(),
+        ticket,
+        str(tmp_path),
+        trusted_hosts=frozenset({"hyperide.github.io"}),
+    )
+    assert (tmp_path / "shot.png").read_bytes() == b"bytes"
+    assert any("shot.png" in ln and "✓" in ln for ln in lines)
+
+
+def test_save_attachments_no_native_predicate_untrusted_host_still_skipped(tmp_path):
+    # the flip side of the above: without a matching trusted host, the old fail-CLOSED
+    # guarantee still holds exactly as before this feature existed.
+    from tasklib.cli import _save_attachments
+    from tasklib.model import Attachment, Ticket
+
+    class _FakeBackendNoNativePredicate:
+        name = "linear"
+
+        def fetch_attachment_bytes(self, url):
+            return b"bytes"
+
+    ticket = Ticket(
+        attachments=[Attachment(id="1", title="shot.png", url="https://example.com/shot.png")]
+    )
+    lines = _save_attachments(
+        _FakeBackendNoNativePredicate(),
+        ticket,
+        str(tmp_path),
+        trusted_hosts=frozenset({"hyperide.github.io"}),
+    )
+    assert not (tmp_path / "shot.png").exists()
+    assert any("skipped" in ln for ln in lines)
+
+
 def test_save_attachments_skips_external_urls_when_backend_says_not_native(tmp_path):
     # review finding (SSRF): an attachment url is tracker-owned data — _save_attachments must
     # NOT blindly fetch every url. A backend that exposes `is_native_attachment_url` gets to
@@ -4511,6 +4565,210 @@ def test_save_attachments_skipped_external_does_not_consume_a_name_slot(tmp_path
     assert (tmp_path / "shot.png").read_bytes() == b"native-bytes"
     assert not (tmp_path / "shot-2.png").exists()
     assert any("shot.png ->" in ln and "✓" in ln for ln in lines)
+
+
+def test_save_attachments_trusted_host_fetched_without_native_auth(tmp_path):
+    # a repo-configured trusted host (NOT the backend's
+    # own native asset domain) should still get auto-fetched — but plain, since only a genuine
+    # native-asset URL gets the backend's auth header (see fetch_attachment_bytes's own
+    # docstring in backends/linear.py: attaching credentials to an arbitrary configured host
+    # would be a real leak, so the fetch-decision widening here is deliberately independent of
+    # is_native_attachment_url, which stays untouched).
+    from tasklib.cli import _save_attachments
+    from tasklib.model import Attachment, Ticket
+
+    fetched = []
+
+    class _FakeLinearBackend:
+        name = "linear"
+
+        def fetch_attachment_bytes(self, url):
+            fetched.append(url)
+            return b"pages-bytes"
+
+        def is_native_attachment_url(self, url):
+            return url.startswith("https://uploads.linear.app/")
+
+    ticket = Ticket(
+        attachments=[
+            Attachment(
+                id="1",
+                title="diagram.png",
+                url="https://hyperide.github.io/assets/diagram.png",
+            )
+        ]
+    )
+    lines = _save_attachments(
+        _FakeLinearBackend(),
+        ticket,
+        str(tmp_path),
+        trusted_hosts=frozenset({"hyperide.github.io"}),
+    )
+    assert fetched == ["https://hyperide.github.io/assets/diagram.png"]
+    assert (tmp_path / "diagram.png").read_bytes() == b"pages-bytes"
+    assert any("diagram.png" in ln and "✓" in ln for ln in lines)
+
+
+def test_save_attachments_untrusted_host_still_skipped(tmp_path):
+    # a host NOT on the configured allowlist (and not native) is skipped exactly as before —
+    # the widening must not turn into "fetch everything".
+    from tasklib.cli import _save_attachments
+    from tasklib.model import Attachment, Ticket
+
+    fetched = []
+
+    class _FakeLinearBackend:
+        name = "linear"
+
+        def fetch_attachment_bytes(self, url):
+            fetched.append(url)
+            return b"bytes"
+
+        def is_native_attachment_url(self, url):
+            return url.startswith("https://uploads.linear.app/")
+
+    ticket = Ticket(
+        attachments=[
+            Attachment(
+                id="1", title="random.png", url="https://random-host.example/random.png"
+            )
+        ]
+    )
+    lines = _save_attachments(
+        _FakeLinearBackend(),
+        ticket,
+        str(tmp_path),
+        trusted_hosts=frozenset({"hyperide.github.io"}),
+    )
+    assert fetched == []
+    assert not (tmp_path / "random.png").exists()
+    assert any("random.png" in ln and "skipped" in ln for ln in lines)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://hyperide.github.io/x",  # plain http, even though the host is trusted
+        "https://[bad",  # unparseable — urlparse() itself raises ValueError
+        "https://hyperide.github.io:bad/x",  # malformed port — .port raises on access
+        "ftp://hyperide.github.io/x",  # non-http(s) scheme
+    ],
+)
+def test_is_trusted_attachment_host_rejects_scheme_and_malformed_urls(url):
+    # review finding: the native path's scheme/malformed-url gate has coverage
+    # (test_backends.py); the trusted-host path needs the same — an allowlisted HOSTNAME must
+    # not rescue a plaintext, unparseable, or wrong-scheme URL.
+    from tasklib.cli import _is_trusted_attachment_host
+
+    assert _is_trusted_attachment_host(url, frozenset({"hyperide.github.io"})) is False
+
+
+def test_is_trusted_attachment_host_rejects_non_default_port():
+    # review finding: an allowlisted "hyperide.github.io" must not also match a request to an
+    # arbitrary port on that host (a ticket-controlled URL can add one even though a
+    # config-validated trusted-hosts entry never carries one itself — config.validate rejects
+    # that shape outright).
+    from tasklib.cli import _is_trusted_attachment_host
+
+    assert (
+        _is_trusted_attachment_host(
+            "https://hyperide.github.io:8443/x", frozenset({"hyperide.github.io"})
+        )
+        is False
+    )
+    # the default https port, spelled out explicitly, still matches.
+    assert (
+        _is_trusted_attachment_host(
+            "https://hyperide.github.io:443/x", frozenset({"hyperide.github.io"})
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        # review finding: pin the EXACT-match semantics (`parsed.hostname in trusted_hosts`) so
+        # a future "helpful" refactor to suffix/substring matching can't silently widen the
+        # allowlist to attacker-controlled lookalike domains without breaking this suite.
+        ("https://hyperide.github.io.evil.com/x", False),  # suffix lookalike
+        ("https://evilhyperide.github.io/x", False),  # prefix lookalike, no dot boundary
+        ("https://not-hyperide.github.io/x", False),  # different subdomain entirely
+        ("https://sub.hyperide.github.io/x", False),  # a genuine subdomain is NOT auto-trusted
+        ("https://HYPERIDE.GITHUB.IO/x", True),  # .hostname lowercases — must still match
+        (
+            "https://hyperide.github.io./x",
+            False,
+        ),  # trailing-dot FQDN — config validation rejects this shape, so it can never be
+        # configured; the runtime check must independently agree it's not a match.
+    ],
+)
+def test_is_trusted_attachment_host_exact_match_not_suffix_or_prefix(url, expected):
+    from tasklib.cli import _is_trusted_attachment_host
+
+    assert (
+        _is_trusted_attachment_host(url, frozenset({"hyperide.github.io"})) is expected
+    )
+
+
+def test_save_attachments_default_trusted_hosts_empty_matches_old_behavior(tmp_path):
+    # callers that don't pass trusted_hosts at all (every pre-existing call site/test) must see
+    # EXACTLY the old behavior — nothing beyond the backend's own native check is ever fetched.
+    from tasklib.cli import _save_attachments
+    from tasklib.model import Attachment, Ticket
+
+    class _FakeLinearBackend:
+        name = "linear"
+
+        def fetch_attachment_bytes(self, url):
+            return b"bytes"
+
+        def is_native_attachment_url(self, url):
+            return False
+
+    ticket = Ticket(
+        attachments=[
+            Attachment(id="1", title="shot.png", url="https://hyperide.github.io/shot.png")
+        ]
+    )
+    lines = _save_attachments(_FakeLinearBackend(), ticket, str(tmp_path))
+    assert not (tmp_path / "shot.png").exists()
+    assert any("skipped" in ln for ln in lines)
+
+
+def test_cmd_read_wires_configured_trusted_hosts_into_save_attachments(tmp_path, monkeypatch):
+    # review finding: every other test here calls _save_attachments directly with an explicit
+    # trusted_hosts= — none of them would catch cmd_read's own call site dropping the kwarg or
+    # a future rename of LoadedConfig.trusted_attachment_hosts. Drive cmd_read itself (with
+    # _load/_backend_for_id faked, _save_attachments spied) to pin that real wiring.
+    import argparse
+
+    import tasklib.cli as cli_mod
+    from tasklib.model import Ticket
+
+    class _FakeConfig:
+        trusted_attachment_hosts = frozenset({"hyperide.github.io"})
+
+    class _FakeBackend:
+        name = "linear"
+
+        def get(self, ticket_id):
+            return Ticket(id=ticket_id, title="t")
+
+    seen = {}
+
+    def fake_save_attachments(backend, ticket, dest_dir, *, trusted_hosts=frozenset()):
+        seen["trusted_hosts"] = trusted_hosts
+        return []
+
+    monkeypatch.setattr(cli_mod, "_load", lambda args: _FakeConfig())
+    monkeypatch.setattr(cli_mod, "_backend_for_id", lambda cfg, ticket_id: _FakeBackend())
+    monkeypatch.setattr(cli_mod, "_save_attachments", fake_save_attachments)
+
+    args = argparse.Namespace(id="HYP-1", json=True, save_attachments=str(tmp_path))
+    cli_mod.cmd_read(args)
+
+    assert seen["trusted_hosts"] == frozenset({"hyperide.github.io"})
 
 
 def test_save_attachments_does_not_duplicate_the_truncation_notice(tmp_path):

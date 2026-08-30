@@ -11,8 +11,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tasklib.backends import TicketBackend  # noqa: E402
+from tasklib.config import ATTACHMENT_MODE_ENV_VAR  # noqa: E402
 from tasklib.model import State, Ticket  # noqa: E402
 from tasklib.render import parse, render  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_attachment_mode_override(monkeypatch):
+    """review finding: TASK_CLI_ATTACHMENT_MODE (config.py's highest-precedence config layer)
+    is documented as something a developer exports in their own shell profile — the EXACT
+    documented usage would otherwise silently flip every `attachment_mode`-asserting test in
+    this suite for anyone who's actually set it up, since only some tests opt into the
+    `isolated_state` fixture and none of them scrub this specific var. Autouse (unlike
+    `isolated_state`) so it protects every test file, not just ones that ask for it.
+    """
+    monkeypatch.delenv(ATTACHMENT_MODE_ENV_VAR, raising=False)
 
 
 class FakeBackend:
