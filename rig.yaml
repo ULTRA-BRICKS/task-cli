@@ -9,3 +9,6 @@ version: 1
 
 ci:
   enabled: false
+
+ecosystem_readme:
+  enabled: true
