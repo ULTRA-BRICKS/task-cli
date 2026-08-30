@@ -283,6 +283,91 @@ def test_same_host_redirect_handler_refuses_cross_host_redirect():
         handler.redirect_request(req, None, 302, "Found", {}, "https://attacker.example.com/steal")
 
 
+def test_same_host_redirect_handler_refuses_different_explicit_port_same_host():
+    # review finding: the port-matching test coverage only exercised the ALLOW direction
+    # (default-port normalization) — nothing pinned that two genuinely DIFFERENT explicit
+    # ports on the same host are still refused. Without this, a regression collapsing
+    # _same_origin's port check to "always True after the hostname matches" would pass every
+    # other test in this file.
+    import urllib.error
+    import urllib.request
+
+    from tasklib.backends.http import _SameHostRedirectHandler
+
+    handler = _SameHostRedirectHandler()
+    req = urllib.request.Request("https://uploads.linear.app:8443/a")
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(req, None, 302, "Found", {}, "https://uploads.linear.app:444/b")
+    req2 = urllib.request.Request("https://uploads.linear.app:8443/a")
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(req2, None, 302, "Found", {}, "https://uploads.linear.app/b")
+
+
+def test_same_host_redirect_handler_allows_explicit_default_port_redirect():
+    # review finding (GitHub PR #109 Codex pass): comparing raw netloc strings treats
+    # "host:443" and "host" as different hosts even though they're the same origin — a
+    # genuinely same-origin redirect that happens to add/drop the explicit default port
+    # must still be allowed.
+    import urllib.request
+
+    from tasklib.backends.http import _SameHostRedirectHandler
+
+    handler = _SameHostRedirectHandler()
+    req = urllib.request.Request("https://uploads.linear.app:443/a")
+    result = handler.redirect_request(req, None, 302, "Found", {}, "https://uploads.linear.app/b")
+    assert result is not None
+    assert result.full_url == "https://uploads.linear.app/b"
+
+    req2 = urllib.request.Request("https://uploads.linear.app/a")
+    result2 = handler.redirect_request(req2, None, 302, "Found", {}, "https://uploads.linear.app:443/b")
+    assert result2 is not None
+
+
+def test_same_host_redirect_handler_allows_hostname_case_change():
+    # review finding (GitHub PR #109 Codex pass): a hostname differing only in case is the
+    # same origin — urllib.parse already lowercases .hostname, but the fix must actually use
+    # that normalized field, not the raw (case-preserving) netloc.
+    import urllib.request
+
+    from tasklib.backends.http import _SameHostRedirectHandler
+
+    handler = _SameHostRedirectHandler()
+    req = urllib.request.Request("https://Uploads.Linear.App/a")
+    result = handler.redirect_request(req, None, 302, "Found", {}, "https://uploads.linear.app/b")
+    assert result is not None
+
+
+def test_same_host_redirect_handler_refuses_out_of_range_port_in_redirect_target():
+    # review finding (GitHub PR #109 Codex pass): a malformed port in the redirect Location
+    # (out of range, or non-numeric) must be refused cleanly (the existing "unparseable
+    # Location" HTTPError, via safe_urlparse returning None), never let ParseResult.port's
+    # ValueError escape uncaught.
+    import urllib.error
+    import urllib.request
+
+    from tasklib.backends.http import _SameHostRedirectHandler
+
+    handler = _SameHostRedirectHandler()
+    req = urllib.request.Request("https://uploads.linear.app/a")
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(req, None, 302, "Found", {}, "https://uploads.linear.app:99999/b")
+
+
+def test_same_host_redirect_handler_refuses_malformed_original_url_port():
+    # review finding (GitHub PR #109 Codex pass): _same_origin now touches .port on the
+    # ORIGINAL request URL too (old), not just the redirect target — a malformed port there
+    # must also be refused cleanly (fail closed), not raise ValueError uncaught.
+    import urllib.error
+    import urllib.request
+
+    from tasklib.backends.http import _SameHostRedirectHandler
+
+    handler = _SameHostRedirectHandler()
+    req = urllib.request.Request("https://uploads.linear.app:99999/a")
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(req, None, 302, "Found", {}, "https://uploads.linear.app/b")
+
+
 def test_same_host_redirect_handler_refuses_https_to_http_downgrade_same_host():
     # review finding: a same-HOST check alone misses a same-host SCHEME downgrade — a
     # compromised uploads.linear.app could 302 https -> http on the identical hostname and a

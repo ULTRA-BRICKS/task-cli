@@ -203,6 +203,33 @@ def request_json(
         raise HttpError(0, f"invalid URL for {method} {url}: {exc}") from exc
 
 
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def _same_origin(a: ParseResult, b: ParseResult) -> bool:
+    """Whether ``a`` and ``b`` are the same origin (host + effective port), tolerant of an
+    explicit default port and hostname case (review finding, GitHub PR #109 Codex pass):
+    comparing raw ``.netloc`` strings treats ``https://host:443/x`` and ``https://host/x`` —
+    or a hostname differing only in case — as different hosts, wrongly refusing a genuinely
+    same-origin redirect. ``.hostname`` is already lowercased by ``urllib.parse``.
+
+    Port comparison is skipped entirely when NEITHER side names an explicit port — this
+    preserves the pre-existing http-to-https same-host UPGRADE allowance (both sides have no
+    explicit port; their scheme DEFAULT ports genuinely differ, 80 vs 443, but that's not the
+    signal this function is checking — the caller's separate scheme-downgrade check is what
+    actually gates https/http transitions). Once EITHER side names an explicit port, both
+    ports are resolved to their effective value (explicit, or that URL's OWN scheme default)
+    and compared — this is what makes ``https://host:443`` match ``https://host``.
+    """
+    if a.hostname != b.hostname:
+        return False
+    if a.port is None and b.port is None:
+        return True
+    a_port = a.port if a.port is not None else _DEFAULT_PORTS.get(a.scheme)
+    b_port = b.port if b.port is not None else _DEFAULT_PORTS.get(b.scheme)
+    return a_port == b_port
+
+
 class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Refuses to follow a redirect to a different host, OR a scheme downgrade (https -> http),
     than the request that was actually made — used whenever the request carries a
@@ -280,8 +307,19 @@ class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
             raise urllib.error.HTTPError(
                 newurl, code, f"refused unparseable redirect Location from {req.full_url}: {newurl!r}", headers, fp
             )
-        old = urlparse(req.full_url)
-        if new.netloc != old.netloc or (old.scheme == "https" and new.scheme != "https"):
+        # `_same_origin` touches `.port` on BOTH sides (review finding, GitHub PR #109 Codex
+        # pass) — `new`'s port was already validated above via `safe_urlparse`, but `old` was
+        # not: a plain `urlparse()` never touches `.port`, so this is the FIRST access on
+        # `old` this class ever makes (the pre-existing `.netloc` string compare it replaced
+        # never needed to). `req.full_url` is this process's own already-in-flight request,
+        # not attacker data, but validate it the same defensive way regardless — fail closed
+        # (refuse the redirect) rather than let a malformed port raise ValueError uncaught.
+        old = safe_urlparse(req.full_url)
+        if old is None:
+            raise urllib.error.HTTPError(
+                newurl, code, f"refused redirect from an unparseable original URL {req.full_url!r}", headers, fp
+            )
+        if not _same_origin(old, new) or (old.scheme == "https" and new.scheme != "https"):
             raise urllib.error.HTTPError(
                 newurl, code, f"refused unsafe redirect from {req.full_url} to {newurl}", headers, fp
             )
