@@ -145,6 +145,176 @@ def parse(body: str, ticket: Ticket | None = None) -> Ticket:
 
 
 _CRITERION_RE = re.compile(r"^\s*-\s*\[([ xX])\]\s*(.+?)\s*$")
+# `\s*` (zero-or-more), not `\s+`, after the marker (review finding, task-cli#F4): every
+# per-section parser this feeds already tolerated a zero-space marker (`-[x]`, `-PR: ...`)
+# before this function existed — requiring at least one space here silently dropped those
+# lines as unrecognized prose instead. Safe to relax: each downstream regex still gates on
+# its own shape (a checkbox `[`, a `key:` colon, ...), so this alone doesn't un-anchor
+# bullet detection.
+_BULLET_ITEM_RE = re.compile(r"^\s*[-*]\s*(.*)$")
+
+_OPEN_KIND_BULLET_RE = re.compile(r"^\w+:$")
+# Requires a CHECKED checkbox prefix (review finding, GitHub PR #107 Codex pass): Linear's
+# confirmed proof-continuation sample is only ever produced for a checked criterion (a proof
+# is only ever set together with checking it off, via `cmd_check`) — an unchecked criterion
+# whose own hand-typed text happens to literally end in "— proof:" must NOT be treated as
+# awaiting a continuation, or an unrelated indented image immediately below it would be
+# silently absorbed as a phantom proof and then dropped entirely on render (unchecked
+# criteria never render a proof line).
+_OPEN_PROOF_BULLET_RE = re.compile(r"^\[[xX]\].*—\s*proof:\s*$")
+
+
+def _open_bullet_kind(content: str) -> str | None:
+    """Which of Linear's two CONFIRMED "awaiting a continuation" shapes ``content`` (a
+    bullet's own text, before any continuation-joining) matches — ``"kind"`` for a bare
+    Screenshot kind marker (``implementation:``, nothing else), ``"proof"`` for a CHECKED
+    Criterion's dangling ``— proof:`` marker, or ``None`` for an already-complete bullet.
+
+    Deliberately narrower than "ends with any colon" (review finding, task-cli#107 review
+    thread) — a criterion or caption whose own text happens to end in a colon for an
+    unrelated reason (``run the checklist:``) must NOT be treated as awaiting a continuation,
+    or an unrelated indented image/caption line immediately below it would still glue on.
+
+    The two shapes are distinguished (not just a single "is open" bool) because their
+    confirmed continuation grammar differs: a Screenshot's image may be followed by one
+    caption line, but a Criterion's proof image never has one — the two confirmed samples
+    never show a criterion growing a second continuation line after its proof image.
+    """
+    if _OPEN_KIND_BULLET_RE.search(content):
+        return "kind"
+    if _OPEN_PROOF_BULLET_RE.search(content):
+        return "proof"
+    return None
+
+
+def _join_bullet_blocks(text: str) -> list[str]:
+    """Group a bulleted section's raw lines into one reconstructed ``"- <content>"`` line per
+    bullet item, so every line-anchored parser regex below keeps working unchanged.
+
+    This exists because Linear's server-side markdown reformatting (confirmed live,
+    HYP-1355/1356/1398) rewrites a saved description on every ``issueUpdate``: the bullet
+    marker becomes ``*`` instead of ``-``, and — critically — a bullet item whose content
+    includes an inline image gets that image (and any trailing ``— caption``/``— proof``
+    text after it) pushed onto separate, blank-line-separated, INDENTED continuation lines
+    instead of staying on the bullet's own line. A line-by-line parser that only ever looks
+    at one line per item silently sees an empty/truncated item on the very next parse — this
+    is the confirmed mechanism behind task-cli losing Screenshots, Links, and
+    checked-criterion proof references after nothing more than a single Linear round-trip.
+
+    A continuation line joins its owning bullet only when it BOTH (a) is indented (has
+    leading whitespace — every confirmed Linear reformatting sample is), (b) starts with
+    ``![`` or ``—`` (an image line, or a trailing caption/proof line), AND (c) immediately
+    follows the bullet or an already-joined continuation, with nothing but blank lines in
+    between — tracked via ``state`` below. Any column-0, non-blank, non-bullet line
+    (hand-added prose under a list, or the SAME shape appearing later in the section) breaks
+    that chain permanently for the current bullet, even across further blank lines. And a
+    bullet only ever accepts a continuation in the first place if its OWN content — before
+    any joining — matches one of Linear's two CONFIRMED "awaiting a continuation" shapes (see
+    :func:`_open_bullet_kind`): an ALREADY-COMPLETE bullet (a checked criterion with no
+    dangling proof marker, a screenshot bullet whose image is already inline) never does,
+    even when an unrelated indented image/caption line happens to sit immediately below it
+    (GitHub PR
+    review finding on task-cli#107: a second, unrelated image below an already-inline
+    screenshot bullet was getting absorbed and double-wrapping the first image's markdown on
+    the next render). Anything that doesn't join is left alone, never joined. All guards are
+    load-bearing (review findings, task-cli#F1, and a GitHub PR review on task-cli#107):
+    joining unconditionally corrupted Links (embedded whitespace fails ``is_http_url``),
+    double-wrapped Screenshot image markdown, and polluted Criterion text; joining an
+    un-indented ``![``/``—`` line reopened the same corruption for a column-0 hand-pasted
+    GitHub screenshot; without the "immediately follows" guard, an indented ``![``/``—``
+    line appearing ANYWHERE later in the section still silently glued onto a distant,
+    unrelated bullet; without the "bullet must be open" guard (:func:`_open_bullet_kind`), an
+    indented image/caption line immediately below an already-COMPLETE bullet still silently
+    glued onto it; and without bounding the chain to AT MOST one image then one caption, a
+    SECOND unrelated image immediately below a genuinely open bullet still glued on and
+    double-wrapped the first image on the next render (task-cli#107 review thread).
+
+    Deliberate, narrower trade-off (same F1-v2 philosophy — only ever join a CONFIRMED Linear
+    reformatting shape, nothing reconstructed by pattern-matching): once a bullet is COMPLETE
+    (already has its inline image, or was never "open" to begin with), a hand-added indented
+    ``— caption`` line below it is dropped, not joined, even though such a line was
+    reconstructive under the pre-#107-fix code. This never happens in the wild — a human
+    editing a ticket types a caption inline on the bullet's own line, never manufactures
+    Linear's own continuation-line artifact by hand — so preferring "never absorb anything
+    ambiguous" over guessing at a hand-edit's intent is the safer default.
+    """
+    blocks: list[list[str]] = []
+    # "open_kind"/"open_proof" (awaiting an image) -> "after_kind_image" (awaiting a caption,
+    # Screenshots only — the confirmed Criterion proof sample never grows a second
+    # continuation line, so a joined proof image goes straight to "closed") -> "closed"
+    state = "closed"
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue  # a blank line never breaks a continuation chain (Linear's own shape)
+        m = _BULLET_ITEM_RE.match(raw_line)
+        if m:
+            content = m.group(1).strip()
+            blocks.append([content])
+            kind = _open_bullet_kind(content)
+            state = f"open_{kind}" if kind else "closed"
+            continue
+        is_continuation_shaped = raw_line.startswith((" ", "\t")) and (
+            line.startswith("![") or line.startswith("—")
+        )
+        if state in ("open_kind", "open_proof") and is_continuation_shaped and line.startswith("!["):
+            blocks[-1].append(line)
+            state = "after_kind_image" if state == "open_kind" else "closed"
+            continue
+        if state == "after_kind_image" and is_continuation_shaped and line.startswith("—"):
+            blocks[-1].append(line)
+            state = "closed"  # at most one caption/proof line after the image
+            continue
+        # a column-0 line, a non-image/caption-shaped indented line, a second image, or a
+        # continuation-shaped line that no longer immediately follows its OPEN bullet —
+        # breaks the chain
+        state = "closed"
+    return ["- " + " ".join(parts) for parts in blocks]
+
+
+def _bullet_lines(text: str) -> list[str]:
+    """Return one reconstructed ``"- <content>"`` line per bullet item, with NO continuation
+    joining (review finding, task-cli#F1-v2) — for sections whose confirmed Linear
+    reformatting never produces a continuation line in the first place.
+
+    Links and Skipped-gates values are only ever auto-linkified INLINE (``url`` ->
+    ``[url](<url>)``, handled entirely by ``_unwrap_link_value`` on a single line) — Linear's
+    confirmed continuation-line behavior (HYP-1355/1356/1398) is specific to bullets whose
+    content includes an inline IMAGE (Screenshots, checked-criterion proof), which Links/Skips
+    never contain. Routing Links/Skips through the joining ``_join_bullet_blocks`` instead of
+    this function let a plausible, unrelated human edit — an indented note added directly
+    under a Links bullet in the tracker UI — glue onto and corrupt that bullet's value, since
+    an indented ``—``-line legitimately joining a *Screenshots* bullet is exactly what the
+    join guards are designed to allow.
+    """
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        m = _BULLET_ITEM_RE.match(raw_line)
+        if m:
+            lines.append("- " + m.group(1).strip())
+    return lines
+
+
+_LINK_VALUE_RE = re.compile(r"^\[([^\]]*)\]\((.+)\)$")
+
+
+def _unwrap_link_value(val: str) -> str:
+    """Undo Linear's auto-linkify wrapping of a bare URL value (``url`` -> ``[url](<url>)``
+    on save, confirmed live) back to the plain URL/text task-cli originally wrote.
+
+    Only unwraps when the visible label equals the target URL — Linear's own auto-linkify
+    always echoes the bare URL as both, so this never touches a genuinely user-authored
+    labeled link like ``[design review](https://figma.com/x)`` (review finding,
+    task-cli#F2). The target capture is greedy-to-the-last-``)`` (anchored at end of
+    string) rather than stopping at the first ``)``, so a URL that itself contains a
+    parenthesis (e.g. a Wikipedia article title) still round-trips.
+    """
+    m = _LINK_VALUE_RE.match(val)
+    if not m:
+        return val
+    label, wrapped = m.group(1).strip(), m.group(2).strip()
+    target = wrapped[1:-1].strip() if wrapped.startswith("<") and wrapped.endswith(">") else wrapped
+    return target if label == target else val
 
 
 def _parse_criteria(text: str) -> list[Criterion]:
@@ -154,7 +324,7 @@ def _parse_criteria(text: str) -> list[Criterion]:
     the criterion text so a checked-with-proof criterion survives a render→parse round-trip.
     """
     items: list[Criterion] = []
-    for line in text.splitlines():
+    for line in _join_bullet_blocks(text):
         m = _CRITERION_RE.match(line)
         if not m:
             continue
@@ -189,10 +359,7 @@ def _split_criterion_rest(rest: str) -> tuple[str, str, str]:
 
 def _parse_screenshots(text: str) -> list[Screenshot]:
     shots: list[Screenshot] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("-"):
-            continue
+    for line in _join_bullet_blocks(text):
         # "- <kind>: ![alt](ref) — caption"
         m = re.match(r"^-\s*(\w+)\s*:\s*!\[[^\]]*\]\(([^)]+)\)(?:\s*—\s*(.*))?$", line)
         if m:
@@ -207,10 +374,10 @@ def _parse_screenshots(text: str) -> list[Screenshot]:
 
 def _parse_links(text: str) -> dict[str, str]:
     links: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in _bullet_lines(text):
         m = re.match(r"^\s*-\s*([^:]+):\s*(.+?)\s*$", line)
         if m:
-            key, val = m.group(1).strip(), m.group(2).strip()
+            key, val = m.group(1).strip(), _unwrap_link_value(m.group(2).strip())
             if val and val != "(none)":
                 links[key] = val
     return links
@@ -218,10 +385,10 @@ def _parse_links(text: str) -> dict[str, str]:
 
 def _parse_skips(text: str) -> dict[str, str]:
     skips: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in _bullet_lines(text):
         m = re.match(r"^\s*-\s*([^:]+):\s*(.+?)\s*$", line)
         if m:
-            skips[m.group(1).strip()] = m.group(2).strip()
+            skips[m.group(1).strip()] = _unwrap_link_value(m.group(2).strip())
     return skips
 
 

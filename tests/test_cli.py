@@ -2474,6 +2474,89 @@ def test_check_with_proof_marks_and_attaches(capsys, _inject_fake):
     assert ("#1", "shot.png") in _inject_fake.attachments
 
 
+def test_check_with_proof_embeds_durable_attach_ref_not_raw_local_path(_inject_fake):
+    """HYP-1355: a raw local path (or an unauthenticated-on-fetch backend URL) embedded
+    directly in the criterion body is never actually viewable — `attach()`'s return value
+    (the durable, backend-registered reference) must be what lands in `crit.proof`, not the
+    raw ref the caller passed in. Uses a FakeBackend whose `attach()` returns a DIFFERENT
+    value than its input, so an identity-function false pass (the raw ref happening to equal
+    the durable ref, as in every other proof test here) cannot mask a regression.
+    """
+    main(_create_argv())
+    real_attach = _inject_fake.attach
+
+    def _attach_returns_durable_url(ticket_id, file_path):
+        real_attach(ticket_id, file_path)  # still record the raw ref, like the real thing
+        return f"https://durable.example/{file_path}"
+
+    _inject_fake.attach = _attach_returns_durable_url
+    rc = main(["check", "#1", "1", "--proof", "shot.png"])
+    assert rc == 0
+    crit = _inject_fake.get("#1").acceptance[0]
+    assert crit.checked
+    assert crit.proof == "https://durable.example/shot.png"
+    assert ("#1", "shot.png") in _inject_fake.attachments
+
+
+def test_check_with_proof_falls_back_to_raw_ref_when_durable_attach_fails(
+    monkeypatch, _inject_fake
+):
+    """A durable attach failure must not lose the proof entirely — fall back to the raw ref
+    (matches `_attach_screenshots`' existing best-effort contract), don't blow up the check.
+    The fallback is also logged (review finding) so a silent proof-ref downgrade is
+    auditable."""
+    from tasklib.backends import BackendError
+
+    main(_create_argv())
+    events = []
+    monkeypatch.setattr(
+        "tasklib.logging.log_event", lambda *a, **k: events.append((a, k))
+    )
+
+    def _attach_raises(ticket_id, file_path):
+        raise BackendError("boom")
+
+    _inject_fake.attach = _attach_raises
+    rc = main(["check", "#1", "1", "--proof", "shot.png"])
+    assert rc == 0
+    crit = _inject_fake.get("#1").acceptance[0]
+    assert crit.checked and crit.proof == "shot.png"
+    assert ("criterion.proof_attach_failed",) in [e[0] for e in events]
+
+
+def test_check_with_proof_falls_back_to_raw_ref_on_ambiguous_attach(_inject_fake):
+    """The `AmbiguousBackendError` arm (an upload whose success/failure is genuinely
+    unknown — e.g. a network drop after the PUT but before reading the response) must fall
+    back the same way a confirmed `BackendError` does, not raise uncaught (review finding:
+    this arm was previously untested, so a narrowing of the except tuple to just
+    `BackendError` would have passed the suite while breaking this path in production)."""
+    from tasklib.backends import AmbiguousBackendError
+
+    main(_create_argv())
+
+    def _attach_raises_ambiguous(ticket_id, file_path):
+        raise AmbiguousBackendError("network dropped after PUT")
+
+    _inject_fake.attach = _attach_raises_ambiguous
+    rc = main(["check", "#1", "1", "--proof", "shot.png"])
+    assert rc == 0
+    crit = _inject_fake.get("#1").acceptance[0]
+    assert crit.checked and crit.proof == "shot.png"
+
+
+def test_check_with_multiple_proofs_attaches_each_exactly_once(_inject_fake):
+    # review finding (task-cli#F3): `proofs[1:]` is passed to `_attach_screenshots` while
+    # `proofs[0]` is attached inline (durable-ref path) — a regression to `proofs` (re-
+    # attaching proof #1) or `[]` (dropping every extra proof) must fail this test.
+    main(_create_argv())
+    rc = main(["check", "#1", "1", "--proof", "a.png", "--proof", "b.png"])
+    assert rc == 0
+    crit = _inject_fake.get("#1").acceptance[0]
+    assert crit.checked and crit.proof == "a.png"
+    assert _inject_fake.attachments.count(("#1", "a.png")) == 1
+    assert _inject_fake.attachments.count(("#1", "b.png")) == 1
+
+
 def test_check_force_records_reason_without_proof(_inject_fake):
     main(_create_argv())
     rc = main(
