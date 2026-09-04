@@ -2406,7 +2406,57 @@ def _write_attachment_exclusive(dest_dir: str, dest_path: str, data: bytes) -> N
         os.unlink(tmp_path)
 
 
-def _save_attachments(backend, ticket, dest_dir: str) -> list[str]:
+def _is_trusted_attachment_host(url: str, trusted_hosts: frozenset[str]) -> bool:
+    """Whether ``url``'s host is in the repo-configured ``trusted_attachment_hosts`` allowlist
+    (``task.yaml`` — see ``config.LoadedConfig.trusted_attachment_hosts``). Used ONLY by
+    ``_save_attachments`` to widen which URLs get auto-fetched beyond a backend's own native
+    asset domain — a repo's own GitHub Pages host, say, isn't genuinely external, just
+    unrecognized by the narrower native-asset check.
+
+    Deliberately separate from ``is_native_attachment_url``: a trusted-but-non-native host is
+    fetched PLAIN (no auth header) via the backend's own ``fetch_attachment_bytes``, which
+    independently re-derives ``is_native_attachment_url`` before ever attaching credentials —
+    widening THIS check must never widen which URLs get the tracker's auth header, or a
+    repo-configured "trusted for auto-download" host would also start receiving the API key.
+    ``fetch_attachment_bytes`` also always passes ``same_host_redirects_only=True`` regardless
+    of that decision, so a trusted host's response redirecting off-host is refused rather than
+    silently followed (review finding — an earlier version of this feature tied the redirect
+    guard to the auth decision, which left every non-native fetch, trusted or not, free to
+    redirect anywhere).
+
+    Delegates to the shared :func:`~tasklib.backends.http.https_host_matches` (review finding,
+    round 4: this check and ``is_native_attachment_url``'s were near-identical independently
+    maintained copies that had ALREADY drifted apart — this one rejected a non-default port,
+    the native one didn't, until both were folded onto the one shared predicate) — https-only,
+    default-port-only (``None``/``443``), exact hostname match (an attachment url is
+    tracker-controlled data, not something this process constructed, so a non-default port like
+    ``hyperide.github.io:8443`` must not match either — a config-validated trusted-hosts entry
+    can never itself carry a port, see ``config.validate``, but the ATTACHMENT url can add one).
+
+    KNOWN LIMITATION (review finding, round 7 — stated plainly so this docstring never implies
+    a stronger guarantee than it delivers): ``config.validate`` rejects IP literals (every
+    getaddrinfo-legacy encoding) and known loopback aliases, but that is STRING validation, not
+    a network-level control — it cannot and does not defend against a syntactically ordinary,
+    genuinely resolvable DNS name that a wildcard-DNS-to-IP service (e.g. ``nip.io``,
+    ``sslip.io``) maps to an internal address (``127.0.0.1.nip.io`` resolves to ``127.0.0.1``
+    and is indistinguishable, as a STRING, from any other legitimate hostname), nor against DNS
+    rebinding (a name resolving to a public address at config-validation time, then to an
+    internal one at actual fetch time). Closing that class requires resolving the hostname and
+    validating the ACTUAL IP address at connect time (and pinning it against a TOCTOU re-resolve
+    mid-request) — a materially different, larger piece of work than a config-string validator,
+    deliberately out of scope here and tracked as a separate follow-up rather than attempted as
+    an ever-growing chain of string-pattern special cases.
+    """
+    if not trusted_hosts:
+        return False
+    from .backends.http import https_host_matches
+
+    return https_host_matches(url, trusted_hosts)
+
+
+def _save_attachments(
+    backend, ticket, dest_dir: str, *, trusted_hosts: frozenset[str] = frozenset()
+) -> list[str]:
     """Download each of ``ticket.attachments`` into ``dest_dir``, via the backend's own
     authenticated fetch (Linear's ``fetch_attachment_bytes`` — the actual "read" half of
     ``attachment_mode: native": a plain unauthenticated GET against a ``uploads.linear.app``
@@ -2418,16 +2468,19 @@ def _save_attachments(backend, ticket, dest_dir: str) -> list[str]:
     Backends that don't implement the method (GitHub — no native-attachment dichotomy there)
     are skipped with an explicit line rather than an ``AttributeError``.
 
-    Only fetches attachments the backend confirms as its OWN native asset
-    (``is_native_attachment_url``): an attachment's ``url`` is tracker-owned data, not something
-    this process constructed, so blindly fetching every attachment url would let a
+    Fetches an attachment the backend confirms as its OWN native asset
+    (``is_native_attachment_url``) OR whose host is in the caller-supplied ``trusted_hosts``
+    allowlist (``config.LoadedConfig.trusted_attachment_hosts`` — see
+    ``_is_trusted_attachment_host``): an attachment's ``url`` is tracker-owned data, not
+    something this process constructed, so blindly fetching every attachment url would let a
     malicious/compromised ticket make this CLI probe arbitrary hosts (or, without the scheme
-    check in `fetch_attachment_bytes`, read a local file). An external (``link``-mode)
-    attachment is reported, not fetched — the URL is already right there in the printed line for
-    the user to open directly. review finding (2nd round): a backend that implements
-    ``fetch_attachment_bytes`` but NOT ``is_native_attachment_url`` must NOT default to "trust
-    everything" (that inverts the whole point of the capability check) — it fails CLOSED
-    (nothing gets auto-fetched) until that backend explicitly opts in.
+    check in `fetch_attachment_bytes`, read a local file). Anything else (an external,
+    unrecognized ``link``-mode URL) is reported, not fetched — the URL is already right there in
+    the printed line for the user to open directly. review finding (2nd round): a backend that
+    implements ``fetch_attachment_bytes`` but NOT ``is_native_attachment_url`` must NOT default
+    to "trust everything" (that inverts the whole point of the capability check) — it fails
+    CLOSED (nothing beyond a configured trusted host gets auto-fetched) until that backend
+    explicitly opts in.
     """
     fetch = getattr(backend, "fetch_attachment_bytes", None)
     if fetch is None:
@@ -2451,12 +2504,14 @@ def _save_attachments(backend, ticket, dest_dir: str) -> list[str]:
     lines = []
     to_fetch = []
     for a in ticket.attachments:
-        if is_native is None or not is_native(a.url):
+        if (is_native is not None and is_native(a.url)) or _is_trusted_attachment_host(
+            a.url, trusted_hosts
+        ):
+            to_fetch.append(a)
+        else:
             lines.append(
                 f"  (skipped, external/unconfirmed link — open directly) {a.title}: {a.url}"
             )
-        else:
-            to_fetch.append(a)
     # review finding: naming ALL attachments (including skipped ones) let a skipped external
     # attachment's title consume a name slot, giving a later NATIVE attachment a spurious `-2`
     # suffix for no reason the user could see. Only the ones actually being fetched compete for
@@ -2495,7 +2550,13 @@ def cmd_read(args: argparse.Namespace) -> int:
         raise _UserError(str(exc)) from exc
 
     save_dir = getattr(args, "save_attachments", None)
-    saved_lines = _save_attachments(backend, ticket, save_dir) if save_dir else []
+    saved_lines = (
+        _save_attachments(
+            backend, ticket, save_dir, trusted_hosts=cfg.trusted_attachment_hosts
+        )
+        if save_dir
+        else []
+    )
 
     if args.json:
         import json
@@ -2825,7 +2886,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     """
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
+    from .logging import log_event
 
     try:
         ticket = backend.get(args.id)
@@ -2845,7 +2907,23 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     crit.checked = True
     if proofs:
-        crit.proof = proofs[0]
+        # Durably attach the FIRST proof before embedding it in the body (HYP-1355): a raw
+        # local path (or an unauthenticated-on-fetch backend URL) embedded directly in the
+        # criterion text is never actually viewable by anyone reading the ticket — attach()
+        # is the backend's contract for turning a ref into something durable (a real hosted
+        # URL, or a registered Linear attachment echoing its own asset URL back), so USE that
+        # return value as the body reference instead of discarding it. Best-effort: if the
+        # durable attach itself fails, fall back to the raw ref rather than losing the proof
+        # entirely (matches _attach_screenshots' existing best-effort contract below). The
+        # fallback is logged (review finding) — a silent fallback here means the operator's
+        # printed proof_note and the actually-embedded ref can quietly disagree.
+        try:
+            crit.proof = backend.attach(ticket.id, proofs[0])
+        except (BackendError, AmbiguousBackendError) as exc:
+            crit.proof = proofs[0]
+            log_event(
+                "criterion.proof_attach_failed", ticket_id=ticket.id, error=str(exc)
+            )
         crit.force_reason = ""
     else:
         crit.proof = ""
@@ -2856,12 +2934,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         _attach_screenshots(
             backend,
             updated.id,
-            [Screenshot(ref=p, kind="implementation") for p in proofs],
+            [Screenshot(ref=p, kind="implementation") for p in proofs[1:]],
         )
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
-
-    from .logging import log_event
 
     _record_session_touch(cfg, backend, updated)
     log_event(
@@ -2869,7 +2945,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         ticket_id=updated.id,
         forced=bool(force_reason and not proofs),
     )
-    proof_note = f"proof {proofs[0]}" if proofs else f"forced ({force_reason})"
+    # crit.proof, not proofs[0]: when the durable attach succeeded, crit.proof is the
+    # embedded ref (may differ from the raw proofs[0] the caller passed) — the printed note
+    # must match what's actually in the ticket body, not what the operator typed (review
+    # finding).
+    proof_note = f"proof {crit.proof}" if proofs else f"forced ({force_reason})"
     remaining = len(updated.unchecked_criteria())
     print(
         _ok(f"checked {crit.text!r} on {updated.id}  ({proof_note}; {remaining} left)")

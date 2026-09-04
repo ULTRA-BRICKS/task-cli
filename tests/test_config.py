@@ -445,3 +445,242 @@ def test_rig_yaml_task_attachment_mode_nested_passthrough(tmp_path, monkeypatch)
     )
     cfg = load(tmp_path)
     assert cfg.linear_attachment_mode == "native"
+
+
+def test_trusted_attachment_hosts_default_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    cfg = load(tmp_path)
+    assert cfg.trusted_attachment_hosts == frozenset()
+
+
+def test_trusted_attachment_hosts_from_task_yaml(tmp_path, monkeypatch):
+    # hyperide.github.io is a first-party host (a repo's own GitHub Pages), not a genuinely
+    # external one — a repo-configured allowlist lets it get auto-fetched without weakening the
+    # guard globally.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ntrusted_attachment_hosts: [hyperide.github.io]\n", encoding="utf-8"
+    )
+    cfg = load(tmp_path)
+    assert cfg.trusted_attachment_hosts == frozenset({"hyperide.github.io"})
+
+
+def test_trusted_attachment_hosts_rig_yaml_task_passthrough(tmp_path, monkeypatch):
+    # review finding: a rig-provisioned repo (the CANONICAL path, per AGENTS.md — rig writes
+    # rig.yaml, a repo need not keep its own task.yaml at all) setting this under rig.yaml's
+    # task: block must not be silently warned-and-ignored by rig_task_overlay — mirrors
+    # test_rig_yaml_task_attachment_mode_nested_passthrough for the sibling key.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "rig.yaml").write_text(
+        "task:\n  backend: linear\n  trusted_attachment_hosts: [hyperide.github.io]\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.trusted_attachment_hosts == frozenset({"hyperide.github.io"})
+
+
+def test_trusted_attachment_hosts_normalized_lowercase_and_stripped(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ntrusted_attachment_hosts: [' Hyperide.GitHub.io ']\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.trusted_attachment_hosts == frozenset({"hyperide.github.io"})
+
+
+def test_trusted_attachment_hosts_non_list_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ntrusted_attachment_hosts: hyperide.github.io\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="trusted_attachment_hosts"):
+        load(tmp_path)
+
+
+def test_trusted_attachment_hosts_non_string_entry_rejected(tmp_path, monkeypatch):
+    # review finding: a non-string entry (e.g. an int from a YAML typo) must fail-closed via
+    # the isinstance guard, not raise a raw TypeError from a later membership/string check.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ntrusted_attachment_hosts: [123]\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="trusted_attachment_hosts"):
+        load(tmp_path)
+
+
+def test_trusted_attachment_hosts_blank_entry_rejected(tmp_path, monkeypatch):
+    # review finding: a blank/whitespace-only entry used to be silently dropped by the
+    # normalizing property — now it fails closed at validation, the same as any other malformed
+    # entry, instead of quietly doing nothing.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ntrusted_attachment_hosts: ['   ']\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="trusted_attachment_hosts"):
+        load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "https://hyperide.github.io",  # scheme prefix — the most likely copy-paste mistake
+        "hyperide.github.io/assets",  # path included
+        "hyperide.github.io:443",  # port included
+        "user@hyperide.github.io",  # userinfo included
+        "hyperide.github.io?copied-query",  # review finding, round 2: the char-blacklist this
+        # allowlist replaced let this specific shape through (no /@:\\), and it can never equal
+        # urlparse(url).hostname either.
+        "hyperide github.io",  # internal whitespace
+        "-hyperide.github.io",  # label starting with a hyphen (invalid per RFC 1123)
+        "",  # blank via the parametrized (non-list-context) path too
+    ],
+)
+def test_trusted_attachment_hosts_non_bare_hostname_rejected(tmp_path, monkeypatch, bad_host):
+    # review finding: these all parse fine as a YAML string but can never equal
+    # urlparse(url).hostname, so every attachment on that host would silently just keep
+    # printing "skipped" with no clue why — fail loud instead, at config-load time.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        f"version: 1\ntrusted_attachment_hosts: [{bad_host!r}]\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="trusted_attachment_hosts"):
+        load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "ip_literal",
+    [
+        "169.254.169.254",  # review finding, round 3 (P1): the AWS/GCP/Azure cloud-metadata
+        # endpoint — canonical dotted-decimal, caught directly by ipaddress.ip_address().
+        "127.0.0.1",  # loopback, canonical form
+        "::1",  # IPv6 loopback, canonical form
+        "2130706433",  # review finding, round 4 (P1): bare decimal integer == 127.0.0.1 —
+        # a well-documented SSRF filter-bypass encoding ipaddress.ip_address() does NOT
+        # recognize as a valid literal (it only accepts canonical notation), but OS resolvers
+        # (getaddrinfo) have historically still accepted.
+        "0x7f000001",  # hex literal == 127.0.0.1, same bypass class
+        "0",  # bare "0" resolves to 0.0.0.0 on many resolvers
+        "127.000.000.001",  # zero-padded octets — non-canonical but resolver-accepted
+        "127.1",  # shorthand dotted form (fewer than 4 octets) == 127.0.0.1 on many resolvers
+        "127.0x1",  # review finding, round 5 (P1): MIXED per-label notation (plain-decimal
+        # label + hex label) == 127.0.0.1 on getaddrinfo-legacy resolvers (verified live:
+        # macOS). Neither a whole-string bare-decimal nor a whole-string-hex check (round 4)
+        # catches this — it needed a genuine per-LABEL check.
+        "0x7f.1",  # same mixed-notation bypass, hex label first
+        "0x7f.0x0.0x0.0x1",  # all-hex, 4 labels == 127.0.0.1
+        "0177.0x0.0.1",  # decimal-looking-but-legacy-octal label mixed with hex and plain —
+        # the per-label check doesn't need to know it's "octal", just that every label is
+        # purely digit/hex-numeric.
+    ],
+)
+def test_trusted_attachment_hosts_ip_literal_rejected(tmp_path, monkeypatch, ip_literal):
+    # a bare IP literal, in ANY notation a resolver might still accept, is never a legitimate
+    # value for this knob — it exists to name a first-party DOMAIN.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        f"version: 1\ntrusted_attachment_hosts: ['{ip_literal}']\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="trusted_attachment_hosts"):
+        load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "localhost",  # review finding, round 4
+        "attacker.localhost",  # review finding, round 6 (P1): RFC 6761 §6.3 formally
+        # reserves the ENTIRE .localhost TLD as always resolving to loopback — verified live
+        # that the bare "localhost" check alone let this through.
+        "sub.domain.localhost",
+        "localhost.localdomain",  # review finding, round 6: long-standing glibc/Linux
+        # default-hostname convention, still common in /etc/hosts.
+        "attacker.localhost.localdomain",  # review finding, round 8: a SUBDOMAIN of the
+        # localdomain alias — the round-6 check rejected the bare alias but not a subdomain of
+        # it, even though the same resolver setups that resolve the bare alias resolve this too.
+        "anything.localdomain",
+    ],
+)
+def test_trusted_attachment_hosts_localhost_alias_rejected(tmp_path, monkeypatch, alias):
+    # "localhost" and its recognized aliases resolve to loopback and are not IP literals in
+    # any sense the checks above catch, but are just as unambiguously not a legitimate
+    # first-party domain for this knob.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        f"version: 1\ntrusted_attachment_hosts: [{alias}]\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="trusted_attachment_hosts"):
+        load(tmp_path)
+
+
+def test_trusted_attachment_hosts_numeric_looking_but_not_pure_digits_survives(
+    tmp_path, monkeypatch
+):
+    # guard against the numeric-literal check over-firing: a real hostname with a numeric
+    # LABEL mixed with letters (not purely digits end-to-end) must still be accepted.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ntrusted_attachment_hosts: [s3.us-east-1.amazonaws.com]\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.trusted_attachment_hosts == frozenset({"s3.us-east-1.amazonaws.com"})
+
+
+def test_env_attachment_mode_override_beats_repo_task_yaml(tmp_path, monkeypatch):
+    # tg#11652: a repo can pin attachment_mode: link (hyperide's HYP-1248 default) for
+    # everyone, but ONE machine can override it locally without touching the committed file —
+    # the highest-precedence layer.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nlinear:\n  attachment_mode: link\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("TASK_CLI_ATTACHMENT_MODE", "native")
+    cfg = load(tmp_path)
+    assert cfg.linear_attachment_mode == "native"
+    assert any("TASK_CLI_ATTACHMENT_MODE" in layer for layer in cfg.layers)
+
+
+def test_env_attachment_mode_override_beats_explicit_config_flag(tmp_path, monkeypatch):
+    # review finding: the README documents the env override as winning even over an explicit
+    # --config P (deliberate — it's a per-machine convenience meant to beat anything
+    # file-based) — pin that with a real test, not just the docstring/README claim, so a
+    # future refactor that reorders the two layers can't pass the suite while inverting it.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    explicit = tmp_path / "custom.yaml"
+    explicit.write_text("version: 1\nlinear:\n  attachment_mode: link\n", encoding="utf-8")
+    monkeypatch.setenv("TASK_CLI_ATTACHMENT_MODE", "native")
+    cfg = load(tmp_path, explicit_config=explicit)
+    assert cfg.linear_attachment_mode == "native"
+
+
+def test_env_attachment_mode_override_unset_leaves_repo_value_untouched(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nlinear:\n  attachment_mode: link\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("TASK_CLI_ATTACHMENT_MODE", raising=False)
+    cfg = load(tmp_path)
+    assert cfg.linear_attachment_mode == "link"
+    assert not any("TASK_CLI_ATTACHMENT_MODE" in layer for layer in cfg.layers)
+
+
+def test_env_attachment_mode_override_invalid_value_rejected(tmp_path, monkeypatch):
+    # review finding: the error must name TASK_CLI_ATTACHMENT_MODE itself, not just the
+    # generic "linear.attachment_mode must be one of [...]" a user would get from a bad
+    # task.yaml value — that message alone gives no clue to check the shell environment
+    # instead of auditing config files that are actually fine.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("TASK_CLI_ATTACHMENT_MODE", "carrier-pigeon")
+    with pytest.raises(ConfigError, match="TASK_CLI_ATTACHMENT_MODE"):
+        load(tmp_path)
+
+
+def test_env_attachment_mode_override_blank_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nlinear:\n  attachment_mode: link\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("TASK_CLI_ATTACHMENT_MODE", "   ")
+    cfg = load(tmp_path)
+    assert cfg.linear_attachment_mode == "link"

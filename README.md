@@ -342,7 +342,11 @@ The full native shape (also accepted as `task.yaml`, or nested under `rig.yaml` 
 version: 1
 backend: github-issues            # or: linear
 github:   { repo: auto, default_labels: [agent] }   # repo: auto = origin owner/name
-linear:   { team: HYP, project: "" }
+linear:   { team: HYP, project: "", attachment_mode: native }  # attachment_mode: native|link
+trusted_attachment_hosts: []      # extra hosts `task read --save-attachments` may auto-fetch
+                                   # from beyond the tracker's own asset domain (e.g. your own
+                                   # GitHub Pages host) — fetched WITHOUT the tracker's auth
+                                   # header. Empty by default (secure-by-default).
 projects:                          # cross-project registry (mostly in the GLOBAL config)
   - { repo: acme/frontend }        # `task list` outside a repo / `--all` aggregates these
   - { name: HYP, backend: linear, team: HYP }
@@ -390,9 +394,28 @@ daemon:                              # the due-date reminder watcher (all keys o
 Config is committed by default and scoped by location, never a flag. With no config at all the
 tool defaults to `github-issues` with every gate on (and the daemon's built-in defaults above).
 
+**`trusted_attachment_hosts` — what it does and does not protect against.** Entries are
+validated as bare hostnames: no scheme/path/port/userinfo, no IP literal (canonical or any
+getaddrinfo-legacy encoding — decimal, hex, zero-padded, per-label-mixed), no `localhost`/
+`*.localhost`/`localhost.localdomain`. That closes config typos and known loopback aliases. It
+does **not** and cannot close a genuinely resolvable DNS name that a wildcard-DNS-to-IP service
+(`nip.io`, `sslip.io`, and similar) maps to an internal address, or DNS rebinding — those need
+resolving the hostname and validating the actual IP at connect time, out of scope for this
+config-string check. Only list a domain here that you actually control.
+
 When `classify.capability` is set, the model manifest is located by probing a few conventional
 `agent-tools` checkout paths; set `$TASK_MODELS_MANIFEST` to an explicit `models.yaml` to make the
 choice deterministic on a machine with more than one checkout (it always wins over the heuristics).
+
+**Per-machine override — `$TASK_CLI_ATTACHMENT_MODE`** (tg#11652): a repo can pin
+`linear.attachment_mode` for everyone (e.g. hyperide pins `link`, HYP-1248 — raw pasted
+`uploads.linear.app` URLs 401 for a non-browser viewer). Set `TASK_CLI_ATTACHMENT_MODE=native`
+(or `link`) in your own shell/machine to override that pin locally without touching the
+committed `task.yaml`/`rig.yaml` — it is the single highest-precedence layer in the cascade,
+above even an explicit `--config P` (deliberate: it's a per-machine convenience override, meant
+to win over anything file-based), and is still validated (an unrecognized value fails closed,
+same as the file-based setting). If a `task` invocation's `attachment_mode` looks wrong and
+`--config` doesn't explain it, check `echo $TASK_CLI_ATTACHMENT_MODE`.
 
 ## Architecture
 
@@ -431,3 +454,20 @@ Deferred to follow-up issues:
 ## License
 
 MIT.
+
+<!-- rig:ecosystem-block -->
+## Ecosystem
+
+Part of the [HyperIDE.ai](https://hyperide.ai) agent toolchain:
+
+- **[tg-cli](https://github.com/alex-mextner/tg-cli)** — simple Telegram CLI to send messages, photos & files, and a two-way agent bridge (reports, Q→buttons, voice/rich)
+- **[review-cli](https://github.com/alex-mextner/review-cli)** — multi-model read-only code review from one command: diff review, cited quorum, brainstorm, visual review, and interactive spec-review tooling. Read-only, CLI-first, harness-agnostic.
+- **[agent-tools](https://github.com/alex-mextner/agent-tools)** — the shared catalog `rig` applies: portable agent skills, agent-hooks, the global git-hook dispatcher, CI gates, and MCP servers
+- **[draw-cli](https://github.com/alex-mextner/draw-cli)** — text-to-image via Hugging Face
+- **[3d-cli](https://github.com/alex-mextner/3d-cli)** — scriptable CLI for the full 3D FDM lifecycle: modeling, mesh repair, slicing, and print monitoring
+- **[dev-cli](https://github.com/alex-mextner/dev-cli)** — project-scoped dev/e2e process runner (start/list/stop dev servers and e2e jobs); rig validates the `scripts:` / `dev:` config shape and provisions `dev:*` / `Bash(dev:*)` as the harness permission surface, without granting raw process/git/package-manager tools
+- **[research-cli](https://github.com/alex-mextner/research-cli)** — multi-provider research / panel CLI: puts a question to a panel of models, each through a research lens, then synthesizes one attributed, fact-checked note
+- **[pm-cli](https://github.com/alex-mextner/pm-cli)** — autonomous project-manager coordinator over the task/tg/rig ecosystem: keeps a work queue as a deterministic projection of an append-only event log, reconciling on unforgeable evidence rather than dispatching or editing code itself
+- **[rig-cli](https://github.com/alex-mextner/rig-cli)** — sets up a repo (and a dev machine) from a committed `rig.yaml`: skills, agent-hooks, git-hook dispatcher, CI gates, MCP, and the personal CLI ecosystem itself
+- **[hyperide.ai](https://hyperide.ai)** — Figma replacement inside VS Code. Edit React components directly through AST/LSP without AI hallucinations, token waste, or context-window limits. Works for indie vibe-coding and for enterprise teams with split design/dev roles.
+<!-- /rig:ecosystem-block -->
