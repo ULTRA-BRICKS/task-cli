@@ -307,6 +307,247 @@ def test_github_current_user_returns_none_on_backend_error(monkeypatch):
     assert be.current_user() is None
 
 
+def test_github_list_state_filter_scans_full_page_not_just_limit(monkeypatch):
+    # HYP-1347 P1 review finding: `list()` used to send `per_page=min(limit, 100)` and only
+    # filter by `state` AFTER the fetch — so a repo with `limit` or more non-matching issues
+    # ahead of the matching ones in fetch order returned a false-clean scan. `task audit`'s
+    # whole point is catching a Done ticket that bypassed task-cli's close gates; this made it
+    # silently see nothing in exactly the busy repos where that matters most. A state filter
+    # must always scan the FULL page (100, the documented per-run cap) regardless of `limit`.
+    # The stub below honors `per_page` (mirrors the real API truncating server-side) so this
+    # test is red before the fix for the right reason, not just on a URL-substring assertion.
+    import re
+
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    # 50 open (non-Done) issues, THEN one closed/Done issue at position 51 — past a `limit=50`
+    # fetch cap if the fetch were still capped by `limit` before the state filter runs.
+    rows = [
+        {"number": i, "title": f"open {i}", "state": "open", "labels": [], "body": ""}
+        for i in range(1, 51)
+    ]
+    rows.append(
+        {
+            "number": 999,
+            "title": "done ticket",
+            "state": "closed",
+            "labels": [{"name": "status:done"}],
+            "body": "",
+        }
+    )
+    seen = {}
+
+    def fake_call(url, **kw):
+        seen["url"] = url
+        per_page = int(re.search(r"per_page=(\d+)", url).group(1))
+        return rows[:per_page]
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    out = be.list(state=State.DONE, limit=50)
+    assert [t.id for t in out] == ["#999"]
+    assert "per_page=100" in seen["url"]  # the full page, not min(limit, 100)
+
+
+def test_github_list_sorts_by_updated_not_created(monkeypatch):
+    # review finding (round 1, Codex): GitHub issues default to `sort=created` — without an
+    # explicit `sort=updated`, "the 100 most recent issues" this function's own comment/README
+    # claim would actually mean "the 100 oldest-created issues", so an issue created long ago
+    # but closed TODAY could sit past a 100-issue page while 100 newer-created-but-stale issues
+    # fill it — exactly the class of recently-bypassed Done ticket the audit exists to catch.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    seen = {}
+
+    def fake_call(url, **kw):
+        seen["url"] = url
+        return []
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    be.list(state=State.DONE, limit=50)
+    assert "sort=updated" in seen["url"]
+    assert "direction=desc" in seen["url"]
+
+
+def test_github_list_state_filter_paginates_past_pull_request_pollution(monkeypatch):
+    # review finding (round 2, Codex): GitHub's `/issues` endpoint mixes pull requests into
+    # the same page as issues (`"pull_request" not in r` is the only way to tell them apart,
+    # applied AFTER the fetch) — a single 100-row page dominated by PRs could starve the real
+    # 100-issue scan budget the state filter depends on, silently missing a Done issue past
+    # page 1 even though the fetch nominally covers "the full page". This is the same false-
+    # clean-scan failure mode Finding 1 fixed, via a different mechanism (PR pollution instead
+    # of premature truncation) — the fix must paginate past PR-heavy pages, not just widen
+    # the fetch cap to 100 raw rows.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    # page 1: 100 rows, ALL pull requests (zero real issues) — the exact scenario that starved
+    # the scan budget before pagination. page 2: one real, Done issue.
+    pr_page = [
+        {"number": i, "title": f"pr {i}", "state": "open", "labels": [], "body": "", "pull_request": {}}
+        for i in range(1, 101)
+    ]
+    done_page = [
+        {
+            "number": 999,
+            "title": "done ticket",
+            "state": "closed",
+            "labels": [{"name": "status:done"}],
+            "body": "",
+        }
+    ]
+    seen_pages: list[str] = []
+
+    def fake_call(url, **kw):
+        import re
+
+        # `[?&]page=` (not bare `page=`) — the URL also carries `per_page=100`, whose tail
+        # would otherwise false-match a bare `page=(\d+)` pattern.
+        page = int(re.search(r"[?&]page=(\d+)", url).group(1))
+        seen_pages.append(url)
+        return pr_page if page == 1 else done_page
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    out = be.list(state=State.DONE, limit=50)
+    assert [t.id for t in out] == ["#999"]
+    assert len(seen_pages) == 2  # paginated past the all-PR page instead of giving up
+
+
+def test_github_list_state_filter_stops_paginating_once_scan_target_reached(monkeypatch):
+    # regression guard: the pagination loop must terminate — it is bounded by
+    # `_STATE_SCAN_TARGET` (100 real issues) as well as `_STATE_SCAN_MAX_PAGES`, so a repo with
+    # far more than 100 Done issues doesn't paginate forever.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+
+    def fake_call(url, **kw):
+        # every page returns 100 real, Done issues — an inexhaustible source
+        return [
+            {
+                "number": i,
+                "title": f"done {i}",
+                "state": "closed",
+                "labels": [{"name": "status:done"}],
+                "body": "",
+            }
+            for i in range(1, 101)
+        ]
+
+    calls = []
+    monkeypatch.setattr(
+        be, "_call", lambda url, **kw: (calls.append(url), fake_call(url))[1]
+    )
+    be.list(state=State.DONE, limit=50)
+    assert len(calls) == 1  # 100 real issues on page 1 already meets the scan target
+
+
+def test_github_list_state_filter_gives_up_after_the_page_cap(monkeypatch):
+    # the documented 10-page (1000 raw rows) cap: a repo whose /issues feed is nothing but pull
+    # requests must not turn one state-filtered list() into an unbounded fetch.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    pr_page = [
+        {"number": i, "title": f"pr {i}", "state": "open", "labels": [], "body": "", "pull_request": {}}
+        for i in range(1, 101)
+    ]
+    calls: list[str] = []
+    monkeypatch.setattr(be, "_call", lambda url, **kw: (calls.append(url), pr_page)[1])
+    out = be.list(state=State.DONE, limit=50)
+    assert out == []
+    assert len(calls) == GitHubIssuesBackend._STATE_SCAN_MAX_PAGES == 10
+
+
+def test_github_list_state_filter_stops_once_limit_matches_are_in_hand(monkeypatch):
+    # review finding (perf): the caller truncates to `limit` anyway, so once `limit` matching
+    # issues have been seen there is nothing left worth another request — 5 Done issues on
+    # page 1 satisfy limit=5 even though the 100-issue scan budget is not exhausted.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    page = [
+        {"number": i, "title": f"done {i}", "state": "closed", "labels": [{"name": "status:done"}], "body": ""}
+        for i in range(1, 6)
+    ] + [
+        {"number": i, "title": f"open {i}", "state": "open", "labels": [], "body": ""}
+        for i in range(6, 101)
+    ]
+    calls: list[str] = []
+    monkeypatch.setattr(be, "_call", lambda url, **kw: (calls.append(url), page)[1])
+    out = be.list(state=State.DONE, limit=5)
+    assert len(out) == 5
+    assert len(calls) == 1
+
+
+def test_github_list_state_filter_dedups_an_issue_served_on_two_pages(monkeypatch):
+    # review finding: `sort=updated` offset pagination is a live ordering — an issue touched
+    # between the page-1 and page-2 fetches is served AGAIN at the head of page 2. It must not
+    # appear twice in the result, count twice toward `limit`, or eat the scan budget twice.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    done = {"number": 7, "title": "done 7", "state": "closed", "labels": [{"name": "status:done"}], "body": ""}
+    page1 = [done] + [
+        {"number": i, "title": f"pr {i}", "state": "open", "labels": [], "body": "", "pull_request": {}}
+        for i in range(100, 199)
+    ]
+    page2 = [done, {"number": 8, "title": "done 8", "state": "closed", "labels": [{"name": "status:done"}], "body": ""}]
+
+    def fake_call(url, **kw):
+        import re
+
+        return page1 if int(re.search(r"[?&]page=(\d+)", url).group(1)) == 1 else page2
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    out = be.list(state=State.DONE, limit=2)
+    assert [t.id for t in out] == ["#7", "#8"]
+
+
+def test_github_list_truncates_filtered_results_to_limit(monkeypatch):
+    # review finding (round 1, Opus, Finding 1/2): the full-page fetch above must still be
+    # truncated to `limit` AFTER filtering — otherwise a state-filtered `list(limit=5)` on a
+    # busy repo returns up to 100 matches instead of 5, silently breaking any caller relying on
+    # `limit` as a hard cap (display pagination, downstream slicing). The three pre-existing
+    # state-filter tests only ever stub ONE matching row, so `len(out) == 1` regardless of
+    # whether truncation actually happens — this uses 60 matching Done issues so the assertion
+    # is a genuine tie-breaker, not vacuously true either way.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    rows = [
+        {
+            "number": i,
+            "title": f"done {i}",
+            "state": "closed",
+            "labels": [{"name": "status:done"}],
+            "body": "",
+        }
+        for i in range(1, 61)
+    ]
+    monkeypatch.setattr(be, "_call", lambda url, **kw: rows)
+    out = be.list(state=State.DONE, limit=50)
+    assert len(out) == 50
+
+
+def test_github_list_without_state_filter_still_caps_fetch_to_limit(monkeypatch):
+    # the fix above must not regress the common unfiltered hot path (e.g. interactive
+    # `task list`) into always fetching a full page it doesn't need.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    seen = {}
+
+    def fake_call(url, **kw):
+        seen["url"] = url
+        return []
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    be.list(limit=10)
+    assert "per_page=10" in seen["url"]
+
+
 def test_issue_number_removeprefix_not_lstrip():
     from tasklib.backends.github_issues import _issue_number
 
@@ -614,6 +855,142 @@ def test_linear_list_scopes_filter_to_team_and_project(monkeypatch):
     be.list()
     assert seen["filter"]["team"] == {"key": {"eq": "HYP"}}
     assert seen["filter"]["project"] == {"id": {"eq": "proj-9"}}
+
+
+def test_linear_list_state_done_filters_server_side(monkeypatch):
+    # HYP-1347 P1 review finding, Linear side: `list(state=State.DONE)` used to send
+    # `first: min(limit, 100)` with NO state filter in the GraphQL query, then filter client-
+    # side after the fetch — a repo with `limit`+ non-Done issues sorted ahead of the Done ones
+    # returned a false-clean scan, defeating the audit's whole point. Linear's normalized state
+    # is derived purely from the native workflow-state `type` (no label-vs-native divergence to
+    # protect, unlike GitHub), and DONE has a unique reverse type ("completed") — so the fix can
+    # filter server-side with zero risk of a new blind spot: `state: {type: {eq: "completed"}}`.
+    # The stub below honors `n` (mirrors the real API truncating server-side) so this is red
+    # before the fix for the right reason, not just an assertion on the query variables.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    be._team_id = "team-1"
+    nodes = [
+        {
+            "identifier": f"HYP-{i}",
+            "title": f"open {i}",
+            "state": {"type": "started"},
+            "labels": {"nodes": []},
+        }
+        for i in range(1, 51)
+    ]
+    nodes.append(
+        {
+            "identifier": "HYP-999",
+            "title": "done ticket",
+            "state": {"type": "completed"},
+            "labels": {"nodes": []},
+        }
+    )
+    seen = {}
+
+    def fake_gql(query, variables=None):
+        seen["filter"] = variables["filter"]
+        n = seen["n"] = variables["n"]
+        flt = variables["filter"]
+        matching = nodes
+        if "state" in flt:
+            wanted = flt["state"]["type"]["eq"]
+            matching = [node for node in nodes if node["state"]["type"] == wanted]
+        return {"issues": {"nodes": matching[:n]}}
+
+    monkeypatch.setattr(be, "_gql", fake_gql)
+    out = be.list(state=State.DONE, limit=50)
+    assert [t.id for t in out] == ["HYP-999"]
+    assert seen["filter"]["state"] == {"type": {"eq": "completed"}}
+    # review finding (round 1, Opus, minor): the server already filters exactly to DONE here,
+    # so `n` must stay `min(limit, 100)` — bumping it to a full-page fetch on this path would be
+    # a pointless regression (the server-side filter makes the full-page fallback unnecessary).
+    assert seen["n"] == 50
+
+
+def test_linear_list_truncates_non_done_filtered_results_to_limit(monkeypatch):
+    # review finding (round 1, Opus, Finding 1/2): the client-side-filter fallback path (used
+    # for TODO/IN_PROGRESS/IN_REVIEW) must still truncate to `limit` after filtering — otherwise
+    # `list(state=State.TODO, limit=5)` on a repo with 60 TODO issues in the fetched page returns
+    # up to 60 instead of 5. Uses 60 matching rows so the assertion is a genuine tie-breaker.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    be._team_id = "team-1"
+    nodes = [
+        {
+            "identifier": f"HYP-{i}",
+            "title": f"todo {i}",
+            "state": {"type": "unstarted"},
+            "labels": {"nodes": []},
+        }
+        for i in range(1, 61)
+    ]
+
+    def fake_gql(query, variables=None):
+        return {"issues": {"nodes": nodes[: variables["n"]]}}
+
+    monkeypatch.setattr(be, "_gql", fake_gql)
+    out = be.list(state=State.TODO, limit=50)
+    assert len(out) == 50
+
+
+def test_linear_list_non_done_state_filter_scans_full_page_not_just_limit(monkeypatch):
+    # DONE/CANCELLED are the only states with a unique reverse native type — TODO can come from
+    # THREE distinct native types (backlog/unstarted/triage — see `_TYPE_TO_STATE`), so it can't
+    # be narrowed to a single `type: {eq: ...}` without under-fetching. Those states must still
+    # fall back to fetching the full page (100) before filtering, exactly like GitHub.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    be._team_id = "team-1"
+    nodes = [
+        {
+            "identifier": f"HYP-{i}",
+            "title": f"in progress {i}",
+            "state": {"type": "started"},
+            "labels": {"nodes": []},
+        }
+        for i in range(1, 51)
+    ]
+    nodes.append(
+        {
+            "identifier": "HYP-999",
+            "title": "todo ticket via backlog type",
+            "state": {"type": "backlog"},
+            "labels": {"nodes": []},
+        }
+    )
+    seen = {}
+
+    def fake_gql(query, variables=None):
+        seen["n"] = variables["n"]
+        return {"issues": {"nodes": nodes[: variables["n"]]}}
+
+    monkeypatch.setattr(be, "_gql", fake_gql)
+    out = be.list(state=State.TODO, limit=50)
+    assert [t.id for t in out] == ["HYP-999"]
+    assert seen["n"] == 100
+
+
+def test_linear_list_without_state_filter_still_caps_fetch_to_limit(monkeypatch):
+    # regression guard: the fix must not make the common unfiltered path (e.g. cross-project
+    # aggregation) always fetch a full page it doesn't need.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    be._team_id = "team-1"
+    seen = {}
+
+    def fake_gql(query, variables=None):
+        seen["n"] = variables["n"]
+        return {"issues": {"nodes": []}}
+
+    monkeypatch.setattr(be, "_gql", fake_gql)
+    be.list(limit=10)
+    assert seen["n"] == 10
 
 
 def test_linear_search_filters_results_to_team(monkeypatch):

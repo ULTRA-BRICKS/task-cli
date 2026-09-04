@@ -3092,9 +3092,32 @@ def _audit_revert(
             errors.append((ticket_id, str(exc)))
             continue
         reverted.append(ticket_id)
+        # review finding (P2): every other successful mutation path (change/status/done/check/
+        # mark-shipped) refreshes the session sidecar immediately after the write lands — a
+        # revert is exactly such a mutation (DONE -> IN_REVIEW) and was the one path that
+        # skipped it, leaving a reactivated ticket's sidecar timestamp stale so a later `task
+        # session` view could misclassify it. Mirrors the placement `cmd_status` uses: right
+        # after the transition is confirmed, before the best-effort comment/notify below.
+        # Current-session only, like every other mutation path: `_record_session_touch` is a
+        # no-op when there is no ambient session or the ticket belongs to another session, so
+        # a cron/operator-shell `task audit --revert` refreshes nothing (by design, not a gap).
+        _record_revert_session_touch(cfg, backend, updated)
         _post_revert_comment(backend, ticket_id, still_bad[0].result)
         _post_revert_notify(cfg, updated)
     return reverted, errors
+
+
+def _record_revert_session_touch(cfg, backend, ticket: Ticket) -> None:
+    """Best-effort, like every other step after the transition in `_audit_revert`'s loop
+    (review finding): the ticket is already reverted, so a sidecar failure — `session.record`
+    swallows `OSError` but not e.g. a `UnicodeEncodeError` from a title with a lone surrogate —
+    must neither abort the rest of the batch nor be mis-reported as a revert failure."""
+    import sys
+
+    try:
+        _record_session_touch(cfg, backend, ticket)
+    except Exception as exc:  # noqa: BLE001 — bookkeeping only, the revert itself already landed
+        print(_warn(f"  reverted {ticket.id} but failed to refresh the session sidecar: {exc}"), file=sys.stderr)
 
 
 def _post_revert_comment(backend, ticket_id: str, result) -> None:

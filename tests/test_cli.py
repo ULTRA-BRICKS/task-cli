@@ -4709,6 +4709,31 @@ def test_audit_revert_moves_ticket_back_to_in_review_with_comment(capsys, _injec
     assert any("acceptance-checked" in body for _tid, body in _inject_fake.comments)
 
 
+def test_audit_revert_refreshes_session_touch(capsys, _inject_fake):
+    # P2 (review): `_audit_revert`'s `backend.transition(id, IN_REVIEW)` call bypassed
+    # `_record_session_touch`, unlike every other mutation path (change/status/done/check/
+    # mark-shipped — see `test_status_transition_refreshes_session_touch`). The sidecar kept
+    # the ticket's OLD timestamp after a successful revert, so a later `task session` view
+    # could classify the just-reopened ticket as stale and drop it from recent-ticket history.
+    from tasklib.backends import backend_coordinate
+    from tasklib.session import read_entries
+
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    _write_session_touch("testsess", "#1", "Add a thing", 1)
+    capsys.readouterr()
+
+    rc = main(["audit", "--revert"])
+    capsys.readouterr()
+
+    assert rc == 1
+    assert _inject_fake.get("#1").state.value == "in-review"
+    entries = read_entries("testsess")
+    assert entries[-1].id == "#1"
+    assert entries[-1].ts > 1  # refreshed, not the stale seeded touch
+    assert entries[-1].repo == backend_coordinate(_inject_fake)
+
+
 def test_audit_without_revert_leaves_ticket_in_done(capsys, _inject_fake):
     main(_create_argv())
     _force_done_bypassing_gates(_inject_fake)
@@ -4930,6 +4955,28 @@ def test_audit_revert_survives_a_comment_failure(capsys, _inject_fake, monkeypat
     assert _inject_fake.get("#1").state.value == "in-review"
     assert "reverted" in result.out
     assert "failed to post explanation" in result.err
+
+
+def test_audit_revert_survives_a_session_touch_failure(capsys, _inject_fake, monkeypatch):
+    # review finding: the session-sidecar refresh runs INSIDE the per-ticket batch loop, after
+    # the transition landed. `session.record` swallows OSError but not e.g. a UnicodeEncodeError
+    # (a title carrying a lone surrogate) — that must degrade to a warning like the comment/
+    # notify steps do, never abort the rest of the batch or masquerade as a revert failure.
+    main(_create_argv())
+    _force_done_bypassing_gates(_inject_fake)
+    capsys.readouterr()
+
+    def boom(cfg, backend, ticket):
+        raise UnicodeEncodeError("utf-8", "\udcff", 0, 1, "lone surrogate")
+
+    monkeypatch.setattr("tasklib.cli._record_session_touch", boom)
+    rc = main(["audit", "--revert"])
+    result = capsys.readouterr()
+    assert rc == 1
+    assert _inject_fake.get("#1").state.value == "in-review"
+    assert "reverted" in result.out
+    assert "failed to refresh the session sidecar" in result.err
+    assert any("acceptance-checked" in body for _tid, body in _inject_fake.comments), "the explanation still posts"
 
 
 def test_audit_flags_unquoted_resolvable_msgref_reference(_inject_fake, monkeypatch):

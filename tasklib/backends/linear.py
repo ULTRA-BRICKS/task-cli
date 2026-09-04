@@ -384,13 +384,29 @@ class LinearBackend:
             # for the same team but different projects would list the SAME team-wide issues, so
             # the cross-project grouped view would double-count them under each group.
             flt["project"] = {"id": {"eq": self.project}}
+        # HYP-1347 P1 review finding: `state` used to be applied client-side AFTER the fetch, so
+        # capping the fetch to `min(limit, 100)` before that filter ran could return a false-
+        # clean scan (see GitHubIssuesBackend.list()'s matching comment for the full failure
+        # mode). Unlike GitHub, Linear's normalized state is derived PURELY from the native
+        # workflow-state `type` (`_node_to_ticket`) — no label-vs-native divergence to protect —
+        # so DONE/CANCELLED, the only two states with a UNIQUE reverse type in `_STATE_TO_TYPE`
+        # ("completed"/"canceled" each map to exactly one State, both directions), can be
+        # filtered server-side with zero risk of a new blind spot. TODO/IN_PROGRESS/IN_REVIEW
+        # cannot: several native types collapse onto TODO, and IN_PROGRESS/IN_REVIEW share
+        # "started" with no native distinction (see `_STATE_TO_TYPE`'s own comment) — those still
+        # fall back to fetching the full page (100) before filtering, exactly like GitHub.
+        fetch_n = min(limit, 100)
+        if state in (State.DONE, State.CANCELLED):
+            flt["state"] = {"type": {"eq": _STATE_TO_TYPE[state]}}
+        elif state is not None:
+            fetch_n = 100
         data = self._gql(
             # base fields — the bulk N-tickets-at-once path; see _ISSUE_FIELDS's own comment.
             "query($filter:IssueFilter,$n:Int){issues(filter:$filter,first:$n,"
             "orderBy:updatedAt){nodes{"
             + self._ISSUE_FIELDS_BASE
             + " team{key} project{id}}}}",
-            {"filter": flt, "n": min(limit, 100)},
+            {"filter": flt, "n": fetch_n},
         )
         tickets = [
             self._node_to_ticket(n) for n in data.get("issues", {}).get("nodes", [])

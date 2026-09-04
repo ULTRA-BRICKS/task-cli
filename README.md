@@ -117,11 +117,22 @@ task audit --revert        # additionally move each STILL-noncompliant ticket ba
 task audit --json          # machine-readable findings (for a cron job / dashboard)
 ```
 
-**`--limit` is capped at 100 per run — there is no pagination yet.** Both backends fetch one
-page (`min(limit, 100)`); `--limit 200` still audits at most 100 tickets, and any Done ticket
-past that page (in a repo with 100+ closed tickets since the last audit) is invisible to that
-run until it ages into the window. Run audit often enough that your close rate never outpaces
-one page, or pass a repo-appropriate `--limit`.
+**The scan budget is 100 real tickets per run — how precisely that applies differs by backend.**
+On **Linear**, `list()` filters Done tickets server-side (its normalized state is derived
+purely from the native workflow state, so this is exact — no risk of missing a match), so
+`--limit 100` fetches the 100 most-recently-updated **Done** tickets directly in one request:
+`--limit 50` genuinely means "the 50 most recent Done tickets." On **GitHub Issues**, state
+lives in a managed label rather than a native field, so `list()` instead scans (most-recently-
+updated first) until it has seen 100 real issues **of any state** — excluding pull requests,
+which GitHub's `/issues` endpoint mixes into the same page, so a page dominated by recent PR
+activity is paginated past rather than counted toward the 100 — and filters client-side:
+`--limit 50` scans those 100 issues for Done ones and returns up to 50 matches. Either backend:
+any Done ticket past the scan budget (`--limit` Done tickets on Linear, 100 scanned issues on
+GitHub — a repo closing more than that since the last audit) is invisible to that run until it
+ages into the window, and the GitHub scan itself is capped at 10 pages
+(1000 raw GitHub rows) so a pathologically PR-heavy repo can't turn one `task audit` run into
+an unbounded fetch. Run audit often enough that your close rate never outpaces the scan budget
+(a larger `--limit` cannot widen it — 100 is the hard cap on both backends).
 
 **GitHub Issues backend: a known blind spot.** `task audit` is fully effective against Linear
 (HYP-1347's own backend — Linear's normalized state IS the native truth, so there is nothing
