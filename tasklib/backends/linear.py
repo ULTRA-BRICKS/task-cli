@@ -39,49 +39,23 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
 
 from ..model import Attachment, State, Ticket
 from ..render import parse, render
 from . import AmbiguousBackendError, BackendError
-from .http import AmbiguousHttpError, HttpError, request_bytes, request_json
+from .http import (
+    AmbiguousHttpError,
+    HttpError,
+    https_host_matches,
+    request_bytes,
+    request_json,
+    safe_urlparse,
+)
 
 API_URL = "https://api.linear.app/graphql"
 # The ONLY hosts `fetch_attachment_bytes` will send the Linear API key to (review finding: never
 # attach auth to an arbitrary attachment URL — see that method's docstring).
 _LINEAR_ASSET_HOSTS = frozenset({"uploads.linear.app"})
-
-
-def _safe_urlparse(url: str):
-    """``urlparse(url)`` — validated enough to actually be usable, or ``None`` on ANY
-    malformation. review finding: an attachment's ``url`` is tracker-controlled data, and there
-    are TWO distinct places a "successfully parsed" url can still be garbage:
-
-    - ``urlparse()`` itself raises ``ValueError`` at PARSE time for some malformed inputs (e.g.
-      invalid IPv6-bracket syntax like ``"https://[bad"``).
-    - ``.port`` is a LAZY property that validates at ACCESS time, not parse time — a
-      syntactically well-formed url with a non-numeric/out-of-range port
-      (``"https://host:bad/x"``) parses fine but raises ``ValueError`` the moment ``.port`` is
-      actually touched. (``.hostname`` does NOT have this hazard — verified against
-      ``urllib.parse``'s implementation, it never raises on access; only ``.port`` does the
-      int-cast/range check that can fail. Nothing else here needs eager-touching.)
-
-    review finding, round 2: these used to be two SEPARATE failure points every caller had to
-    defend against independently — a caller that only wrapped ``urlparse()`` itself (not the
-    later ``.port`` access) would still crash on a bad port, or worse, classify a malformed url
-    as usable before the crash. Touching ``.port`` eagerly here means every caller — the internal
-    ``fetch_attachment_bytes`` scheme check no less than ``is_native_attachment_url``'s host
-    comparison — gets the SAME single "None means unusable, for any reason" contract, instead of
-    each reimplementing its own try/except.
-    """
-    try:
-        parsed = urlparse(url)
-        _ = (
-            parsed.port
-        )  # property access validates port syntax (raises ValueError if malformed)
-    except ValueError:
-        return None
-    return parsed
 
 
 # Map a Linear workflow-state ``type`` onto our normalized State.
@@ -575,32 +549,29 @@ class LinearBackend:
 
     def is_native_attachment_url(self, url: str) -> bool:
         """Whether ``url`` is one of THIS backend's own uploaded assets (``uploads.linear.app``,
-        https only) — as opposed to an external URL a ``link``-mode attachment merely points at
-        (a GitHub PR asset, say). Used by callers (``cli._save_attachments``) that want to fetch
-        ONLY assets this process/tracker actually controls, not follow an arbitrary tracker-data
-        URL onto the open network (SSRF surface — review finding).
+        https, default port only) — as opposed to an external URL a ``link``-mode attachment
+        merely points at (a GitHub PR asset, say). Used by callers (``cli._save_attachments``)
+        that want to fetch ONLY assets this process/tracker actually controls, not follow an
+        arbitrary tracker-data URL onto the open network (SSRF surface — review finding).
 
-        review finding (PR #90 round 2): a malformed authority like
-        ``https://uploads.linear.app:bad/asset`` has a perfectly valid ``.hostname`` (that
-        property alone doesn't validate the port), so this predicate used to classify it as a
-        genuine native asset even though nothing could ever actually fetch it — the caller would
-        then attach the ``Authorization`` header and the same-host-redirect guard to a request
-        that can never be made. ``_safe_urlparse`` now validates ``.port`` eagerly for every
-        caller, so a malformed authority already comes back as ``None`` here — it's correctly
-        treated as an unconfirmed external link (reported, not fetched) instead of a native
-        asset that mysteriously always fails.
+        Delegates to the shared :func:`~tasklib.backends.http.https_host_matches` — review
+        finding (round 4): this method's OWN port handling used to live here independently of
+        the CLI layer's equivalent check, and the two had already drifted (this one allowed
+        ANY port on ``uploads.linear.app``, the CLI's ``trusted_attachment_hosts`` check did
+        not) — meaning a hostile ticket's attachment URL could aim a REAL Linear API key at an
+        arbitrary port on the asset host (attachment urls are tracker-controlled data, same
+        threat model as everywhere else in this module). One shared predicate closes that.
 
-        review finding: ``.netloc`` includes the port and preserves case — a genuine (if
-        unusual) asset url like ``https://uploads.linear.app:443/...`` or a differently-cased
-        host would compare unequal to the frozenset and get wrongly classified as non-native
-        (safe direction — under-authenticates rather than over-authenticates — but still a real
-        misclassification). ``.hostname`` is lowercased and port-stripped, which is why the
-        comparison below uses it rather than ``.netloc``.
+        review finding (PR #90 round 2, now folded into the shared predicate): a malformed
+        authority like ``https://uploads.linear.app:bad/asset`` has a perfectly valid
+        ``.hostname`` (that property alone doesn't validate the port), so this used to classify
+        it as a genuine native asset even though nothing could ever actually fetch it — the
+        caller would then attach the ``Authorization`` header and the same-host-redirect guard
+        to a request that can never be made. ``safe_urlparse`` validates ``.port`` eagerly for
+        every caller, so a malformed authority correctly comes back as non-native (reported,
+        not fetched) instead of a native asset that mysteriously always fails.
         """
-        parsed = _safe_urlparse(url)
-        if parsed is None or parsed.scheme != "https":
-            return False
-        return parsed.hostname in _LINEAR_ASSET_HOSTS
+        return https_host_matches(url, _LINEAR_ASSET_HOSTS)
 
     def fetch_attachment_bytes(self, url: str) -> bytes:
         """Read back an attachment's raw bytes — the READ half of ``native`` mode.
@@ -613,28 +584,50 @@ class LinearBackend:
         The ``Authorization`` header (the Linear API key) is attached ONLY when the URL's host
         is Linear's own asset domain (``_LINEAR_ASSET_HOSTS``) — review finding: this method
         takes an arbitrary attachment URL (which can be an external ``link``-mode URL, e.g. a
-        GitHub PR asset), and sending the API key to a host this process doesn't control would
-        leak it. An external URL is fetched plain/unauthenticated instead (works fine for a
-        public GitHub asset; a private one is the caller's own auth problem, not this backend's).
-        ``same_host_redirects_only=True`` additionally refuses a redirect off Linear's host mid
-        request, so a compromised/misbehaving response can't redirect the authenticated request
-        elsewhere. KNOWN TRADE-OFF (review finding): if Linear's asset host ever starts
-        redirecting a GET to a DIFFERENT host (a CDN/object-store handoff, say), this guard
-        would turn that into a clean ``HttpError`` instead of following it — observed behavior
-        across many live verification runs during this feature's development was a direct
-        ``200 image/png``, never a redirect, but that is not a guarantee about Linear's future
-        behavior. Deliberately kept strict rather than loosened to "same-host-or-strip-auth":
-        a fetch failing loudly is the correct failure mode for an auth-carrying request whose
-        target moved unexpectedly, not a silent credential leak to a redirect target.
+        GitHub PR asset, or a repo-configured "trusted host" the CLI layer widened the fetch
+        decision for — see ``cli._is_trusted_attachment_host``), and sending the API key to a
+        host this process doesn't control would leak it. An external/trusted-but-non-native URL
+        is fetched plain/unauthenticated instead.
+
+        ``same_host_redirects_only=True`` ALWAYS, deliberately decoupled from the auth-header
+        decision above (review finding, round 2): a redirect off the requested host is refused
+        for EVERY fetch through this method, not just the credential-carrying native path. An
+        attachment ``url`` is tracker-controlled data — for a non-native fetch this is the ONLY
+        thing standing between "the operator configured one trusted host" and "that host's
+        response can redirect this process anywhere" (an internal metadata endpoint, a
+        plaintext-downgraded host, an unrelated arbitrary URL); tying the restriction to
+        ``is_linear_asset`` would have made a trusted-but-non-native fetch carry NONE of the
+        redirect protection while still doing the network fetch on the caller's behalf.
+
+        KNOWN LIMITATION (review finding, round 3 — correcting an earlier, now-inaccurate claim
+        in this docstring that a trusted-but-non-native fetch "works fine for a public GitHub
+        asset"): a host that serves an attachment via a cross-host redirect (e.g. a real
+        ``github.com`` asset URL 302-ing to a signed ``objects.githubusercontent.com`` URL) will
+        now get refused here too, EVEN IF that target host would itself have been reasonable to
+        trust — this method has no way to know the caller's trusted-hosts set, only the single
+        URL it was given. A repo-configured GitHub PAGES host (this feature's actual motivating
+        case — a static host that serves its own content directly, no redirect) is unaffected.
+        Extending this to validate a redirect's TARGET against the trusted-hosts allowlist too
+        (rather than refusing every cross-host hop outright) is real follow-up work, deliberately
+        out of scope here: it needs the allowlist threaded through this method's signature, and
+        this feature's actual reported use case doesn't need it. KNOWN TRADE-OFF (review
+        finding, round 1): if Linear's OWN asset host ever starts redirecting a GET to a
+        DIFFERENT host (a CDN/object-store handoff, say), this guard would turn that into a
+        clean ``HttpError`` instead of following it — observed behavior across many live
+        verification runs during this feature's development was a direct ``200 image/png``,
+        never a redirect, but that is not a guarantee about Linear's future behavior.
+        Deliberately kept strict rather than loosened to "same-host-or-strip-auth": a fetch
+        failing loudly is the correct failure mode for a request whose target moved
+        unexpectedly, not a silent widening of which hosts actually get contacted.
         """
-        parsed = _safe_urlparse(url)
+        parsed = safe_urlparse(url)
         # review finding: an attachment's `url` is tracker-controlled data, not a value this
         # process constructed — `urlopen` also understands `file:`/`ftp:`/`data:` schemes, so
         # without a scheme allowlist a `file:///etc/passwd`-shaped attachment url would read a
         # LOCAL file instead of fetching anything. Reject outright before any network/file call.
         # Also review finding: urlparse() itself (invalid IPv6-bracket syntax) OR the lazy
         # `.port` property (a malformed port) can raise ValueError on a malformed url —
-        # `_safe_urlparse` catches both and never raises, so THIS is where either kind gets
+        # `safe_urlparse` catches both and never raises, so THIS is where either kind gets
         # converted into the same clean BackendError as any other refusal.
         if parsed is None:
             raise BackendError(
@@ -651,7 +644,7 @@ class LinearBackend:
                 url,
                 method="GET",
                 headers=headers,
-                same_host_redirects_only=is_linear_asset,
+                same_host_redirects_only=True,
             )
         except AmbiguousHttpError as exc:
             raise AmbiguousBackendError(

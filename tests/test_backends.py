@@ -1731,10 +1731,23 @@ def test_linear_is_native_attachment_url_rejects_invalid_port():
     )  # a VALID port still passes
 
 
+def test_linear_is_native_attachment_url_rejects_non_default_port():
+    # review finding (round 4): this predicate used to accept ANY numeric port on
+    # uploads.linear.app (only :bad/malformed ports were rejected, above) — meaning a hostile
+    # ticket's attachment url (tracker-controlled data) could aim a REAL Linear API key
+    # (fetch_attachment_bytes attaches Authorization whenever this returns True) at an
+    # arbitrary port on the asset host. Now delegates to the same default-port-only shared
+    # predicate the CLI-layer trusted-host check already used, closing the asymmetry.
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    assert be.is_native_attachment_url("https://uploads.linear.app:8443/asset") is False
+
+
 def test_linear_fetch_attachment_bytes_reports_invalid_port_as_backend_error():
     # review finding (PR #90): a malformed-port attachment url must fail CLEANLY as a
     # BackendError, not crash `task read --save-attachments` with a raw traceback. With
-    # `_safe_urlparse` now validating `.port` eagerly (see test_safe_urlparse_returns_none_on_
+    # `safe_urlparse` now validating `.port` eagerly (see test_safe_urlparse_returns_none_on_
     # invalid_port above), this is caught at the very first validation step — before any network
     # call is even attempted — same clean "unparseable url" refusal as any other malformed url.
     from tasklib.backends import BackendError
@@ -1773,10 +1786,13 @@ def test_save_attachments_reports_malformed_port_url_as_skipped_not_crashed(tmp_
 
 
 def test_safe_urlparse_returns_none_on_malformed_url():
-    from tasklib.backends.linear import _safe_urlparse
+    # review finding, round 3: this guard used to live as a private `_safe_urlparse` in
+    # `backends.linear` (duplicated again by a new caller before being caught) — it's now the
+    # one shared `backends.http.safe_urlparse` every caller imports.
+    from tasklib.backends.http import safe_urlparse
 
-    assert _safe_urlparse("https://[bad") is None
-    assert _safe_urlparse("https://uploads.linear.app/x") is not None
+    assert safe_urlparse("https://[bad") is None
+    assert safe_urlparse("https://uploads.linear.app/x") is not None
 
 
 def test_safe_urlparse_returns_none_on_invalid_port():
@@ -1784,14 +1800,14 @@ def test_safe_urlparse_returns_none_on_invalid_port():
     # above) — ".hostname"/".port" are LAZY properties that raise ValueError at ACCESS time, a
     # syntactically well-formed url with a non-numeric port parses fine but is still unusable.
     # Every caller must get "None" for this too, not just for the parse-time failure.
-    from tasklib.backends.linear import _safe_urlparse
+    from tasklib.backends.http import safe_urlparse
 
-    assert _safe_urlparse("https://uploads.linear.app:bad/asset") is None
+    assert safe_urlparse("https://uploads.linear.app:bad/asset") is None
     assert (
-        _safe_urlparse("https://uploads.linear.app:99999999/asset") is None
+        safe_urlparse("https://uploads.linear.app:99999999/asset") is None
     )  # out of range
     assert (
-        _safe_urlparse("https://uploads.linear.app:443/asset") is not None
+        safe_urlparse("https://uploads.linear.app:443/asset") is not None
     )  # a VALID port is fine
 
 
@@ -2063,7 +2079,12 @@ def test_linear_fetch_attachment_bytes_omits_auth_for_non_linear_host(monkeypatc
     be.fetch_attachment_bytes("https://github.com/user-attachments/assets/abc")
 
     assert "Authorization" not in seen["headers"]
-    assert seen["same_host_redirects_only"] is False
+    # review finding (round 2): the redirect guard is now UNCONDITIONAL — a non-native fetch
+    # carries no credentials, but it's still a network fetch this process makes on the caller's
+    # behalf against tracker-controlled data, and must not silently follow a redirect off the
+    # requested host (SSRF widening — see the CLI-layer trusted_attachment_hosts feature this
+    # guards).
+    assert seen["same_host_redirects_only"] is True
 
 
 def test_linear_fetch_attachment_bytes_omits_auth_for_plaintext_http_linear_host(
@@ -2093,7 +2114,9 @@ def test_linear_fetch_attachment_bytes_omits_auth_for_plaintext_http_linear_host
     be.fetch_attachment_bytes("http://uploads.linear.app/asset-1")
 
     assert "Authorization" not in seen["headers"]
-    assert seen["same_host_redirects_only"] is False
+    # the redirect guard is unconditional now (see the sibling non-linear-host test) — no auth
+    # header here, but still no free redirect.
+    assert seen["same_host_redirects_only"] is True
 
 
 def test_linear_fetch_attachment_bytes_wraps_http_error(monkeypatch):

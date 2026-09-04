@@ -12,7 +12,7 @@ import json
 import urllib.error
 import urllib.request
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 
 class HttpError(RuntimeError):
@@ -22,6 +22,68 @@ class HttpError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.body = body
+
+
+def safe_urlparse(url: str) -> ParseResult | None:
+    """``urlparse(url)`` — validated enough to actually be usable, or ``None`` on ANY
+    malformation. review finding: a caller of this is typically parsing tracker/attachment-
+    controlled data (not a URL this process constructed), and there are TWO distinct places a
+    "successfully parsed" url can still be garbage:
+
+    - ``urlparse()`` itself raises ``ValueError`` at PARSE time for some malformed inputs (e.g.
+      invalid IPv6-bracket syntax like ``"https://[bad"``).
+    - ``.port`` is a LAZY property that validates at ACCESS time, not parse time — a
+      syntactically well-formed url with a non-numeric/out-of-range port
+      (``"https://host:bad/x"``) parses fine but raises ``ValueError`` the moment ``.port`` is
+      actually touched. (``.hostname`` does NOT have this hazard — verified against
+      ``urllib.parse``'s implementation, it never raises on access; only ``.port`` does the
+      int-cast/range check that can fail. Nothing else here needs eager-touching.)
+
+    Touching ``.port`` eagerly means every caller — a backend's own native-asset-host check no
+    less than a CLI-layer trusted-host check — gets the SAME single "None means unusable, for
+    any reason" contract, instead of each reimplementing its own try/except (review finding,
+    round 2: two independent copies of exactly this guard were found drifting apart during a
+    review — ``backends.linear``'s former ``_safe_urlparse`` and
+    ``cli._is_trusted_attachment_host`` both now delegate here).
+    """
+    try:
+        parsed = urlparse(url)
+        _ = (
+            parsed.port
+        )  # property access validates port syntax (raises ValueError if malformed)
+    except ValueError:
+        return None
+    return parsed
+
+
+def https_host_matches(url: str, hosts: frozenset[str]) -> bool:
+    """Whether ``url`` is a well-formed, default-port ``https://`` URL whose host is exactly
+    (not a suffix/prefix/subdomain of) one of ``hosts``. The one shared predicate behind BOTH
+    of this codebase's host-allowlist checks — a backend's own native-asset-host check
+    (:data:`~tasklib.backends.linear._LINEAR_ASSET_HOSTS`) and the CLI-layer
+    ``trusted_attachment_hosts`` widening (``cli._is_trusted_attachment_host``).
+
+    review finding (round 4): these two calls used to be near-identical, independently
+    maintained copies (``safe_urlparse`` → scheme check → frozenset membership) — and they had
+    ALREADY drifted: the CLI-layer check rejected a non-default port (``:8443``), the native
+    check did not, so a hostile ticket's attachment URL could aim a REAL Linear API key at an
+    arbitrary port on ``uploads.linear.app`` (attachment urls are tracker-controlled data, same
+    threat model as everywhere else in this module). This is exactly the drift class
+    :func:`safe_urlparse`'s own docstring already exists to prevent for URL *parsing* — the
+    same discipline now applies to host *matching* too, in one place both callers share, so a
+    future asymmetry can't quietly reappear between them.
+
+    ``https`` and default-port (``None``/``443``) only, deliberately not parameterized: neither
+    current caller has a legitimate reason to trust a non-default port, and a caller that
+    someday does needs to make that a conscious, separately-reviewed decision, not inherit a
+    permissive default silently.
+    """
+    parsed = safe_urlparse(url)
+    if parsed is None or parsed.scheme != "https":
+        return False
+    if parsed.port not in (None, 443):
+        return False
+    return parsed.hostname in hosts
 
 
 # The read/parse-time failures that can happen AFTER ``urlopen`` already returned a 2xx status.
@@ -141,6 +203,33 @@ def request_json(
         raise HttpError(0, f"invalid URL for {method} {url}: {exc}") from exc
 
 
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def _same_origin(a: ParseResult, b: ParseResult) -> bool:
+    """Whether ``a`` and ``b`` are the same origin (host + effective port), tolerant of an
+    explicit default port and hostname case (review finding, GitHub PR #109 Codex pass):
+    comparing raw ``.netloc`` strings treats ``https://host:443/x`` and ``https://host/x`` —
+    or a hostname differing only in case — as different hosts, wrongly refusing a genuinely
+    same-origin redirect. ``.hostname`` is already lowercased by ``urllib.parse``.
+
+    Port comparison is skipped entirely when NEITHER side names an explicit port — this
+    preserves the pre-existing http-to-https same-host UPGRADE allowance (both sides have no
+    explicit port; their scheme DEFAULT ports genuinely differ, 80 vs 443, but that's not the
+    signal this function is checking — the caller's separate scheme-downgrade check is what
+    actually gates https/http transitions). Once EITHER side names an explicit port, both
+    ports are resolved to their effective value (explicit, or that URL's OWN scheme default)
+    and compared — this is what makes ``https://host:443`` match ``https://host``.
+    """
+    if a.hostname != b.hostname:
+        return False
+    if a.port is None and b.port is None:
+        return True
+    a_port = a.port if a.port is not None else _DEFAULT_PORTS.get(a.scheme)
+    b_port = b.port if b.port is not None else _DEFAULT_PORTS.get(b.scheme)
+    return a_port == b_port
+
+
 class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Refuses to follow a redirect to a different host, OR a scheme downgrade (https -> http),
     than the request that was actually made — used whenever the request carries a
@@ -150,9 +239,87 @@ class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
     header, including ``Authorization``, onto it either way — a same-host-only check misses the
     downgrade case)."""
 
+    def http_error_302(self, req, fp, code, msg, headers):  # noqa: N802 - stdlib override name
+        # review finding (round 4): the stdlib's OWN `HTTPRedirectHandler.http_error_302` reads
+        # the raw `Location`/`URI` header and calls `urlparse(newurl)` on it ITSELF, before ever
+        # calling `redirect_request` — verified against the actual installed stdlib source. A
+        # round-3 fix that only overrode `redirect_request` (validating there) was therefore
+        # DEAD CODE for a bracket-malformed Location: stdlib's own pre-`redirect_request`
+        # `urlparse()` call raises the uncaught `ValueError` first, before this class's guard
+        # ever runs — a genuinely broken fix that passing tests hid, because both tests drove
+        # `redirect_request` (or a stand-in exception) directly rather than the real
+        # `http_error_302` entry point. Pre-validate the raw header HERE, before delegating to
+        # `super()`, which is the actual first place this process sees server-controlled
+        # redirect data.
+        # review finding (round 5): stdlib selects the redirect target by HEADER PRESENCE
+        # (`if "location" in headers: ... elif "uri" in headers: ...`), not truthiness — a
+        # `headers.get("location") or headers.get("uri")` diverges from that for a PRESENT-BUT-
+        # EMPTY Location header (stdlib uses the empty location; the truthiness version would
+        # have fallen through to a URI header stdlib never actually acts on). Mirror stdlib's
+        # own selection exactly so this pre-validation always checks the SAME value `super()`
+        # is about to use.
+        if "location" in headers:
+            newurl = headers["location"]
+        elif "uri" in headers:
+            newurl = headers["uri"]
+        else:
+            newurl = None
+        # review finding (round 8): stdlib's OWN http_error_302 strips the header value
+        # (`newurl.strip()`, right after the selection above) before ever parsing it — mirror
+        # that too, not just the presence-based selection, so this pre-validation checks the
+        # EXACT value `super()` will actually urlparse (a leading-whitespace `Location` would
+        # otherwise parse here as a harmless relative path — scheme detection breaks on the
+        # leading space — while stdlib's stripped version could still be the malformed
+        # authority this guard exists to catch). Not reachable through a real HTTP response in
+        # practice (RFC 7230 header-value parsing already strips leading OWS before this code
+        # ever sees it — verified: Python's own `http.client`/`email` header parser does this),
+        # but a direct handler invocation (as this file's own tests do) has no such guarantee,
+        # and matching stdlib exactly is cheap and removes the discrepancy either way.
+        if newurl is not None:
+            newurl = newurl.strip()
+        if newurl is not None and safe_urlparse(newurl) is None:
+            raise urllib.error.HTTPError(
+                newurl,
+                code,
+                f"refused unparseable redirect Location from {req.full_url}: {newurl!r}",
+                headers,
+                fp,
+            )
+        return super().http_error_302(req, fp, code, msg, headers)
+
+    # review finding (round 4): the stdlib maps EVERY redirect status (301/302/303/307/308) onto
+    # the SAME `http_error_302` method via class-level aliasing (`http_error_301 =
+    # http_error_303 = ... = http_error_302`) — verified live. Overriding only `http_error_302`
+    # above would NOT cover a 301/303/307/308 response: Python attribute lookup for
+    # `self.http_error_301` on an instance of THIS subclass would still resolve to the PARENT
+    # class's original (unguarded) function object, since the parent's aliases were bound at
+    # the parent's own class-definition time, not re-derived from whatever a subclass later
+    # overrides. Re-alias them here, mirroring the stdlib's own pattern, or 3 of the 5 redirect
+    # codes would silently bypass every guard in this class.
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - stdlib override name
-        old, new = urlparse(req.full_url), urlparse(newurl)
-        if new.netloc != old.netloc or (old.scheme == "https" and new.scheme != "https"):
+        # By the time we get here, `http_error_302` above has already confirmed `newurl` parses
+        # cleanly (it's server-controlled data, re-validated defensively rather than trusted
+        # across the two methods).
+        new = safe_urlparse(newurl)
+        if new is None:
+            raise urllib.error.HTTPError(
+                newurl, code, f"refused unparseable redirect Location from {req.full_url}: {newurl!r}", headers, fp
+            )
+        # `_same_origin` touches `.port` on BOTH sides (review finding, GitHub PR #109 Codex
+        # pass) — `new`'s port was already validated above via `safe_urlparse`, but `old` was
+        # not: a plain `urlparse()` never touches `.port`, so this is the FIRST access on
+        # `old` this class ever makes (the pre-existing `.netloc` string compare it replaced
+        # never needed to). `req.full_url` is this process's own already-in-flight request,
+        # not attacker data, but validate it the same defensive way regardless — fail closed
+        # (refuse the redirect) rather than let a malformed port raise ValueError uncaught.
+        old = safe_urlparse(req.full_url)
+        if old is None:
+            raise urllib.error.HTTPError(
+                newurl, code, f"refused redirect from an unparseable original URL {req.full_url!r}", headers, fp
+            )
+        if not _same_origin(old, new) or (old.scheme == "https" and new.scheme != "https"):
             raise urllib.error.HTTPError(
                 newurl, code, f"refused unsafe redirect from {req.full_url} to {newurl}", headers, fp
             )
@@ -189,7 +356,7 @@ def request_bytes(
     ``HttpError``-only ``except`` clause and crashes the whole command instead of failing just
     the one request. The original motivating case was a tracker-controlled attachment url in
     :meth:`LinearBackend.fetch_attachment_bytes`; that call site is now guarded earlier, by
-    :func:`~tasklib.backends.linear._safe_urlparse` validating the port before this function is
+    :func:`safe_urlparse` validating the port before this function is
     ever reached — the live case today is the signed upload PUT url
     (:meth:`LinearBackend._upload_and_attach`), which is Linear's OWN API response, not
     something this process fully controls either. Wrapped as a clean, permanent
@@ -205,7 +372,7 @@ def request_bytes(
     review finding (round 5): ``urllib.request.Request(url, ...)`` itself raises a bare
     ``ValueError`` for a bracket-malformed authority at CONSTRUCTION time, same bug class as
     ``InvalidURL`` but a step earlier. This is the gap that made ``_upload_and_attach``'s signed
-    upload URL (Linear's OWN API response, not validated by ``_safe_urlparse`` before reaching
+    upload URL (Linear's OWN API response, not validated by ``safe_urlparse`` before reaching
     here) still crash raw on a bracket-malformed ``uploadUrl`` even after the ``InvalidURL`` fix
     above — caught in its own narrow ``try`` around just construction, not folded into the
     ``opener(...)`` exception handling below, so it doesn't widen to catch an unrelated
