@@ -293,8 +293,54 @@ def test_gate_prints_a_dedicated_message_for_below_minimum(capsys, _inject_fake)
     rc = main(["gate", created.id])
     out = capsys.readouterr().out
     assert rc == 1
-    assert "only 1 acceptance criteria" in out
+    assert "only 1 acceptance criterion" in out
     assert "--skip-acceptance" in out
+
+
+def test_gate_zero_criteria_with_min_zero_passes_without_claiming_proofs(capsys, monkeypatch, tmp_path, _inject_fake):
+    """GLM finding (round 4): a repo configured with `acceptance_min: 0` genuinely has nothing
+    to accept — "0 of 0 criteria checked with a proof" would assert proofs that don't exist.
+    `task gate` must say the gate passes because none are required, not that criteria are
+    "checked"."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/acme/widgets"],
+        check=True,
+    )
+    (repo / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\nenforce:\n  acceptance_min: 0\n",
+        encoding="utf-8",
+    )
+    created = _seed(_inject_fake, acceptance=[])
+    capsys.readouterr()
+    rc = main(["gate", created.id, "--cwd", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "does not require acceptance criteria" in out
+    assert "checked with a proof" not in out
+
+
+def test_accept_converts_an_ambiguous_backend_error_to_a_clean_refusal(capsys, monkeypatch, _inject_fake):
+    """GLM finding (round 4): `cmd_gate`/`cmd_mark_shipped` already convert a mid-read
+    `AmbiguousBackendError` into a clean `_UserError` (exit 2); `cmd_accept` used to only catch
+    `BackendError`, so the same failure surfaced as an unhandled traceback."""
+    from tasklib.backends import AmbiguousBackendError
+
+    created = _seed(_inject_fake)
+
+    def raise_ambiguous(ticket_id):
+        raise AmbiguousBackendError("connection dropped mid-read")
+
+    monkeypatch.setattr(_inject_fake, "get", raise_ambiguous)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    rc = main(["accept", created.id])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "connection dropped mid-read" in out
 
 
 def test_gate_on_cancelled_ticket_passes_with_a_note(capsys, _inject_fake):
@@ -525,7 +571,7 @@ def test_accept_reports_failure_when_proven_but_below_minimum(capsys, monkeypatc
     rc = main(["accept", created.id])
     out = capsys.readouterr().out
     assert rc == 1
-    assert "not accepted — only 1 acceptance criteria" in out
+    assert "not accepted — only 1 acceptance criterion" in out
     assert "--acceptance" in out and "--skip-acceptance" in out
 
 

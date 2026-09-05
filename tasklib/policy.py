@@ -301,6 +301,17 @@ def check(
     return apply_skips(raw, ticket, warnings)
 
 
+def gate_is_skipped(ticket: Ticket, gate: str) -> bool:
+    """Whether a recorded skip waives ``gate`` — the ONE predicate every consumer of
+    ``ticket.skips`` must use (:func:`apply_skips`, and :func:`acceptance_gate` for the
+    independently-skippable minimum-count gate), so a skip can never be honored by one and not
+    the other (review finding, task-cli PR#118 round 4: an earlier version of `acceptance_gate`
+    re-implemented this as a bare ``gate not in ticket.skips`` inline, which would silently
+    diverge from `apply_skips` the moment either copy grew a new rule — e.g. requiring a
+    non-empty reason)."""
+    return gate in ticket.skips and gate not in NON_SKIPPABLE_GATES
+
+
 def apply_skips(raw: list[Violation], ticket: Ticket, warnings: list[Violation] | None = None) -> PolicyResult:
     """Partition raw violations into still-failing vs. (auditably) skipped ones.
 
@@ -312,7 +323,7 @@ def apply_skips(raw: list[Violation], ticket: Ticket, warnings: list[Violation] 
     """
     result = PolicyResult(warnings=list(warnings) if warnings else [])
     for v in raw:
-        if v.gate in ticket.skips and v.gate not in NON_SKIPPABLE_GATES:
+        if gate_is_skipped(ticket, v.gate):
             if v.gate not in result.skipped:
                 result.skipped.append(v.gate)
         else:
@@ -792,7 +803,7 @@ def acceptance_gate(ticket: Ticket, cfg: EnforceConfig) -> GateReport:
     # legitimately let close). `no_criteria` below is now purely INFORMATIONAL — which refusal
     # message to show — never a second, independent way to fail the gate.
     min_violation = acceptance_min_violation(ticket, cfg)
-    below_minimum = min_violation is not None and GATE_ACCEPTANCE not in ticket.skips
+    below_minimum = min_violation is not None and not gate_is_skipped(ticket, GATE_ACCEPTANCE)
     no_criteria = not ticket.acceptance
     return GateReport(
         ok=(violation is None and not below_minimum) or bool(reason),

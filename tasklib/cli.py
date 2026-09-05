@@ -714,6 +714,17 @@ def _backend_for_id(cfg, ticket_id: str):
     return _backend(_config_for_id(cfg, ticket_id))
 
 
+def _routing_for_id(cfg, ticket_id: str):
+    """Resolve BOTH the backend and the owning project's config for ``ticket_id`` in ONE
+    routing pass — shared by every command that needs both (`cmd_gate`, `cmd_accept`,
+    `cmd_mark_shipped`), so a cross-project ticket's policy is always read from the SAME
+    config the backend was built from, and routing is never derived twice per invocation
+    (review finding, task-cli PR#118 rounds 3-4: each of these three commands had
+    independently reinvented this pairing, one of them re-resolving routing a second time)."""
+    pcfg = _config_for_id(cfg, ticket_id)
+    return _backend(pcfg), pcfg
+
+
 def _route_id_to_project(ticket_id: str, projects: list):
     """Pick the registered project that owns ``ticket_id``, or ``None`` if ambiguous/none."""
     tid = ticket_id.strip()
@@ -3898,14 +3909,14 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     pr_url, commit_sha = _parse_mark_shipped_flags(args)
     cfg = _load(args)
 
-    # Resolve routing once — `pcfg` feeds both the backend and the acceptance-gate read below.
-    pcfg = _config_for_id(cfg, args.id)
-    backend = _backend(pcfg)
-    from .backends import BackendError
+    # Resolve routing once — `pcfg` feeds both the backend and the acceptance-gate read below
+    # (same shared helper `cmd_gate`/`cmd_accept` use — task-cli PR#118 round 4).
+    backend, pcfg = _routing_for_id(cfg, args.id)
+    from .backends import AmbiguousBackendError, BackendError
 
     try:
         ticket = backend.get(args.id)
-    except BackendError as exc:
+    except (BackendError, AmbiguousBackendError) as exc:
         raise _UserError(str(exc)) from exc
 
     if ticket.state is State.CANCELLED:
@@ -4002,7 +4013,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
     id, backend error). ``--json`` prints the same shape on every 0/1 path — see
     `_gate_payload` for the contract ship.sh consumes."""
     cfg = _load(args)
-    backend = _backend_for_id(cfg, args.id)
+    backend, pcfg = _routing_for_id(cfg, args.id)
     from .backends import AmbiguousBackendError, BackendError
     from .policy import acceptance_gate
 
@@ -4011,9 +4022,9 @@ def cmd_gate(args: argparse.Namespace) -> int:
     except (BackendError, AmbiguousBackendError) as exc:
         raise _UserError(str(exc)) from exc
 
-    # The gate is the OWNING project's policy (`_config_for_id`), not the cwd's: `gh ship`
+    # The gate is the OWNING project's policy (`pcfg`), not necessarily the cwd's: `gh ship`
     # runs this in the code repo while the ticket may live in another project.
-    report = acceptance_gate(ticket, _enforce_config(_config_for_id(cfg, args.id)))
+    report = acceptance_gate(ticket, _enforce_config(pcfg))
     cancelled = ticket.state is State.CANCELLED
     ok = report.ok or cancelled
     if args.json:
@@ -4070,13 +4081,21 @@ def _gate_lines(ticket: Ticket, report, ok: bool, cancelled: bool) -> list[str]:
         lines.append(_dim(f"  reason: {report.post_merge_reason}"))
     elif ok and not report.gate_enabled:
         lines.append(_ok(f"{ticket.id}: the acceptance-checked gate is disabled in this repo's config — gate passes."))
+    elif ok and report.no_criteria:
+        # `ok` here means the MINIMUM-count gate itself allows zero (acceptance_criteria:
+        # false, acceptance_min: 0, or a recorded --skip-acceptance) — "0 of 0 criteria checked
+        # with a proof" would assert proofs that don't exist (review finding, task-cli PR#118
+        # round 4, GLM). There is genuinely nothing to accept, and this repo's config says
+        # that's fine.
+        lines.append(_ok(f"{ticket.id}: gate passes — this repo does not require acceptance criteria (there are none to accept)."))
     elif ok:
         lines.append(_ok(f"{ticket.id}: accepted — {total} of {total} criteria checked with a proof."))
     elif report.no_criteria:
         lines.append(_err(f"{ticket.id}: not accepted — the ticket has no acceptance criteria, so nothing can be proven."))
         lines.append(_dim(f'  fix: task change {ticket.id} --acceptance "<criterion>" (repeatable), then accept them'))
     elif report.below_minimum:
-        lines.append(_err(f"{ticket.id}: not accepted — only {total} acceptance criteria (the minimum is enforced on close too)."))
+        noun = "criterion" if total == 1 else "criteria"
+        lines.append(_err(f"{ticket.id}: not accepted — only {total} acceptance {noun} (the minimum is enforced on close too)."))
         lines.append(_dim(f'  fix: task change {ticket.id} --acceptance "<criterion>" (repeatable), or --skip-acceptance "<reason>" if genuinely N/A'))
     else:
         lines.append(_err(f"{ticket.id}: not accepted — {gaps} of {total} criteria still open."))
@@ -4101,17 +4120,16 @@ def cmd_accept(args: argparse.Namespace) -> int:
         print(_accept_usage(args.id))
         return 2
     cfg = _load(args)
-    # Resolve routing once — pcfg feeds both the backend and every acceptance-gate read below
-    # (review finding, task-cli PR#118 round 3: `cmd_gate` resolves the OWNING project's config,
-    # not the cwd's, since `gh ship` runs in the code repo while the ticket may live elsewhere —
-    # `cmd_accept`'s own completion check must agree with `task gate`, so it needs the SAME cfg).
-    pcfg = _config_for_id(cfg, args.id)
-    backend = _backend(pcfg)
-    from .backends import BackendError
+    # Resolve routing once — pcfg feeds both the backend and every acceptance-gate read below,
+    # matching `cmd_gate` exactly (review finding, task-cli PR#118 rounds 3-4): `gh ship` runs
+    # `task gate` in the code repo while the ticket may live in another project, so `cmd_accept`'s
+    # own completion check must read the SAME owning-project config `task gate` would.
+    backend, pcfg = _routing_for_id(cfg, args.id)
+    from .backends import AmbiguousBackendError, BackendError
 
     try:
         ticket = backend.get(args.id)
-    except BackendError as exc:
+    except (BackendError, AmbiguousBackendError) as exc:
         raise _UserError(str(exc)) from exc
 
     pending = ticket.unmet_criteria()
