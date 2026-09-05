@@ -4101,7 +4101,12 @@ def cmd_accept(args: argparse.Namespace) -> int:
         print(_accept_usage(args.id))
         return 2
     cfg = _load(args)
-    backend = _backend_for_id(cfg, args.id)
+    # Resolve routing once — pcfg feeds both the backend and every acceptance-gate read below
+    # (review finding, task-cli PR#118 round 3: `cmd_gate` resolves the OWNING project's config,
+    # not the cwd's, since `gh ship` runs in the code repo while the ticket may live elsewhere —
+    # `cmd_accept`'s own completion check must agree with `task gate`, so it needs the SAME cfg).
+    pcfg = _config_for_id(cfg, args.id)
+    backend = _backend(pcfg)
     from .backends import BackendError
 
     try:
@@ -4111,7 +4116,7 @@ def cmd_accept(args: argparse.Namespace) -> int:
 
     pending = ticket.unmet_criteria()
     if not pending:
-        ok, msg = _accept_completion_message(ticket, cfg)
+        ok, msg = _accept_completion_message(ticket, pcfg)
         print(msg)
         return 0 if ok else 1
     print(f"{ticket.id}: {len(pending)} criteria to accept. Enter a proof path/URL, "
@@ -4134,31 +4139,29 @@ def cmd_accept(args: argparse.Namespace) -> int:
         _log_checked(ticket, [idx], forced=bool(force_reason))
         print(_ok(f"  checked ({'forced: ' + force_reason if force_reason else 'proof ' + crit.proof})"))
     _record_session_touch(cfg, backend, ticket)
-    ok, msg = _accept_completion_message(ticket, cfg)
+    ok, msg = _accept_completion_message(ticket, pcfg)
     print(msg)
     return 0 if ok else 1
 
 
 def _accept_completion_message(ticket: Ticket, cfg) -> tuple[bool, str]:
-    """Whether `task accept` should report success, and the line to print — consulting the
-    FULL `task gate` verdict (review finding, task-cli PR#118 round 2: an earlier version only
-    checked `ticket.unmet_criteria()`, so a ticket with every EXISTING criterion proven but
-    below the configured minimum count reported "accepted" / exit 0 while `task gate` still
-    refused it). Used at both the early "nothing pending" return and the final one, so the two
-    paths can never give a different verdict than `task gate` would."""
+    """Whether `task accept` should report success, and the lines to print — reusing
+    `_gate_lines` (`task gate`'s OWN message builder), not a second, bespoke message (review
+    finding, task-cli PR#118 round 3, Opus): a hand-written "every criterion is checked with a
+    proof" string collapsed the opt-out/disabled-gate/below-minimum cases into one wording,
+    which could assert a falsehood (e.g. print "checked with a proof" for a ticket accepted
+    only via the post-merge opt-out, with criteria still unchecked). Reusing `_gate_lines`
+    means this can never drift from what `task gate {id}` itself would print.
+
+    ``cfg`` must already be the OWNING project's config (`_config_for_id`, resolved ONCE by the
+    caller — `cmd_accept` — and reused here), matching what `cmd_gate` reads, so the two can
+    never disagree about a cross-project ticket's `acceptance_min`."""
     from .policy import acceptance_gate
 
     report = acceptance_gate(ticket, _enforce_config(cfg))
-    if report.ok:
-        return True, _ok(f"{ticket.id}: accepted — every criterion is checked with a proof (`task gate {ticket.id}` passes).")
-    if report.below_minimum:
-        return False, _warn(
-            f"{ticket.id}: every existing criterion is proven, but `task gate {ticket.id}` still refuses — "
-            f"too few for this repo's configured minimum. Add more: task change {ticket.id} "
-            f'--acceptance "<criterion>" (repeatable), or --skip-acceptance "<reason>" if genuinely N/A.'
-        )
-    remaining = len(ticket.unmet_criteria())
-    return False, _warn(f"{ticket.id}: {remaining} left — re-run `task accept {ticket.id}`, then `task gate {ticket.id}`.")
+    cancelled = ticket.state is State.CANCELLED
+    ok = report.ok or cancelled
+    return ok, "\n".join(_gate_lines(ticket, report, ok, cancelled))
 
 
 def _prompt_proof(idx: int, crit: Criterion) -> tuple[str, str] | None:

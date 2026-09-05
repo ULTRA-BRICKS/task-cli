@@ -438,7 +438,8 @@ def test_accept_skips_on_empty_answer_and_persists_each_step(capsys, monkeypatch
     assert rc == 1, "skipped criteria leave the ticket unaccepted"
     stored = _inject_fake.get(created.id)
     assert stored.acceptance[0].checked and not stored.acceptance[1].checked
-    assert "2 left" in out and "task gate" in out
+    assert "not accepted — 2 of 3 criteria still open" in out
+    assert "task accept #1" in out and "task check #1" in out
 
 
 def test_accept_reprompts_on_a_missing_local_file(capsys, monkeypatch, tmp_path, _inject_fake):
@@ -457,6 +458,49 @@ def test_accept_reprompts_on_a_missing_local_file(capsys, monkeypatch, tmp_path,
     assert stored.acceptance[1].proof == "https://example.com/proof.png"
 
 
+def test_accept_reports_the_post_merge_opt_out_honestly(capsys, monkeypatch, _inject_fake):
+    """Opus finding (task-cli PR#118 round 3): the completion message used to hard-code "every
+    criterion is checked with a proof" whenever `report.ok` was True — but `ok` is ALSO True on
+    a post-merge opt-out with criteria still unchecked. Skipping every prompt must report the
+    opt-out honestly (matching `task gate`'s own wording), never claim proofs that don't exist."""
+    created = _seed(_inject_fake)
+    main(["change", created.id, "--post-merge-acceptance", "the release is published after merge"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")  # skip every criterion
+    capsys.readouterr()
+    rc = main(["accept", created.id])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "post-merge acceptance recorded — gate passes" in out
+    assert "checked with a proof" not in out
+    assert not any(c.checked for c in _inject_fake.get(created.id).acceptance)
+
+
+def test_accept_uses_the_ticket_owning_projects_config_like_task_gate(monkeypatch, _inject_fake):
+    """Opus finding (task-cli PR#118 round 3): `cmd_gate` deliberately resolves the OWNING
+    project's config (`_config_for_id`), not the cwd's, because `gh ship` runs in the code repo
+    while the ticket may live elsewhere. The accept completion check must do the same, or a
+    cross-project ticket could get "accepted" here against a laxer config than `task gate`
+    would actually enforce right after."""
+    import tasklib.cli as cli_mod
+
+    calls = []
+    real = cli_mod._config_for_id
+
+    def spy(cfg, ticket_id):
+        calls.append(ticket_id)
+        return real(cfg, ticket_id)
+
+    monkeypatch.setattr(cli_mod, "_config_for_id", spy)
+    created = _seed(_inject_fake)
+    main(["check", created.id, "--all", "--proof", "shot.png"])
+    calls.clear()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    rc = main(["accept", created.id])
+    assert rc == 0
+    assert calls == [created.id], f"expected routing resolved exactly once, got {calls}"
+
+
 def test_accept_on_fully_accepted_ticket_is_a_noop(capsys, monkeypatch, _inject_fake):
     created = _seed(_inject_fake)
     main(["check", created.id, "--all", "--proof", "shot.png"])
@@ -464,10 +508,10 @@ def test_accept_on_fully_accepted_ticket_is_a_noop(capsys, monkeypatch, _inject_
     capsys.readouterr()
     rc = main(["accept", created.id])
     assert rc == 0
-    # review finding (task-cli PR#118 round 2): both the early "nothing pending" return and the
-    # final return now share ONE message, derived from the full `task gate` verdict — not a
-    # bespoke "nothing left" string — so the two paths can never disagree with `task gate`.
-    assert "accepted — every criterion is checked with a proof" in capsys.readouterr().out
+    # review finding (task-cli PR#118 round 2/3): both the early "nothing pending" return and
+    # the final return share ONE message — `_gate_lines`, `task gate`'s OWN message builder —
+    # so `task accept`'s completion text can never drift from what `task gate` itself prints.
+    assert "accepted — 3 of 3 criteria checked with a proof" in capsys.readouterr().out
 
 
 def test_accept_reports_failure_when_proven_but_below_minimum(capsys, monkeypatch, tmp_path, _inject_fake):
@@ -481,8 +525,8 @@ def test_accept_reports_failure_when_proven_but_below_minimum(capsys, monkeypatc
     rc = main(["accept", created.id])
     out = capsys.readouterr().out
     assert rc == 1
-    assert "task gate #1` still refuses" in out
-    assert "--acceptance" in out
+    assert "not accepted — only 1 acceptance criteria" in out
+    assert "--acceptance" in out and "--skip-acceptance" in out
 
 
 # ── the skill text documents the pre-merge contract ─────────────────────────────────
