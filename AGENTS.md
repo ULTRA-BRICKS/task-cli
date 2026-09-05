@@ -47,6 +47,15 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   genuinely impossible, recorded on the `Criterion`). Acceptance criteria are `Criterion`
   objects (text + `checked` + `proof`/`force_reason`), round-tripped by `render.py`. Never
   weaken a gate silently; if a gate is wrong, change `policy.py` + add a test.
+- **`task gate` is the same predicate as the close gate, exposed pre-merge.**
+  `policy.acceptance_gate` wraps `unchecked_criteria_violation` (the call `check_done` makes)
+  and adds only the recorded `post-merge-acceptance` opt-out (`POST_MERGE_ACCEPTANCE`, stored in
+  `Ticket.skips` but never matched by `apply_skips`, so it cannot waive `task done`). Never fork
+  the criterion predicate — `Ticket.unmet_criteria()` is its single home. The `--json` field
+  names (`ok`, `unchecked`, `proofless`, `post_merge_acceptance`, `gate_enabled`, `criteria`,
+  `state`, `id`) are a contract consumed by agent-tools' `ci/ship/ship.sh`; changing them is a
+  two-repo change. PR bodies in this ecosystem say `Refs #N`, never `Closes`/`Fixes` — the
+  magic-close keywords close tickets behind these gates.
 - **`render.py` is the single source of truth for the ticket body.** The §5 section template
   (fixed order) is the contract; fields are authoritative, the body is derived. Do not
   hand-format a body anywhere else. `validate_format()` is what the formatting gate calls.

@@ -47,6 +47,12 @@ task gantt        [--all] [--json] # read-only due-date timeline (Gantt) — see
 task read <id>     (alias: view)   # the full ticket — every section (works outside a repo)
 task find "<query>"                # search title+body (cross-project when outside a repo)
 task check <id> <n|text> --proof p # tick an acceptance criterion (needs a visual proof)
+task check <id> 1 2 3 --proof a --proof b --proof c  # several at once, one proof each (in order)
+task check <id> --all --proof p    # every criterion, one shared proof
+task accept <id>                   # walk the unaccepted criteria interactively, asking for a proof each
+task gate <id> [--json]            # read-only PRE-MERGE verdict (what `gh ship` runs) — exit 0 only when
+#   every criterion is checked WITH a proof; 1 lists what is still owed; 2 = could not evaluate
+task change <id> --post-merge-acceptance "<reason>"  # opt-out: acceptance is inherently post-merge
 task mark-shipped <id> --pr <url> [--commit <sha>]  # record a merged PR; NEVER closes the
 #   ticket (the `gh ship` post-merge hook — see agent-tools' ci/ship/ship.sh) — moves
 #   TODO/IN_PROGRESS to in-review, posts a durable comment, and prints what's still needed
@@ -202,6 +208,74 @@ task check <id> <selector> --force "<reason>"  # tick it when a proof is genuine
 `<selector>` is a 1-based index or a text substring of the criterion. The checked state and
 the proof live in the body (`- [x] … — proof: ![proof](path)`), so the close gate can see what
 is and isn't done.
+
+Several criteria in one call: `task check <id> 1 3 --proof a.png --proof c.png` takes one
+proof per selector, in order; `task check <id> --all --proof shot.png` ticks every criterion
+with one shared proof (or `--all` with exactly one `--proof` per criterion). `--force
+"<reason>"` applies to every selected criterion. The single-selector form keeps its original
+contract: the first `--proof` backs the box, further ones are attached as implementation
+screenshots. `task accept <id>` is the interactive equivalent: it walks the criteria that
+still block the gate, asks for a proof path/URL (or `force: <reason>`) for each, and persists
+every answer immediately; without a TTY it prints the headless commands instead.
+
+### The pre-merge gate — `task gate` (and why PR bodies say `Refs`, never `Closes`)
+
+task-cli's close gates only run inside `task done`. GitHub's magic-close keywords (`Closes
+#N`, `Fixes #N`, `Resolves #N`) close an issue the instant the linked PR merges — behind
+task-cli's back, so a Done ticket ends up with empty checkboxes (Linear's "PR merged"
+automation used to do the same; for the HYP team it now moves the ticket to **In Review**,
+which is the normal "merged, awaiting acceptance" state — `task mark-shipped` leaves an
+In Review ticket where it is). Done is reached only through acceptance: `task done` after
+every criterion is checked with a proof. `task gate` is the read-only verdict `gh ship`
+(agent-tools `ci/ship/ship.sh`) runs BEFORE merging, so a PR cannot merge while its ticket is
+unaccepted:
+
+```
+task gate <id>            # exit 0 = accepted; 1 = not accepted (lists the gaps); 2 = could not evaluate
+task gate <id> --json     # the machine contract below
+```
+
+The verdict is exactly TWO on-done gates: `acceptance-checked` (`policy.acceptance_gate` calls
+the same `unchecked_criteria_violation` `task done` does — never a re-derivation) and the
+`acceptance-criteria` MINIMUM count (`acceptance_min`, default 2 — the same predicate every
+`task new`/`task done` already enforces), plus one merge-only concession: a ticket whose
+acceptance is inherently post-merge (a release publish, a deploy the merge triggers) records
+`task change <id> --post-merge-acceptance "<reason>"` (stored under `## Skipped gates` as
+`post-merge-acceptance: <reason>`); the gate then passes and reports the reason. That opt-out
+never waives `task done` — the ticket still needs real proofs, just after the merge. A
+cancelled ticket passes; a ticket with zero criteria fails (nothing to accept is not
+acceptance); a ticket below the minimum fails too — even with every criterion it DOES have
+fully proven, since `task done` would still refuse it on count alone (`--skip-acceptance
+"<reason>"` waives this one specifically, same as at create); `enforce.acceptance_checked:
+false` alone does NOT bypass the minimum-count gate — that needs `acceptance_criteria: false`
+too (or `acceptance_min: 0`).
+
+`--json` (exit 0 and 1 print the same shape; exit 2 prints `error: …`, not JSON):
+
+```json
+{
+  "id": "HYP-1440", "ok": false, "state": "done", "gate_enabled": true,
+  "post_merge_acceptance": null,          // or the recorded reason (string)
+  "criteria": 3,                          // total count; 0 => refused
+  "below_minimum": false,                 // true when criteria < acceptance_min and not skipped
+  "unchecked": [{"index": 3, "text": "survives a restart"}],
+  "proofless": [{"index": 2, "text": "handles the empty case"}]   // checked without a proof/force reason
+}
+```
+
+`index` is the 1-based position in the full criteria list — the number `task check <id> <n>`
+takes. `unchecked`/`proofless` are always populated, even when an opt-out makes `ok` true, so
+the shipper sees what is still owed — but a `below_minimum` refusal can have BOTH arrays
+empty (e.g. one fully-proven criterion below a minimum of two): a consumer must check
+`below_minimum` too, not just the two gap arrays, to explain every refusal. Consumers key off
+`ok` for the verdict; the other fields are for the message. Field names are stable
+(agent-tools' ship.sh depends on them; the same contract is documented in its
+`ci/ship/README.md`).
+
+**PR bodies must say `Refs #N` / `Refs HYP-N` — never `Closes`/`Fixes`/`Resolves`** (or their
+-s/-d forms) before an issue or ticket reference. `Refs` links the PR to the ticket without
+closing it; the ticket closes only through `task done` after acceptance. `gh ship` refuses a
+PR whose title or body carries a magic-close keyword.
 
 ### Upgrading to 0.6.0 — the close gates are stricter
 
