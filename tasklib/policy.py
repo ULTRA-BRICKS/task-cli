@@ -77,6 +77,20 @@ GATE_LINKS_URL = "links-url"
 # being one.
 GATE_DUPLICATE = "duplicate"
 
+# NOT a content gate `check()`/`Phase` ever evaluates, for the same structural reason as
+# `GATE_DUPLICATE`: deciding it needs I/O (was this ticket read recently? — a local marker-file
+# lookup, `read_tracker.is_fresh`), and this module does no I/O by design (module docstring). The
+# gate itself is evaluated in `cli.py` (`_read_before_edit_violation`), which builds a `Violation`
+# this module's `apply_skips`/`_report_and_die` still render through. UNLIKE `GATE_DUPLICATE`
+# (which has no real `--skip-` flag — nobody types `--skip-duplicate`), this gate DOES have one
+# (`--skip-read-before-edit`, wired via `cli._SKIP_FLAGS`) — so it IS listed in `ALL_GATES` and
+# `normalize_skip_gate`'s aliases below (review finding: omitting a gate with a real skip flag
+# from the "valid gates" list is a latent trap for a future `normalize_skip_gate` caller, even
+# though nothing routes through it today). Only `cmd_change`'s `--what` edit is gated (task-
+# cli#119's scope is the ticket's core description, not every prose field); see
+# `EnforceConfig.read_before_edit` for the config on/off switch.
+GATE_READ_BEFORE_EDIT = "read-before-edit"
+
 # The minimum number of acceptance criteria a ticket must declare (rule: a real ticket has
 # more than one provable outcome). Overridable via `enforce.acceptance_min`.
 DEFAULT_ACCEPTANCE_MIN = 2
@@ -108,6 +122,7 @@ ALL_GATES: tuple[str, ...] = (
     GATE_ACCEPTANCE_CHECKED,
     GATE_MSGREF_TITLE,
     GATE_MSGREF_QUOTE,
+    GATE_READ_BEFORE_EDIT,
 )
 
 
@@ -159,6 +174,7 @@ class EnforceConfig:
     msgref_title: bool = True  # refuse a tg#<id> reference in the title (task 6109)
     msgref_quote: bool = True  # refuse a body tg#<id> whose quote is missing yet resolvable (tg#9161)
     links_url: bool = True  # refuse a non-URL value in the Links section (tg#9179)
+    read_before_edit: bool = True  # refuse `change --what` without a recent `read` (task-cli#119)
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "EnforceConfig":
@@ -208,6 +224,7 @@ class EnforceConfig:
             msgref_title=_on("msgref_title"),
             msgref_quote=_on("msgref_quote"),
             links_url=_on("links_url"),
+            read_before_edit=_on("read_before_edit"),
         )
 
 
@@ -856,6 +873,7 @@ def normalize_skip_gate(name: str) -> str:
         "msgref-quote": GATE_MSGREF_QUOTE,
         "links-url": GATE_LINKS_URL,
         "link-url": GATE_LINKS_URL,
+        "read-before-edit": GATE_READ_BEFORE_EDIT,
     }
     if norm in aliases:
         return aliases[norm]

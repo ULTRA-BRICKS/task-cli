@@ -47,6 +47,26 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   genuinely impossible, recorded on the `Criterion`). Acceptance criteria are `Criterion`
   objects (text + `checked` + `proof`/`force_reason`), round-tripped by `render.py`. Never
   weaken a gate silently; if a gate is wrong, change `policy.py` + add a test.
+- **`read-before-edit` gates `change --what` on a recent `task read` (task-cli#119).** It refuses
+  to overwrite a ticket's `what` (its core description) unless THIS session ran `task read`/
+  `view` on it (or just created it, or itself just wrote `--what` on a prior edit) within a
+  bounded TTL — see `tasklib/read_tracker.py`'s module docstring for the full design: why the
+  marker is scoped per (session id, backend coordinate, ticket id) rather than a machine-wide
+  "did anyone look" flag, the 30-minute TTL's rationale, what the marker does and doesn't prove,
+  and why a failed marker-store read must refuse the edit (fail closed) rather than allow it. A
+  metadata-only edit (`--due`/`--label`/…, no `--what`) is exempt from the gate AND deliberately
+  never mints a fresh marker either (`cmd_change` gates the post-edit `_mark_ticket_read` call on
+  `args.what` specifically) — recording one unconditionally would let a metadata edit followed by
+  an unrelated blind `--what` edit, both inside the TTL, bypass the gate entirely (review
+  finding, task-cli#119). Its waiver (`--skip-read-before-edit "<reason>"`) never lets a
+  PERSISTED `ticket.skips` entry from a past command silently waive a LATER, still-unread edit —
+  unlike every other `--skip-<gate>` here (`_enforce_edit_or_die` in `cli.py`), which treats
+  `ticket.skips` as a permanent waiver. It is not, however, quite "this command only" in an
+  absolute sense: a WAIVED edit that successfully sets `--what` still refreshes the marker (the
+  session now knows the content it just wrote), so a further `--what` edit from the SAME session
+  within the TTL needs no flag of its own — see the module docstring's "one direct consequence"
+  note for the precise distinction from the persisted-skip case this gate actually guards
+  against.
 - **`task gate` is the same predicate as the close gate, exposed pre-merge.**
   `policy.acceptance_gate` wraps `unchecked_criteria_violation` (the call `check_done` makes)
   and `acceptance_min_violation` (the minimum-count gate `check` also enforces at close — a

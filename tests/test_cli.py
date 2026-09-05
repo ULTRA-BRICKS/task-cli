@@ -2419,6 +2419,361 @@ def test_change_not_touching_title_does_not_trigger_the_title_gate(_inject_fake)
     assert rc == 0
 
 
+# ── read-before-edit gate (task-cli#119) ────────────────────────────────────────────
+
+
+def _clear_read_markers():
+    """Wipe the read-tracker marker store between commands, to simulate "never actually read".
+
+    Safety net, not just a documented convention: every review round on task-cli#119 has
+    (rightly) asked whether this can rmtree the developer's REAL ``~/.local/state/task-cli/
+    reads`` — it can't, because the module-autouse ``_inject_fake`` fixture depends on
+    ``isolated_state``, which redirects ``XDG_STATE_HOME``/``HOME`` to a pytest ``tmp_path``
+    before any test body runs (confirmed: the real dir does not exist after a full suite run).
+    But "trust the fixture chain" isn't provable by READING a diff — a static reviewer has no
+    way to execute the suite and check. Assert containment under the system temp dir instead
+    (the same root pytest's own ``tmp_path`` always resolves under), so a regression in that
+    fixture chain fails LOUD right here instead of silently deleting real data, and so this
+    guarantee is visible in the code itself rather than only in a report.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from tasklib.read_tracker import state_dir
+
+    path = state_dir()
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    # `is_relative_to` (not `startswith` on the string form, review finding, task-cli#119): a
+    # sibling directory like `/tmp-evil` also satisfies a naive `/tmp` string prefix, which
+    # would defeat the whole point of this guard.
+    assert path.resolve().is_relative_to(tmp_root), (
+        f"refusing to rmtree {path}: not under the system temp dir ({tmp_root}) — "
+        "XDG_STATE_HOME/HOME isolation may not be active"
+    )
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def test_change_what_blocked_when_never_read(capsys, _inject_fake):
+    main(_create_argv())
+    capsys.readouterr()
+    _clear_read_markers()  # this session's own create-marker doesn't count as a real read here
+    rc = main(["change", "#1", "--what", "a blind overwrite"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "read-before-edit" in out
+
+
+def test_change_what_succeeds_after_read(_inject_fake):
+    main(_create_argv())
+    _clear_read_markers()
+    rc = main(["read", "#1"])
+    assert rc == 0
+    rc = main(["change", "#1", "--what", "an informed edit"])
+    assert rc == 0
+
+
+def test_change_what_succeeds_after_view_alias(_inject_fake):
+    main(_create_argv())
+    _clear_read_markers()
+    assert main(["view", "#1"]) == 0
+    assert main(["change", "#1", "--what", "an informed edit"]) == 0
+
+
+def test_create_then_immediate_change_what_succeeds(_inject_fake):
+    # the ordinary create-then-refine workflow: `task new` counts as reading the ticket it just
+    # wrote, so an immediate `change --what` is never blocked as a blind overwrite.
+    main(_create_argv())
+    rc = main(["change", "#1", "--what", "refining right after create"])
+    assert rc == 0
+
+
+def test_change_what_success_refreshes_the_read_marker_for_the_next_edit(
+    _inject_fake, monkeypatch
+):
+    # task-cli#119 review finding: a session that successfully edited --what has, by
+    # construction, just seen the ticket's new current content — the NEXT edit must not treat
+    # it as blind just because the ORIGINAL `task read`/`create` has since aged out of the TTL.
+    import tasklib.read_tracker as read_tracker
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(read_tracker.time, "time", lambda: now[0])
+
+    main(_create_argv())  # marks a read at now[0]
+    now[0] += read_tracker.DEFAULT_TTL_S - 60  # still fresh relative to create's own mark
+    assert main(["change", "#1", "--what", "first refinement"]) == 0
+    # advance PAST the TTL window measured from the ORIGINAL create-time mark, but well within
+    # the window measured from the successful edit just above (which must have refreshed it).
+    now[0] += read_tracker.DEFAULT_TTL_S - 60
+    assert main(["change", "#1", "--what", "second refinement"]) == 0
+
+
+def test_change_what_waived_edit_also_refreshes_the_read_marker(_inject_fake, monkeypatch):
+    # task-cli#119 review finding: the "successful edit refreshes the marker"
+    # behavior is documented (AGENTS.md, read_tracker's module docstring) to apply whether the
+    # edit passed the gate outright OR was waived with --skip-read-before-edit — but the
+    # existing refresh test above only exercises the non-waived path, and the persisted-skip
+    # regression test deliberately clears markers right after its waived edit, so a regression
+    # that stopped refreshing after a WAIVED edit specifically would pass the whole suite while
+    # contradicting the docs. Pin it directly: a waived edit at T0, then an UNFLAGGED edit past
+    # the marker's own TTL window from T0, must still pass — never read, but the session
+    # legitimately knows the content because it just wrote it via the waived edit.
+    import tasklib.read_tracker as read_tracker
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(read_tracker.time, "time", lambda: now[0])
+
+    main(_create_argv())
+    _clear_read_markers()  # never actually read
+    assert (
+        main(
+            [
+                "change",
+                "#1",
+                "--what",
+                "a waived edit",
+                "--skip-read-before-edit",
+                "trusted without a read",
+            ]
+        )
+        == 0
+    )
+    now[0] += read_tracker.DEFAULT_TTL_S - 60  # past the ORIGINAL (nonexistent) read's window
+    # no --skip flag this time — must pass purely on the waived edit's own refreshed marker.
+    assert main(["change", "#1", "--what", "an unflagged follow-up refinement"]) == 0
+
+
+def test_read_json_output_also_marks_the_ticket_read(_inject_fake):
+    # task-cli#119 review finding: every other read-gate test exercises the
+    # human-output branch of cmd_read; the --json branch has its own separate
+    # `_mark_ticket_read` call site (cli.py's `if args.json:` branch) that was never directly
+    # exercised by a test.
+    main(_create_argv())
+    _clear_read_markers()
+    assert main(["read", "#1", "--json"]) == 0
+    assert main(["change", "#1", "--what", "an edit after a JSON read"]) == 0
+
+
+def test_read_that_fails_partway_through_does_not_mark_the_ticket_read(
+    _inject_fake, monkeypatch
+):
+    # task-cli#119 review finding: `_mark_ticket_read`'s placement in `cmd_read`
+    # (after `_save_attachments` and every print, never before) is an explicit behavioral claim
+    # in that function's own comment — a failing `_save_attachments` must not still mint a read
+    # credential for content the caller never actually saw. Pin it directly: if it silently
+    # regressed back to marking read immediately after the fetch (the round-3 mistake this
+    # ordering fixed), this is the one test that would catch it.
+    from tasklib.cli import _UserError
+
+    main(_create_argv())
+    _clear_read_markers()
+
+    def _boom(*a, **kw):
+        raise _UserError("save-attachments exploded")
+
+    monkeypatch.setattr(cli, "_save_attachments", _boom)
+    rc = main(["read", "#1", "--save-attachments", "/nonexistent/wherever"])
+    assert rc != 0
+    # the read never completed — a follow-up blind edit must still be refused as unread.
+    rc2 = main(["change", "#1", "--what", "a blind overwrite after the failed read"])
+    assert rc2 == 2
+
+
+def test_change_what_blocked_after_ttl_expires(capsys, _inject_fake, monkeypatch):
+    import time
+
+    import tasklib.read_tracker as read_tracker
+
+    main(_create_argv())
+    capsys.readouterr()
+    real_time = time.time()
+    monkeypatch.setattr(
+        read_tracker.time, "time", lambda: real_time + read_tracker.DEFAULT_TTL_S + 1
+    )
+    rc = main(["change", "#1", "--what", "an edit long after the read"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "read-before-edit" in out
+
+
+def test_change_what_blocked_when_read_by_a_different_session(
+    capsys, _inject_fake, monkeypatch
+):
+    main(_create_argv())
+    capsys.readouterr()
+    monkeypatch.setenv("TASK_SESSION", "a-different-agents-session")
+    rc = main(["change", "#1", "--what", "an edit from an unrelated session"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "read-before-edit" in out
+
+
+def test_change_what_skip_flag_waives_for_this_command(_inject_fake):
+    main(_create_argv())
+    _clear_read_markers()
+    rc = main(
+        ["change", "#1", "--what", "trusted without a read", "--skip-read-before-edit", "verified via the GitHub UI"]
+    )
+    assert rc == 0
+    from tasklib.render import render
+
+    stored = _inject_fake.get("#1")
+    assert stored.what == "trusted without a read"  # the edit actually applied (round-6 finding)
+    body = render(stored)
+    assert "## Skipped gates" in body
+    assert "verified via the GitHub UI" in body
+
+
+def test_change_what_persisted_skip_does_not_waive_a_later_unread_edit(capsys, _inject_fake):
+    # task-cli#119 review finding: a `--skip-read-before-edit` recorded on ONE command must not
+    # silently auto-waive every FUTURE unread `--what` edit just because it's now sitting in
+    # ticket.skips (a persisted, permanent record for audit) — that would defeat the gate's
+    # entire point after the first waiver. Mirrors `_msgref_expand_enabled`'s identical
+    # per-command-vs-persisted distinction.
+    #
+    # A successful `change` (waived or not) DOES record a fresh read of its own (task-cli#119
+    # review finding: the session that just wrote a ticket's new content genuinely knows it —
+    # see `cmd_change`'s comment above its `_mark_ticket_read` call), so markers are cleared
+    # AGAIN after command 1 here — isolating what this test actually checks: whether the
+    # PERSISTED `ticket.skips` entry alone (with no fresh read AND no skip flag on command 2)
+    # can silently waive command 2. It must not.
+    main(_create_argv())
+    capsys.readouterr()
+    _clear_read_markers()
+    rc1 = main(
+        ["change", "#1", "--what", "edit one", "--skip-read-before-edit", "trust me this once"]
+    )
+    assert rc1 == 0
+    capsys.readouterr()
+    _clear_read_markers()  # command 1's own "I just wrote it" read must not leak into command 2
+    # still never actually read — the second edit gets NO skip flag this time.
+    rc2 = main(["change", "#1", "--what", "edit two, still unread"])
+    out = capsys.readouterr().out
+    assert rc2 == 2
+    assert "read-before-edit" in out
+
+
+def test_change_metadata_only_edit_is_exempt_from_read_before_edit(_inject_fake):
+    main(_create_argv())
+    _clear_read_markers()
+    assert main(["change", "#1", "--due", "2026-12-31"]) == 0
+    assert main(["change", "#1", "--label", "urgent"]) == 0
+
+
+def test_metadata_edit_does_not_mint_a_read_credential_for_a_later_blind_what(
+    capsys, _inject_fake
+):
+    # task-cli#119 review finding: a metadata-only edit (--due/--label) is
+    # exempt from the gate, but it must NOT mint a fresh "read" marker either — the session
+    # never saw or supplied the description on that edit. Without this, a two-command sequence
+    # (metadata edit first, blind --what edit next, both well within the TTL) would bypass the
+    # gate entirely: exactly the ordinary "mark in-progress, then rewrite later" workflow.
+    main(_create_argv())
+    _clear_read_markers()
+    assert main(["change", "#1", "--label", "in-progress"]) == 0  # metadata-only, gate-exempt
+    capsys.readouterr()
+    rc = main(["change", "#1", "--what", "a blind overwrite right after the label edit"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "read-before-edit" in out
+
+
+def test_change_why_or_impact_only_edit_is_exempt_from_read_before_edit(_inject_fake):
+    # task-cli#119 deliberately scopes the gate to --what (the ticket's core description) only.
+    main(_create_argv())
+    _clear_read_markers()
+    assert main(["change", "#1", "--why", "a fuller motivation"]) == 0
+    assert main(["change", "#1", "--impact", _GOOD_IMPACT]) == 0
+
+
+def test_change_what_empty_string_is_a_no_op_not_a_gate_bypass(_inject_fake):
+    # task-cli#119 review finding: `--what ""` is falsy, so both the
+    # read-before-edit CHECK (`if args.what:`) and the field-APPLY code (also `if args.what:`,
+    # pre-existing behavior this ticket doesn't touch) treat it identically as "not provided" —
+    # pin that explicitly: an unread ticket's `what` must survive `--what ""` completely
+    # unchanged, not get silently cleared with no gate check (which would be the worst version
+    # of the exact blind overwrite this gate exists to prevent).
+    main(_create_argv())
+    original_what = _inject_fake.get("#1").what
+    _clear_read_markers()
+    assert main(["change", "#1", "--what", ""]) == 0  # never read, but --what "" is a no-op
+    assert _inject_fake.get("#1").what == original_what
+
+
+def test_metadata_edit_on_a_ticket_with_a_pre_existing_persisted_skip_still_succeeds(
+    capsys, _inject_fake
+):
+    # task-cli#119 review finding: `_enforce_edit_or_die` now always calls
+    # `apply_skips(raw, ticket, warnings)` (previously only when `raw or warnings` was
+    # truthy) — confirm that's still a pure no-op on an empty `raw` even when `ticket.skips`
+    # already carries an UNRELATED persisted skip from an earlier command: not just rc == 0,
+    # but the pre-existing skip entry is untouched (not pruned/consumed) and no spurious
+    # "skipped gates" notice is printed for a metadata edit that triggered no gate at all
+    # (round-3 review finding: strengthen beyond a bare rc == 0 assertion).
+    main(_create_argv())
+    _inject_fake.get("#1").skips["links"] = "a pre-existing waiver from an earlier command"
+    _clear_read_markers()
+    capsys.readouterr()
+    assert main(["change", "#1", "--due", "2026-12-31"]) == 0
+    out, err = capsys.readouterr()
+    assert "skipped" not in out.lower() and "skipped" not in err.lower()
+    assert (
+        _inject_fake.get("#1").skips["links"]
+        == "a pre-existing waiver from an earlier command"
+    )
+
+
+def test_read_before_edit_disabled_via_config(_inject_fake, monkeypatch):
+    from tasklib.policy import EnforceConfig
+
+    main(_create_argv())
+    _clear_read_markers()
+    monkeypatch.setattr(
+        cli, "_enforce_config", lambda cfg: EnforceConfig(read_before_edit=False)
+    )
+    rc = main(["change", "#1", "--what", "never read, but the gate is off"])
+    assert rc == 0
+
+
+def test_read_before_edit_disabled_skips_the_check_entirely(_inject_fake, monkeypatch):
+    # task-cli#119 review finding: `_detect_session` can fall back to a real
+    # `git rev-parse` subprocess (5s timeout) when neither $TASK_SESSION nor tmux is set —
+    # mirrors `test_msgref_quote_disabled_does_not_read_history`'s pattern for the identical
+    # concern on that gate. A repo with `enforce.read_before_edit: false` must not pay that
+    # cost on every `--what` edit just to discover the gate is off. Targets
+    # `_read_before_edit_violation` specifically (unlike `_detect_session`, which
+    # `_record_session_touch`/`_mark_ticket_read` also call later, unconditionally, for
+    # unrelated bookkeeping this test isn't about) — it is the one call `cmd_change` makes
+    # ONLY as part of this gate's own check.
+    from tasklib.policy import EnforceConfig
+
+    main(_create_argv())
+    _clear_read_markers()
+    monkeypatch.setattr(
+        cli, "_enforce_config", lambda cfg: EnforceConfig(read_before_edit=False)
+    )
+
+    def _boom(*a, **kw):
+        raise AssertionError("the read-before-edit check must not run when disabled")
+
+    monkeypatch.setattr(cli, "_read_before_edit_violation", _boom)
+    rc = main(["change", "#1", "--what", "never read, but the gate is off"])
+    assert rc == 0
+
+
+def test_change_what_blocked_with_distinct_message_when_marker_store_unreadable(
+    capsys, _inject_fake, monkeypatch
+):
+    main(_create_argv())
+    capsys.readouterr()
+    monkeypatch.setattr("tasklib.read_tracker.is_fresh", lambda *a, **kw: None)
+    rc = main(["change", "#1", "--what", "an edit while the store is broken"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "read-before-edit" in out
+    assert "could not be read" in out
+
+
 # ── rule 4 + rule 5 at create ────────────────────────────────────────────────────────
 
 
@@ -2686,6 +3041,23 @@ def test_classify_create_puts_session_in_labels_not_links(monkeypatch, _inject_f
     created = _inject_fake.list()[0]
     assert created.links == {}
     assert "session:testsess" in created.labels
+
+
+def test_classify_create_marks_the_new_ticket_read(monkeypatch, _inject_fake):
+    # task-cli#119: this is the SECOND creation path (`_classify_create`, the tg-cli inbound
+    # hook) — it must ALSO mark the ticket it just created as read, the same as `cmd_create`,
+    # so an immediate `task change <id> --what` to refine a triage draft isn't blocked as blind.
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    rc = main(["classify", "please add a logout button", "--create"])
+    assert rc == 0
+    created = _inject_fake.list()[0]
+    assert main(["change", created.id, "--what", "refined right after the triage create"]) == 0
 
 
 def test_classify_create_omits_priority_attention_for_hook_output(

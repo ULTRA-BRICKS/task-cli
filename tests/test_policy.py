@@ -5,6 +5,7 @@ from __future__ import annotations
 from tasklib.model import Criterion, Screenshot, Ticket
 from tasklib.msgrefs import render_msgref_quotes
 from tasklib.policy import (
+    ALL_GATES,
     EnforceConfig,
     Phase,
     check,
@@ -143,6 +144,17 @@ def test_from_dict_disables_links_url_and_msgref_quote_gates():
     assert cfg.links_url is False and cfg.msgref_quote is False
     assert check_create(_good_ticket(links={"Session": "session:2"}), cfg).ok
     assert check(_good_ticket(what="per tg#42 do X"), cfg, Phase.CREATE, resolvable_ids={42}).ok
+
+
+def test_from_dict_wires_read_before_edit():
+    # task-cli#119 review finding: the documented `enforce.read_before_edit` key
+    # must reach `EnforceConfig` through `from_dict` — this gate isn't evaluated by `check()`
+    # (it needs I/O; see `cli._read_before_edit_violation`), so it has no `check_create`/
+    # `check_done` regression coverage the way the other gates do above. Without a direct
+    # assertion here, a typo in the `from_dict` line (e.g. a mismatched key spelling) would
+    # pass the entire suite while the documented config key silently did nothing.
+    assert EnforceConfig.from_dict({}).read_before_edit is True  # default: on
+    assert EnforceConfig.from_dict({"read_before_edit": False}).read_before_edit is False
 
 
 def test_from_dict_acceptance_min_override_and_fallback():
@@ -697,3 +709,14 @@ def test_normalize_skip_gate_accepts_new_gates():
     assert normalize_skip_gate("link-url") == "links-url"
     assert normalize_skip_gate("msgref-quote") == "msgref-quote"
     assert normalize_skip_gate("msgref_quote") == "msgref-quote"
+
+
+def test_normalize_skip_gate_accepts_read_before_edit():
+    # task-cli#119 review finding: unlike GATE_DUPLICATE (no real --skip- flag),
+    # read-before-edit DOES have one (--skip-read-before-edit), so it belongs in ALL_GATES /
+    # normalize_skip_gate's aliases like every other skippable gate.
+    from tasklib.policy import GATE_READ_BEFORE_EDIT
+
+    assert normalize_skip_gate("read-before-edit") == GATE_READ_BEFORE_EDIT
+    assert normalize_skip_gate("read_before_edit") == GATE_READ_BEFORE_EDIT
+    assert GATE_READ_BEFORE_EDIT in ALL_GATES

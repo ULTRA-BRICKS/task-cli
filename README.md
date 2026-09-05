@@ -257,6 +257,22 @@ user-impact-quality gates) writes the justification into the ticket's `Skipped g
 | formatting | (automatic — body is rendered) | `--skip-formatting "<reason>"` |
 | msgref-title | keep `--title` free of a `tg#<id>` reference (put it in `--what`/`--why`/etc. instead) | **none** (hard; disable in config only via `enforce.msgref_title: false`) |
 | acceptance-checked (close) | `task check <id> <n> --proof <path>` for each | **none** (hard; disable in config only) |
+| read-before-edit (`change --what` only) | `task read <id>` (or `task view <id>`) THIS session, recently, before overwriting `--what` | `--skip-read-before-edit "<reason>"` — a *persisted* skip from an earlier command never silently waives a later, still-unread one |
+
+The **read-before-edit** gate (task-cli#119) refuses `task change <id> --what "..."` unless this
+same working session has run `task read <id>` (or just created that ticket with `task new`/
+`create`, or itself just wrote `--what` on a prior edit) within the last 30 minutes — so an agent
+that never actually looked at a ticket's current What/Why/Impact/acceptance criteria can't
+silently overwrite them. It only gates `--what` (the ticket's core description); a metadata-only
+edit (`--why`/`--impact`/`--if-not-done`/`--due`/`--label`, with no `--what`) is never blocked by
+it, and deliberately never mints a fresh "read" credential either — only an edit that actually
+sets `--what` does that, whether or not it needed `--skip-read-before-edit` to pass. What the
+waiver does NOT do: a `--skip-read-before-edit` recorded on a past command is written into
+`ticket.skips` for audit only — a LATER, genuinely unread `--what` edit that supplies no skip
+flag of its own is still refused, never silently waived by that historical record (see
+`tasklib/read_tracker.py`'s module docstring for the full design rationale: the marker's
+session/TTL/repo scoping, what the marker does and doesn't prove, and why a failed marker-store
+read refuses the edit rather than allowing it).
 
 The **links-url** gate keeps the `## Links` section strictly URLs — a bare, non-URL value
 (`Session: session:2`) rendered as a fake link and slid past the prose-only `links` gate. The
@@ -506,6 +522,7 @@ enforce:
   formatting: strict
   links_url: required                # the ## Links section holds http(s):// URLs only
   msgref_quote: required             # a body tg#<id> must carry its auto-attached quote
+  read_before_edit: true             # `change --what` needs a recent `read` this session first
   screenshots:
     on_create: { required_if_label: [ui, visual] }
     on_done:   { required_if_label: [ui, visual] }

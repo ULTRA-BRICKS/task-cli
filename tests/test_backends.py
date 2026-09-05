@@ -2290,3 +2290,47 @@ def test_verified_ticket_coordinate_no_op_when_ticket_reports_no_project():
     assert verified_ticket_coordinate(cfg, backend, ticket) == backend_coordinate(
         backend
     )
+
+
+def test_verified_ticket_coordinate_matches_between_linear_create_and_get_responses():
+    # task-cli#119 review finding: the read-before-edit gate's marker is recorded at
+    # `cmd_create` time using the ticket `LinearBackend.create()` returns, and checked later at
+    # `cmd_change` time using the ticket `.get()` returns — if those two ever compute a
+    # DIFFERENT `verified_ticket_coordinate` for the SAME just-created ticket, the "create then
+    # immediately `change --what`" workflow (task-cli#119's own acceptance criterion) would be
+    # refused on a real Linear backend even though the fake-backend test can't see it (a
+    # FakeBackend returns the identical stored object from both calls).
+    #
+    # `create()`'s GraphQL query uses `_ISSUE_FIELDS_BASE`, which — deliberately, per that
+    # constant's own comment — omits `project{id}`, so a create-response Ticket ALWAYS reports
+    # `backend_project_id == ""` (proven directly by
+    # `test_linear_node_to_ticket_backend_project_id_empty_when_absent`). `get()`'s response
+    # (via `_ISSUE_FIELDS`) DOES include it. This test proves the two nonetheless resolve to the
+    # SAME coordinate for a just-created ticket WITH A PROJECT PINNED in config (`project:
+    # "proj-a"`, the common/documented case) — `create()`'s own mutation sends `projectId:
+    # self.project` in that case, so the ticket's real project can never differ from the
+    # configured one, and `verified_ticket_coordinate`'s correction path (which only fires when
+    # `actual_project != configured_project`) never triggers for either response shape here;
+    # both degrade to the same naive `backend_coordinate`.
+    #
+    # Deliberately NOT covering the project-LESS case (`project: ""`): there, `create()` sends
+    # no `projectId` (Linear assigns its own default project), so the two response shapes CAN
+    # diverge if that team also registers another same-team project in `projects:` — see
+    # `tasklib.read_tracker`'s module docstring, "Known limitation: the repo coordinate can
+    # (rarely) differ..." paragraph, for the accepted, narrow, fail-closed trade-off this leaves.
+    from tasklib.backends import backend_coordinate, verified_ticket_coordinate
+    from tasklib.backends.linear import LinearBackend
+
+    cfg = _FakeCfg(
+        {"projects": [{"backend": "linear", "team": "hyp", "project": "proj-a"}]}
+    )
+    backend = LinearBackend(api_key="k", team_key="hyp", project="proj-a")
+
+    create_response_ticket = Ticket(id="HYP-1", title="t")  # backend_project_id == ""
+    get_response_ticket = Ticket(
+        id="HYP-1", title="t", backend_project_id="proj-a"  # the real (== configured) project
+    )
+
+    create_coord = verified_ticket_coordinate(cfg, backend, create_response_ticket)
+    get_coord = verified_ticket_coordinate(cfg, backend, get_response_ticket)
+    assert create_coord == get_coord == backend_coordinate(backend)
