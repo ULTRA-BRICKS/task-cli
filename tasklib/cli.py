@@ -7,8 +7,10 @@ filesystem (sidecar). All pure logic lives in the sibling modules (``model``/``r
 the backends) are lazy so ``task --help`` stays fast and dependency-light.
 
 Subcommands: create/new · list · gantt (read-only due-date timeline) · read/view · find · change
-· status · done · check · mark-shipped (the `gh ship` post-merge hook — records a merge,
-never closes) · classify · session · daemon (the due-date reminder watcher: start/stop/status/run).
+· status · done · check · audit (reconciliation backstop — flags/reverts a Done ticket that
+never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close) ·
+mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
+session · daemon (the due-date reminder watcher: start/stop/status/run).
 Global flags: --backend, --repo, --config, --json, --yes, and per-gate --skip-<gate>.
 """
 
@@ -416,6 +418,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="merge commit SHA (used to derive a commit link when the PR URL is GitHub's)",
     )
 
+    # audit — reconciliation backstop: catches a Done ticket that never passed the close gates
+    # (e.g. closed by Linear's/GitHub's own PR-merge auto-close, entirely outside task-cli)
+    adp = sub.add_parser(
+        "audit",
+        parents=[common],
+        help="find Done tickets that never passed the close gates (e.g. closed by an external PR-merge auto-close)",
+    )
+    adp.add_argument(
+        "id", nargs="?", help="audit only this ticket id (default: recent Done tickets)"
+    )
+    adp.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        metavar="N",
+        help="how many Done tickets to scan when no id is given (default: 50)",
+    )
+    adp.add_argument(
+        "--revert",
+        action="store_true",
+        help="move a noncompliant ticket back to in-review with an explanatory comment",
+    )
+
     # classify
     clp = sub.add_parser(
         "classify",
@@ -487,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
         "check": cmd_check,
         "accept": cmd_accept,
         "gate": cmd_gate,
+        "audit": cmd_audit,
         "mark-shipped": cmd_mark_shipped,
         "classify": cmd_classify,
         "session": cmd_session,
@@ -662,13 +688,16 @@ def _known_projects(cfg) -> tuple[list, str | None]:
 
 
 def _config_for_id(cfg, ticket_id: str):
-    """Resolve the config that OWNS ``ticket_id`` — the cwd's when inside a repo (or with a
-    pinned coordinate / ``--repo``), else the registered project the id routes to: a Linear id
-    (``HYP-456``) by its team prefix; a GitHub id (``#123``) when exactly one GitHub project is
-    registered. An ambiguous or unroutable id fails with a 3-part error rather than a cryptic
-    backend failure. Anything that depends on a per-project policy (`enforce:`) for a ticket
-    must read it from THIS config, not the cwd's (review finding: `mark-shipped` runs in the
-    code repo while the ticket may live in another project with its own gates)."""
+    """Resolve the config to use for ``ticket_id`` — the cwd's when inside a repo (or with a
+    pinned coordinate / ``--repo``), else the config the registered project's overlay resolves
+    to: a Linear id (``HYP-456``) by its team prefix; a GitHub id (``#123``) when exactly one
+    GitHub project is registered. An ambiguous or unroutable id fails with a 3-part error
+    rather than a cryptic backend failure.
+
+    LIMITATION: only ``backend``/``github``/``linear`` are ever re-pointed by a registry
+    entry's overlay — ``enforce:`` always resolves to the CALLER's own config, whether pinned
+    or registry-routed, never the ticket's owning project's committed `task.yaml` (cross-project
+    `enforce:` override tracked in task-cli#117, an open design question, not an obvious bug)."""
     if _current_project_overlay(cfg) is not None:
         return cfg
 
@@ -3133,6 +3162,285 @@ def _select_criterion(ticket: Ticket, selector: str) -> Criterion:
     )
 
 
+# ── audit (the reconciliation backstop) ─────────────────────────────────────────────
+# A Done ticket that never passed the close gates (HYP-1347: closed via Linear's own PR-merge
+# automation, bypassing task-cli entirely). See tasklib/audit.py's module docstring for the pure
+# logic + the "a finding is not proof of bypass" caveat, and README's "Audit" section for the
+# full incident, the recommended report-only cron wiring, and known limitations.
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Find Done tickets that do not currently satisfy the close gates, and optionally revert
+    them. See the module comment above and tasklib/audit.py for what a finding does and does
+    NOT prove."""
+    if args.limit <= 0:
+        raise _UserError(f"--limit must be a positive integer (got {args.limit})")
+    cfg = _load(args)
+    tickets, backend = _audit_fetch_targets(cfg, args)
+    if args.id and tickets[0].state is not State.DONE:
+        _print_audit_not_done(tickets[0], as_json=args.json)
+        return 0
+
+    cfg_e = _enforce_config(cfg)
+    resolvable_ids = _audit_resolvable_ids(cfg_e, tickets)
+
+    from .audit import audit_done_tickets
+
+    findings = audit_done_tickets(tickets, cfg_e, resolvable_ids)
+    reverted, revert_errors = (
+        _audit_revert(cfg, backend, findings, cfg_e, resolvable_ids)
+        if findings and args.revert
+        else ([], [])
+    )
+    _print_audit_report(findings, reverted, revert_errors, scanned=len(tickets), as_json=args.json)
+    return 1 if findings else 0
+
+
+def _print_audit_not_done(ticket: Ticket, *, as_json: bool) -> None:
+    """The by-id early return when the fetched ticket isn't Done — kept in the SAME
+    ``--json``-aware shape :func:`_print_audit_report` uses (``scanned``/``findings``/
+    ``reverted``/``revert_errors``), so a machine consumer never has to special-case this path
+    (review finding: the earlier version printed plain text here even under ``--json``)."""
+    if as_json:
+        import json
+
+        payload = {
+            "scanned": 0,
+            "findings": [],
+            "reverted": [],
+            "revert_errors": [],
+            "note": f"{ticket.id} is not Done (state: {ticket.state.value}) — nothing to audit",
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    print(_ok(f"{ticket.id} is not Done (state: {ticket.state.value}) — nothing to audit"))
+
+
+def _audit_fetch_targets(cfg, args: argparse.Namespace) -> tuple[list[Ticket], Any]:
+    """The tickets to audit + the backend they came from: one ticket (``args.id``) or the
+    most-recent Done tickets up to ``args.limit``.
+
+    Catches ``AmbiguousBackendError`` alongside ``BackendError``, not just the latter: both
+    calls here are READ-ONLY, so an ambiguous outcome (the response was lost after a 2xx) is
+    harmless — nothing was mutated either way, the same collapse ``_session_dedup_candidates``
+    already makes for its own read-only lookup. Without this, a dropped read crashed `task
+    audit --json` with a raw traceback instead of the documented JSON shape (review finding) —
+    especially bad for the recommended report-only cron usage.
+    """
+    from .backends import AmbiguousBackendError, BackendError
+
+    if args.id:
+        backend = _backend_for_id(cfg, args.id)
+        try:
+            return [backend.get(args.id)], backend
+        except (BackendError, AmbiguousBackendError) as exc:
+            raise _UserError(str(exc)) from exc
+    backend = _backend(cfg)
+    try:
+        return backend.list(state=State.DONE, limit=args.limit), backend
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(str(exc)) from exc
+
+
+def _audit_resolvable_ids(cfg_e, tickets: list[Ticket]) -> set[int] | None:
+    """The ``tg#<id>`` ids resolvable in local tg-cli history, for the WHOLE audited batch.
+
+    Mirrors ``_msgref_resolvable_ids`` (used by the single-ticket close paths) but computed
+    ONCE across every ticket in the batch rather than per-ticket — ``load_history()`` reads
+    the same local log regardless of which ticket asks, so there is nothing to gain from
+    re-loading it per ticket. Without this, `audit` diverged from what `task done` actually
+    checks: a Done ticket with an unquoted-but-locally-resolvable ``tg#<id>`` would pass the
+    audit (the gate degrades to a warning when it can't prove resolvability) even though `task
+    done` would have refused it (review finding). Returns ``None`` when nothing in the batch
+    could possibly need it — the gate is disabled, or no ticket carries an unquoted reference —
+    so `check_done` treats it exactly like every other caller that skips loading history.
+    """
+    from .policy import unquoted_body_ids
+
+    if not cfg_e.msgref_quote:
+        return None
+    if not any(unquoted_body_ids(t) for t in tickets):
+        return None
+    from .msgrefs import load_history
+
+    return set(load_history())
+
+
+def _audit_revert(
+    cfg, backend, findings: list, cfg_e, resolvable_ids: set[int] | None
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Move every STILL-noncompliant ticket DONE -> IN_REVIEW, with a best-effort explanation.
+
+    Re-fetches and re-checks each ticket immediately before acting — NOT the snapshot the scan
+    saw. Between the scan and the revert, someone may have fixed the ticket (checked the
+    remaining criteria) or moved it off Done entirely; acting on the stale snapshot would
+    silently reopen work that no longer needs it (review finding — a real TOCTOU gap in the
+    original version of this function). Transitions BEFORE commenting: a comment claiming
+    "reverted" must never be posted on a ticket the transition call actually failed to move.
+    Best-effort per ticket: one backend failure must not abort the rest of the batch — the
+    audit is a periodic sweep, and losing the whole run to one bad ticket would hide every
+    other finding until the next run.
+
+    RESIDUAL RACE (accepted, not fixed here): re-check-then-write is not atomic — neither
+    backend's protocol supports a conditional/versioned update (no ETag/CAS), so a fix landing
+    in the gap between the re-check above and the ``transition()`` call below could still be
+    overwritten. The window shrank from "the whole scan-to-revert duration" to one HTTP
+    round-trip; closing it fully needs backend-level optimistic concurrency, a separate, larger
+    change to the ``TicketBackend`` protocol.
+
+    ``AmbiguousBackendError`` (the response was lost AFTER the provider already accepted the
+    call — see :class:`tasklib.backends.AmbiguousBackendError`) is handled per call, not folded
+    into the same bucket as a clean failure: the re-fetch is read-only (harmless either way,
+    same collapse as ``_audit_fetch_targets``), but ``transition()`` is a WRITE whose outcome is
+    now genuinely unknown — it may have already landed. Recording it with the same text as an
+    ordinary failure would tell an operator "nothing happened, safe to just re-run" when a
+    blind re-run could double-fire the revert; it gets distinct wording instead (review finding).
+    """
+    from .audit import audit_done_tickets
+    from .backends import AmbiguousBackendError, BackendError
+
+    reverted: list[str] = []
+    errors: list[tuple[str, str]] = []
+    for finding in findings:
+        ticket_id = finding.ticket.id
+        try:
+            fresh = backend.get(ticket_id)
+        except (BackendError, AmbiguousBackendError) as exc:
+            errors.append((ticket_id, str(exc)))
+            continue
+        still_bad = audit_done_tickets([fresh], cfg_e, resolvable_ids)
+        if not still_bad:
+            continue  # fixed, or moved off Done, since the scan — nothing to revert
+        try:
+            validate_transition(fresh.state, State.IN_REVIEW)
+            updated = backend.transition(ticket_id, State.IN_REVIEW)
+        except TransitionError as exc:
+            errors.append((ticket_id, str(exc)))
+            continue
+        except AmbiguousBackendError as exc:
+            errors.append(
+                (ticket_id, f"outcome unknown — verify {ticket_id} before re-running: {exc}")
+            )
+            continue
+        except BackendError as exc:
+            errors.append((ticket_id, str(exc)))
+            continue
+        reverted.append(ticket_id)
+        # review finding (P2): every other successful mutation path (change/status/done/check/
+        # mark-shipped) refreshes the session sidecar immediately after the write lands — a
+        # revert is exactly such a mutation (DONE -> IN_REVIEW) and was the one path that
+        # skipped it, leaving a reactivated ticket's sidecar timestamp stale so a later `task
+        # session` view could misclassify it. Mirrors the placement `cmd_status` uses: right
+        # after the transition is confirmed, before the best-effort comment/notify below.
+        # Current-session only, like every other mutation path: `_record_session_touch` is a
+        # no-op when there is no ambient session or the ticket belongs to another session, so
+        # a cron/operator-shell `task audit --revert` refreshes nothing (by design, not a gap).
+        _record_revert_session_touch(cfg, backend, updated)
+        _post_revert_comment(backend, ticket_id, still_bad[0].result)
+        _post_revert_notify(cfg, updated)
+    return reverted, errors
+
+
+def _record_revert_session_touch(cfg, backend, ticket: Ticket) -> None:
+    """Best-effort, like every other step after the transition in `_audit_revert`'s loop
+    (review finding): the ticket is already reverted, so a sidecar failure — `session.record`
+    swallows `OSError` but not e.g. a `UnicodeEncodeError` from a title with a lone surrogate —
+    must neither abort the rest of the batch nor be mis-reported as a revert failure."""
+    import sys
+
+    try:
+        _record_session_touch(cfg, backend, ticket)
+    except Exception as exc:  # noqa: BLE001 — bookkeeping only, the revert itself already landed
+        print(_warn(f"  reverted {ticket.id} but failed to refresh the session sidecar: {exc}"), file=sys.stderr)
+
+
+def _post_revert_comment(backend, ticket_id: str, result) -> None:
+    """Best-effort: the ticket is already reverted by the time this runs, so a failed
+    explanatory comment must never undo that fact or get mis-reported as a revert failure."""
+    import sys
+
+    from .backends import AmbiguousBackendError, BackendError
+
+    try:
+        backend.comment(ticket_id, _audit_revert_comment(result))
+    except (BackendError, AmbiguousBackendError) as exc:
+        print(_warn(f"  reverted {ticket_id} but failed to post explanation: {exc}"), file=sys.stderr)
+
+
+def _post_revert_notify(cfg, ticket: Ticket) -> None:
+    """Best-effort, mirroring :func:`_post_revert_comment`: the ticket is already reverted by
+    the time this runs, so a config/notifier failure must never abort the batch or get
+    mis-reported as a revert failure (review finding — `_notify_mutation` itself is designed to
+    swallow a down notifier, but a malformed `notifications:`/`daemon:` config block can still
+    raise BEFORE it reaches that guarded call; catch broadly here since notification is purely
+    advisory and must never be allowed to undo an already-committed state change)."""
+    import sys
+
+    try:
+        _notify_mutation(cfg, ticket, "reverted (audit)")
+    except Exception as exc:  # noqa: BLE001 - advisory only, see docstring
+        print(_warn(f"  reverted {ticket.id} but failed to notify: {exc}"), file=sys.stderr)
+
+
+def _audit_revert_comment(result) -> str:
+    lines = [
+        "task audit: reverted to in-review — this ticket does not currently satisfy the close "
+        "gates `task done` enforces (it may have been closed outside task-cli entirely — e.g. "
+        "an external PR-merge auto-close — or a gate may have changed since it was closed):",
+    ]
+    lines.extend(f"- {v.gate}: {v.message}" for v in result.violations)
+    lines.append("Re-close with `task done <id>` once the gates above are satisfied.")
+    return "\n".join(lines)
+
+
+def _print_audit_report(
+    findings: list,
+    reverted: list[str],
+    revert_errors: list[tuple[str, str]],
+    *,
+    scanned: int,
+    as_json: bool,
+) -> None:
+    if as_json:
+        _print_audit_report_json(findings, reverted, revert_errors, scanned)
+        return
+    if not findings:
+        print(_ok(f"audit clean: {scanned} Done ticket(s) checked, 0 noncompliant"))
+        return
+    print(
+        _err(f"audit: {len(findings)}/{scanned} Done ticket(s) do not currently satisfy the close gates")
+    )
+    for f in findings:
+        print(_err(f"  {f.ticket.id}  {f.ticket.title}"))
+        for v in f.result.violations:
+            print(_err(f"    ✗ {v.gate}: {v.message}"))
+    if reverted:
+        print(_warn(f"  reverted to in-review: {', '.join(reverted)}"))
+    for tid, err in revert_errors:
+        print(_err(f"  failed to revert {tid}: {err}"))
+
+
+def _print_audit_report_json(
+    findings: list, reverted: list[str], revert_errors: list[tuple[str, str]], scanned: int
+) -> None:
+    import json
+
+    payload = {
+        "scanned": scanned,
+        "findings": [
+            {
+                "id": f.ticket.id,
+                "title": f.ticket.title,
+                "violations": [{"gate": v.gate, "message": v.message} for v in f.result.violations],
+            }
+            for f in findings
+        ],
+        "reverted": reverted,
+        "revert_errors": [{"id": tid, "error": err} for tid, err in revert_errors],
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 # ── mark-shipped (the `gh ship` post-merge hook) ────────────────────────────────────
 
 # A GitHub PR URL's PATH ("/owner/repo/pull/123", optionally followed by more path segments —
@@ -3176,35 +3484,97 @@ def _commit_url_from_pr(pr_url: str, commit_sha: str) -> str | None:
     return f"https://github.com/{owner}/{repo}/commit/{commit_sha}"
 
 
+def _done_with_unmet_warning(ticket: Ticket, unmet: list[Criterion]) -> str:
+    """The single message body for the "Done but not really" invariant violation (HYP-1295,
+    2026-08-19) — shared by the durable tracker comment (`_shipped_comment`) and the CLI
+    output (`_acceptance_instructions`) so the two never drift into different prose or
+    different criteria lists (review finding: an earlier version duplicated near-identical
+    text and passed only a *count* to the comment, so the actionable detail — which criteria
+    — reached CLI stdout but not the tracker, the audience that actually needed it).
+
+    Numbers each listed criterion by its REAL 1-based position in ``ticket.acceptance``
+    (review finding: an earlier version enumerated the already-filtered ``unmet`` list
+    instead, so e.g. `[checked, unchecked]` printed the unchecked one as `[1]` — the wrong
+    number to feed `task check <id> <n>`, which indexes the full list). Filters by object
+    identity (``id(c)``), not equality, since two criteria can legitimately share text.
+
+    Names the LIKELY cause (an external integration — e.g. Linear's GitHub auto-close firing
+    on a "Closes"/"Fixes"/"Resolves" keyword in a PR body — transitioning the ticket to Done
+    the instant a referencing PR merges, entirely outside task-cli, so
+    `strict-ticket-discipline` rule 2 never got a chance to fire) as a hedged possibility, not
+    an assertion of fact (review finding: a human closing the ticket by hand without checkbox
+    hygiene produces the identical state, and this durable comment must not misattribute
+    that)."""
+    unmet_ids = {id(c) for c in unmet}
+    lines = [
+        f"{ticket.id} is Done but {len(unmet)} acceptance criterion/criteria "
+        "are not fully verified (unchecked, or checked without a proof/force reason):"
+    ]
+    lines.extend(
+        f"  [{i}] {c.text}"
+        for i, c in enumerate(ticket.acceptance, start=1)
+        if id(c) in unmet_ids
+    )
+    lines.append(
+        "This can happen when an external integration (e.g. Linear's GitHub auto-close on a "
+        "'Closes'/'Fixes'/'Resolves' PR-body keyword) closes the ticket on merge before "
+        "task-cli's own close gate runs — or from a manual close that skipped the checklist. "
+        f"Verify these for real; run `task read {ticket.id}`, then either check each with "
+        "proof or reopen the ticket."
+    )
+    return "\n".join(lines)
+
+
 def _shipped_comment(
-    ticket_id: str, pr_url: str, commit_sha: str, *, already_closed: bool
+    ticket: Ticket,
+    pr_url: str,
+    commit_sha: str,
+    *,
+    already_closed: bool,
+    unmet_despite_closed: list[Criterion] | None = None,
 ) -> str:
     """The durable backend comment recorded on a shipped ticket — the point of it is to make
     the merge visible on the tracker itself (not just in task-cli's own state). For a ticket
     that's already Done, the "this does NOT close" framing would be actively misleading (it's
-    already closed), so that ticket gets a plain reference note instead."""
+    already closed), so that ticket gets a plain reference note instead — UNLESS it's Done
+    with unmet criteria (see `_done_with_unmet_warning`), which gets a loud warning instead."""
     lines = [f"Shipped: merged via {pr_url}."]
     if commit_sha:
         lines.append(f"Merge commit: {commit_sha}")
     if already_closed:
-        lines.append("The ticket is already Done — recorded here for reference.")
+        if unmet_despite_closed:
+            lines.append("WARNING: " + _done_with_unmet_warning(ticket, unmet_despite_closed))
+        else:
+            lines.append("The ticket is already Done — recorded here for reference.")
     else:
         lines.append(
             "This does NOT close the ticket — acceptance still needs proof. "
-            f"Run `task read {ticket_id}` for the outstanding criteria, then `task check`/`task done`."
+            f"Run `task read {ticket.id}` for the outstanding criteria, then `task check`/`task done`."
         )
     return "\n".join(lines)
 
 
-def _acceptance_instructions(ticket: Ticket) -> list[str]:
+def _acceptance_instructions(ticket: Ticket, *, acceptance_checked_gate: bool = True) -> list[str]:
     """The human-readable checklist printed after `mark-shipped`: what still stands between
     this merge and a genuine `task done` (strict-ticket-discipline rules 2/3 — a close needs
     every criterion CHECKED with a visual proof; a merge alone proves nothing about that).
 
     A ticket that's already Done gets a one-line reference note instead — printing "acceptance
     needed" advice about a ticket that is, by definition, already accepted would be nonsense.
+    UNLESS it's Done with unmet criteria still sitting on it (see `_done_with_unmet_warning`,
+    HYP-1295) — that combination is itself an invariant violation, so it gets the same warning
+    treatment as the tracker comment, not the calm note.
+
+    ``acceptance_checked_gate`` (review finding) mirrors `enforce.acceptance_checked` from
+    this project's `task.yaml`: a repo that has deliberately DISABLED the on-done
+    unchecked-criteria gate (`policy.unchecked_criteria_violation` returns ``None`` there) has
+    a configured contract where an externally-closed ticket with unchecked boxes is NOT a
+    violation — `mark-shipped` must not contradict that contract with a false warning.
     """
     if ticket.state is State.DONE:
+        unmet_while_done = ticket.unmet_criteria() if acceptance_checked_gate else []
+        if unmet_while_done:
+            return [_warn(_done_with_unmet_warning(ticket, unmet_while_done))]
         return [
             _dim(
                 f"{ticket.id} is already Done — this merge was recorded for reference only."
@@ -3215,6 +3585,15 @@ def _acceptance_instructions(ticket: Ticket) -> list[str]:
         return [
             _dim(
                 f"all acceptance criteria are already checked — if the other close gates pass, run `task done {ticket.id}`."
+            )
+        ]
+    if not acceptance_checked_gate:
+        # Same contract as the Done branch above (review finding): a repo that disabled the
+        # gate will not demand checked criteria on `task done`, so "acceptance needed before
+        # this can be marked Done" would be false advice there.
+        return [
+            _dim(
+                f"{len(unchecked)} criteria unchecked (checked criteria are not enforced on close here) — run `task done {ticket.id}` when the other close gates pass."
             )
         ]
     lines = [
@@ -3249,6 +3628,8 @@ def _record_shipped_pr(
     commit_sha: str,
     commit_url: str | None,
     existing_pr: str | None,
+    *,
+    acceptance_checked_gate: bool = True,
 ) -> tuple[Ticket, bool]:
     """Post the shipped comment, persist the PR link (+ derived commit link), and move
     TODO/IN_PROGRESS to IN_REVIEW. Returns ``(updated_ticket, moved_to_review)``.
@@ -3278,6 +3659,14 @@ def _record_shipped_pr(
     caller — which already computed it for the idempotency check — rather than recomputed here
     (review finding: two call sites deriving the same fact from the same ticket is a needless
     second source of truth).
+
+    ``acceptance_checked_gate`` — see `_acceptance_instructions`'s docstring; a repo with
+    `enforce.acceptance_checked: false` never treats unchecked/unproven criteria as a
+    violation, so the Done-with-unmet warning must not fire there either.
+
+    The Done-with-unmet warning (HYP-1295) fires on THIS call's own read of the ticket only —
+    a close landing after this command returns is invisible to it. `gh ship` invokes
+    `mark-shipped` once per merge, so there is no retry to catch that case anyway.
     """
     from .backends import BackendError
 
@@ -3286,11 +3675,18 @@ def _record_shipped_pr(
         validate_transition(ticket.state, State.IN_REVIEW)
 
     already_closed = ticket.state is State.DONE
+    unmet_despite_closed = (
+        ticket.unmet_criteria() if already_closed and acceptance_checked_gate else []
+    )
     try:
         backend.comment(
             ticket.id,
             _shipped_comment(
-                ticket.id, pr_url, commit_sha, already_closed=already_closed
+                ticket,
+                pr_url,
+                commit_sha,
+                already_closed=already_closed,
+                unmet_despite_closed=unmet_despite_closed,
             ),
         )
     except BackendError as exc:
@@ -3425,6 +3821,7 @@ def _print_mark_shipped_result(
     replaced_pr: str | None,
     as_json: bool,
     instructions: list[str],
+    acceptance_checked_gate: bool = True,
 ) -> None:
     """The human/`--json` output for `mark-shipped` — split out of the command purely to keep
     the command itself under the file's function-length target."""
@@ -3445,6 +3842,18 @@ def _print_mark_shipped_result(
                     "unchecked_criteria": [
                         c.text for c in updated.unchecked_criteria()
                     ],
+                    # Non-empty only when state is DONE with criteria that wouldn't pass the
+                    # on-done close gate (HYP-1295) — the structured signal a scripted caller
+                    # (gh ship / task-cli's own hooks) can act on without parsing prose; the
+                    # human-facing warning lives in the tracker comment + `instructions` above.
+                    # Empty when `enforce.acceptance_checked` is disabled for this project
+                    # (review finding) — that gate is what defines "wouldn't pass", so a repo
+                    # that turned it off has no such notion.
+                    "done_with_unmet_criteria": (
+                        [c.text for c in updated.unmet_criteria()]
+                        if updated.state is State.DONE and acceptance_checked_gate
+                        else []
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -3489,7 +3898,9 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     pr_url, commit_sha = _parse_mark_shipped_flags(args)
     cfg = _load(args)
 
-    backend = _backend_for_id(cfg, args.id)
+    # Resolve routing once — `pcfg` feeds both the backend and the acceptance-gate read below.
+    pcfg = _config_for_id(cfg, args.id)
+    backend = _backend(pcfg)
     from .backends import BackendError
 
     try:
@@ -3524,6 +3935,14 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     # AFTER a successful update() but BEFORE the TG notify below would leave `already_recorded`
     # true on any retry and the notification permanently skipped (the durable link + comment
     # survive either way, so the impact is a missed best-effort ping, not a lost record).
+    #
+    # `acceptance_checked_gate` mirrors `enforce.acceptance_checked` from this project's
+    # `task.yaml` — a repo that disabled that gate never treats unchecked/unproven criteria as
+    # a violation, so the Done-with-unmet warning (see `_acceptance_instructions`/
+    # `_record_shipped_pr`) must not fire there either. It does not add an `already_recorded`
+    # clause — the warning fires on this call's own read only (see `_record_shipped_pr`'s
+    # docstring).
+    acceptance_checked_gate = _enforce_config(pcfg).acceptance_checked
     existing_pr = _stored_pr_url(ticket)
     already_recorded = (
         existing_pr == pr_url
@@ -3534,7 +3953,13 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
         updated, moved_to_review = ticket, False
     else:
         updated, moved_to_review = _record_shipped_pr(
-            backend, ticket, pr_url, commit_sha, commit_url, existing_pr
+            backend,
+            ticket,
+            pr_url,
+            commit_sha,
+            commit_url,
+            existing_pr,
+            acceptance_checked_gate=acceptance_checked_gate,
         )
         _record_session_touch(cfg, backend, updated)
         from .logging import log_event
@@ -3556,7 +3981,8 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
         moved_to_review=moved_to_review,
         replaced_pr=replaced_pr,
         as_json=args.json,
-        instructions=_acceptance_instructions(updated),
+        instructions=_acceptance_instructions(updated, acceptance_checked_gate=acceptance_checked_gate),
+        acceptance_checked_gate=acceptance_checked_gate,
     )
     return 0
 

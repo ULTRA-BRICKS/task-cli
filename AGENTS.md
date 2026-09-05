@@ -49,13 +49,27 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   weaken a gate silently; if a gate is wrong, change `policy.py` + add a test.
 - **`task gate` is the same predicate as the close gate, exposed pre-merge.**
   `policy.acceptance_gate` wraps `unchecked_criteria_violation` (the call `check_done` makes)
-  and adds only the recorded `post-merge-acceptance` opt-out (`POST_MERGE_ACCEPTANCE`, stored in
-  `Ticket.skips` but never matched by `apply_skips`, so it cannot waive `task done`). Never fork
-  the criterion predicate — `Ticket.unmet_criteria()` is its single home. The `--json` field
-  names (`ok`, `unchecked`, `proofless`, `post_merge_acceptance`, `gate_enabled`, `criteria`,
+  and `acceptance_min_violation` (the minimum-count gate `check` also enforces at close — a
+  1-criterion, fully-proven ticket must refuse `task gate` too, or a PR could merge whose
+  ticket can never legitimately reach Done), and adds only the recorded `post-merge-acceptance`
+  opt-out (`POST_MERGE_ACCEPTANCE`, stored in `Ticket.skips` but never matched by `apply_skips`,
+  so it cannot waive `task done`). Never fork either criterion predicate — `Ticket.unmet_criteria()`
+  and `acceptance_min_violation` are their single homes. The `--json` field names (`ok`,
+  `unchecked`, `proofless`, `below_minimum`, `post_merge_acceptance`, `gate_enabled`, `criteria`,
   `state`, `id`) are a contract consumed by agent-tools' `ci/ship/ship.sh`; changing them is a
   two-repo change. PR bodies in this ecosystem say `Refs #N`, never `Closes`/`Fixes` — the
   magic-close keywords close tickets behind these gates.
+- **The close gates only run when task-cli's own commands run them — an external integration
+  (Linear's GitHub-PR-link automation, GitHub's native "Closes #123" auto-close) can still write
+  Done straight to the backend without ever invoking task-cli, so none of `policy.check_done`'s
+  gates run.** `task audit` (`tasklib/audit.py` + `cli.cmd_audit`) is the after-the-fact
+  backstop — see README's "Audit" section for the full incident (HYP-1347), the policy-drift
+  caveat on what a finding does and doesn't prove, the recommended report-only cron wiring, and
+  known limitations (the 100-ticket page cap, the GitHub label-vs-native blind spot). Two
+  separately-tracked tool bugs (HYP-1355: a `task check --proof` upload can 404; HYP-1356:
+  `task check`/`task done` regenerate the whole description via `render(ticket)`, dropping
+  manually-authored content that doesn't round-trip) touch the same proof machinery this
+  backstop assumes is real — not fixed here, flagged so the connection isn't missed.
 - **`render.py` is the single source of truth for the ticket body.** The §5 section template
   (fixed order) is the contract; fields are authoritative, the body is derived. Do not
   hand-format a body anywhere else. `validate_format()` is what the formatting gate calls.

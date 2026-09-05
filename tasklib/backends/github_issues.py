@@ -158,15 +158,84 @@ class GitHubIssuesBackend:
         row = self._call(self._issues_url(f"/{num}"), method="PATCH", payload=payload)
         return self._row_to_ticket(row)
 
+    # The scan cap for a state-filtered list() — the documented "100 real issues" per-run
+    # budget (see README's Audit section), counted in ACTUAL issues (PRs excluded), not raw
+    # rows. _STATE_SCAN_MAX_PAGES bounds the worst case where a repo's /issues page is mostly
+    # pull requests (see _list_state_filtered's docstring) — 10 pages = at most 1000 raw rows
+    # fetched before giving up, never an unbounded scan.
+    _STATE_SCAN_TARGET = 100
+    _STATE_SCAN_MAX_PAGES = 10
+
     def list(self, *, labels=None, state=None, limit=30) -> list[Ticket]:
-        params = [f"per_page={min(limit, 100)}", "state=all"]
-        if labels:
-            params.append("labels=" + ",".join(labels))
-        rows = self._call(self._issues_url("?" + "&".join(params))) or []
-        tickets = [self._row_to_ticket(r) for r in rows if "pull_request" not in r]
+        # HYP-1347 P1 review finding: `state` is applied client-side AFTER the fetch — GitHub
+        # issues are only natively open/closed, our finer states live in a managed label — so
+        # capping the fetch to `min(limit, 100)` BEFORE that filter runs can silently scan zero
+        # matching issues when `limit` or more non-matching ones sort ahead of them (e.g. `task
+        # audit`'s default `--limit 50` scanning the 50 most recent issues of ANY state instead
+        # of the 50 most recent Done ones). Whenever a state filter narrows the result, always
+        # scan the FULL 100-issue budget before filtering, then truncate to `limit` — see
+        # `_list_state_filtered`. Deliberately NOT narrowed further with `state=closed`/
+        # `labels=status:done`: `_derive_state` is label-first, so a native `Closes #123`
+        # auto-close that leaves the managed label untouched would still need the full scan to
+        # be found (a documented, separate blind spot — see README). An unfiltered list (the
+        # common case, e.g. interactive `task list`) keeps fetching only what it needs, in the
+        # SAME order as before this fix (no `sort=` override) — only the state-filtered path's
+        # ordering/pagination changed.
         if state is not None:
-            tickets = [t for t in tickets if t.state == state]
+            tickets = self._list_state_filtered(labels, state, limit)
+        else:
+            params = [f"per_page={min(limit, 100)}", "state=all"]
+            if labels:
+                params.append("labels=" + ",".join(labels))
+            rows = self._call(self._issues_url("?" + "&".join(params))) or []
+            tickets = [self._row_to_ticket(r) for r in rows if "pull_request" not in r]
         return tickets[:limit]
+
+    def _list_state_filtered(self, labels, state: State, limit: int) -> list[Ticket]:
+        """Paginate until `_STATE_SCAN_TARGET` real issues (PRs excluded) have been scanned
+        for `state`, `limit` matches are already in hand (review finding: the caller truncates
+        to `limit` anyway, so further pages could only fetch rows it would discard), or the
+        search space is exhausted.
+
+        review finding (round 2, Codex): GitHub's `/issues` endpoint returns pull requests
+        mixed into the same page as issues (`"pull_request" not in r` is the only way to tell
+        them apart, applied AFTER the fetch) — a single 100-row page on a repo where recent
+        activity is PR-heavy could be almost entirely PRs, silently starving the REAL 100-issue
+        scan budget the state filter is supposed to get. Paginating with `sort=updated&
+        direction=desc` (the "most recently touched first" ordering the audit's whole
+        guarantee depends on — GitHub's own default is `sort=created`, unrelated to what
+        changed most recently) keeps accumulating non-PR rows across pages until 100 real
+        issues have been seen or `_STATE_SCAN_MAX_PAGES` is exhausted.
+        """
+        tickets: list[Ticket] = []
+        seen: set[str] = set()
+        page = 1
+        while (
+            len(tickets) < self._STATE_SCAN_TARGET
+            and page <= self._STATE_SCAN_MAX_PAGES
+            and sum(1 for t in tickets if t.state == state) < limit
+        ):
+            params = ["per_page=100", "state=all", "sort=updated", "direction=desc", f"page={page}"]
+            if labels:
+                params.append("labels=" + ",".join(labels))
+            rows = self._call(self._issues_url("?" + "&".join(params))) or []
+            if not rows:
+                break
+            # Dedup by id (review finding): `sort=updated` offset pagination is a LIVE ordering,
+            # not a snapshot — an issue touched between two page fetches jumps to the head and
+            # is served again on the next page. A duplicate must neither eat the scan budget
+            # nor count twice toward `limit` (displacing a real match).
+            for row in rows:
+                if "pull_request" in row:
+                    continue
+                ticket = self._row_to_ticket(row)
+                if ticket.id not in seen:
+                    seen.add(ticket.id)
+                    tickets.append(ticket)
+            if len(rows) < 100:
+                break  # last page — nothing left to paginate into
+            page += 1
+        return [t for t in tickets if t.state == state]
 
     def search(self, query: str, *, state=None, limit=30) -> list[Ticket]:
         import urllib.parse
@@ -181,8 +250,13 @@ class GitHubIssuesBackend:
         rows = result.get("items", []) if isinstance(result, dict) else []
         tickets = [self._row_to_ticket(r) for r in rows]
         # GitHub search only knows is:open/is:closed; our finer states (in-progress/in-review)
-        # live in labels, so post-filter client-side exactly like list() and the Linear backend
-        # — otherwise `find --state in-progress` would return every open issue.
+        # live in labels, so post-filter client-side — otherwise `find --state in-progress`
+        # would return every open issue. Known and accepted: unlike list() (which scans a full
+        # 100-issue budget before filtering — see _list_state_filtered), this fetch is capped
+        # at `limit` rows BEFORE the filter, so a state-filtered search can under-report when
+        # non-matching results sort ahead of the matches. `task audit` never uses search();
+        # `task find --state` is an interactive convenience where a wider fetch is not worth
+        # the latency.
         if state is not None:
             tickets = [t for t in tickets if t.state == state]
         return tickets[:limit]
