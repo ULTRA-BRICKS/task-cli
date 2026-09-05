@@ -47,6 +47,18 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   genuinely impossible, recorded on the `Criterion`). Acceptance criteria are `Criterion`
   objects (text + `checked` + `proof`/`force_reason`), round-tripped by `render.py`. Never
   weaken a gate silently; if a gate is wrong, change `policy.py` + add a test.
+- **`task gate` is the same predicate as the close gate, exposed pre-merge.**
+  `policy.acceptance_gate` wraps `unchecked_criteria_violation` (the call `check_done` makes)
+  and `acceptance_min_violation` (the minimum-count gate `check` also enforces at close — a
+  1-criterion, fully-proven ticket must refuse `task gate` too, or a PR could merge whose
+  ticket can never legitimately reach Done), and adds only the recorded `post-merge-acceptance`
+  opt-out (`POST_MERGE_ACCEPTANCE`, stored in `Ticket.skips` but never matched by `apply_skips`,
+  so it cannot waive `task done`). Never fork either criterion predicate — `Ticket.unmet_criteria()`
+  and `acceptance_min_violation` are their single homes. The `--json` field names (`ok`,
+  `unchecked`, `proofless`, `below_minimum`, `post_merge_acceptance`, `gate_enabled`, `criteria`,
+  `state`, `id`) are a contract consumed by agent-tools' `ci/ship/ship.sh`; changing them is a
+  two-repo change. PR bodies in this ecosystem say `Refs #N`, never `Closes`/`Fixes` — the
+  magic-close keywords close tickets behind these gates.
 - **The close gates only run when task-cli's own commands run them — an external integration
   (Linear's GitHub-PR-link automation, GitHub's native "Closes #123" auto-close) can still write
   Done straight to the backend without ever invoking task-cli, so none of `policy.check_done`'s

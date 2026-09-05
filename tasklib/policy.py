@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .model import Ticket
+from .model import Criterion, Ticket
 from .msgrefs import strip_quoted_blocks as _strip_quoted_blocks
 from .msgrefs import unquoted_msgrefs as _unquoted_msgrefs
 from .render import validate_format
@@ -84,6 +84,16 @@ DEFAULT_ACCEPTANCE_MIN = 2
 # Gates that NO recorded justification can waive — a hard refuse. A ticket must not be closed
 # with an unchecked criterion under any escape hatch; only disabling the gate in config removes it.
 NON_SKIPPABLE_GATES: frozenset[str] = frozenset({GATE_ACCEPTANCE_CHECKED, GATE_MSGREF_TITLE})
+
+# NOT a gate: the recorded post-merge-acceptance opt-out (task-cli#115). A ticket whose
+# acceptance is inherently AFTER the merge (a release publish, a deploy the merge itself
+# triggers) records `post-merge-acceptance: <reason>` under `## Skipped gates` (via `task change
+# <id> --post-merge-acceptance "<reason>"`), and the ship-time gate (`task gate`,
+# :func:`acceptance_gate`) passes while reporting the reason. It lives in `Ticket.skips` because
+# that is the ticket's one audited, body-persisted escape-hatch record — but `apply_skips` never
+# matches it (no violation carries this name), so it can NOT waive `acceptance-checked` on close:
+# the ticket still needs real acceptance to reach Done, just after the merge.
+POST_MERGE_ACCEPTANCE = "post-merge-acceptance"
 
 ALL_GATES: tuple[str, ...] = (
     GATE_ACCEPTANCE,
@@ -291,6 +301,17 @@ def check(
     return apply_skips(raw, ticket, warnings)
 
 
+def gate_is_skipped(ticket: Ticket, gate: str) -> bool:
+    """Whether a recorded skip waives ``gate`` — the ONE predicate every consumer of
+    ``ticket.skips`` must use (:func:`apply_skips`, and :func:`acceptance_gate` for the
+    independently-skippable minimum-count gate), so a skip can never be honored by one and not
+    the other (review finding, task-cli PR#118 round 4: an earlier version of `acceptance_gate`
+    re-implemented this as a bare ``gate not in ticket.skips`` inline, which would silently
+    diverge from `apply_skips` the moment either copy grew a new rule — e.g. requiring a
+    non-empty reason)."""
+    return gate in ticket.skips and gate not in NON_SKIPPABLE_GATES
+
+
 def apply_skips(raw: list[Violation], ticket: Ticket, warnings: list[Violation] | None = None) -> PolicyResult:
     """Partition raw violations into still-failing vs. (auditably) skipped ones.
 
@@ -302,12 +323,28 @@ def apply_skips(raw: list[Violation], ticket: Ticket, warnings: list[Violation] 
     """
     result = PolicyResult(warnings=list(warnings) if warnings else [])
     for v in raw:
-        if v.gate in ticket.skips and v.gate not in NON_SKIPPABLE_GATES:
+        if gate_is_skipped(ticket, v.gate):
             if v.gate not in result.skipped:
                 result.skipped.append(v.gate)
         else:
             result.violations.append(v)
     return result
+
+
+def acceptance_min_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
+    """The acceptance-criteria MINIMUM-COUNT gate (``cfg.acceptance_min``, default 2) —
+    extracted from :func:`_text_gates` (task-cli#115 review finding) so :func:`acceptance_gate`
+    can check the SAME predicate `task done` enforces at close, not just the every-criterion-
+    checked-with-proof gate. Unlike that hard gate, this one IS skippable (``--skip-acceptance
+    "<reason>"``) — `apply_skips` honours a recorded skip for it, `acceptance_gate` must too."""
+    if cfg.acceptance_criteria and len(ticket.acceptance) < cfg.acceptance_min:
+        return Violation(
+            GATE_ACCEPTANCE,
+            f"at least {cfg.acceptance_min} acceptance criteria are required "
+            f"(have {len(ticket.acceptance)})",
+            hint='add --acceptance "<criterion>" (repeatable)',
+        )
+    return None
 
 
 def _text_gates(ticket: Ticket, cfg: EnforceConfig) -> list[Violation]:
@@ -320,15 +357,9 @@ def _text_gates(ticket: Ticket, cfg: EnforceConfig) -> list[Violation]:
     helper takes no ``phase``.
     """
     out: list[Violation] = []
-    if cfg.acceptance_criteria and len(ticket.acceptance) < cfg.acceptance_min:
-        out.append(
-            Violation(
-                GATE_ACCEPTANCE,
-                f"at least {cfg.acceptance_min} acceptance criteria are required "
-                f"(have {len(ticket.acceptance)})",
-                hint='add --acceptance "<criterion>" (repeatable)',
-            )
-        )
+    v = acceptance_min_violation(ticket, cfg)
+    if v is not None:
+        out.append(v)
     if cfg.motivation and not ticket.why.strip():
         out.append(Violation(GATE_MOTIVATION, "the Why (motivation) section is required", hint='add --why "..."'))
     if cfg.user_impact and not ticket.user_impact.strip():
@@ -718,6 +749,70 @@ def unchecked_criteria_violation(ticket: Ticket, cfg: EnforceConfig) -> Violatio
         GATE_ACCEPTANCE_CHECKED,
         "a ticket closes only when every criterion is checked WITH a proof — " + " | ".join(parts),
         hint="check each with a visual proof: task check <id> <n> --proof <path>",
+    )
+
+
+@dataclass
+class GateReport:
+    """The ship-time acceptance verdict (`task gate`, task-cli#115) — what `gh ship` reads
+    BEFORE merging, so a ticket can no longer be closed on merge with nothing accepted.
+
+    ``ok`` is the verdict; ``unchecked``/``proofless`` are the gaps (always populated, even
+    when an opt-out or a disabled gate makes the verdict pass — the shipper still needs to
+    know what is owed after the merge). ``post_merge_reason`` is the recorded opt-out (see
+    :data:`POST_MERGE_ACCEPTANCE`) or ``""``; ``gate_enabled`` mirrors
+    ``enforce.acceptance_checked``. ``no_criteria`` is true specifically for ZERO criteria (the
+    ``criteria: 0`` case the JSON contract documents); ``below_minimum`` is the broader "fewer
+    than ``acceptance_min`` (and not skipped)" case task-cli#115 review round 1 added — every
+    ``no_criteria`` ticket is also ``below_minimum`` whenever the minimum is >=1, but a
+    1-of-2-criteria ticket is ``below_minimum`` without being ``no_criteria``.
+    """
+
+    ok: bool
+    unchecked: list[Criterion] = field(default_factory=list)
+    proofless: list[Criterion] = field(default_factory=list)
+    post_merge_reason: str = ""
+    gate_enabled: bool = True
+    no_criteria: bool = False
+    below_minimum: bool = False
+
+
+def acceptance_gate(ticket: Ticket, cfg: EnforceConfig) -> GateReport:
+    """Evaluate the merge-time acceptance gate. The VERDICT is exactly the two on-done gates
+    that decide whether a ticket's acceptance is real: ``acceptance-checked``
+    (:func:`unchecked_criteria_violation`, the same call :func:`check_done` makes — every
+    criterion checked WITH a proof) and the ``acceptance-criteria`` MINIMUM count
+    (:func:`acceptance_min_violation`, the same predicate `_text_gates` enforces at both create
+    and close) — never a re-derivation of either, so `task gate` and `task done` can't disagree
+    about whether a ticket is accepted (task-cli#115 review round 1: a 1-criterion, fully-proven
+    ticket used to pass `task gate` and then still refuse `task done`, merging a PR whose ticket
+    could never close). The only thing this ADDS beyond those two gates is the recorded
+    post-merge opt-out, a MERGE-gate-only concession (the ticket's acceptance is inherently
+    after the merge — a release publish) that never waives either close gate.
+    """
+    unmet = ticket.unmet_criteria()
+    reason = ticket.skips.get(POST_MERGE_ACCEPTANCE, "").strip()
+    violation = unchecked_criteria_violation(ticket, cfg)
+    # The minimum-count gate — `acceptance_min_violation`, the SAME predicate `_text_gates`/
+    # `check_done` enforce — is the ONLY thing that may fail a zero-criteria ticket. It already
+    # respects every legitimate override `task done` does: disabled via `acceptance_criteria:
+    # false`, a lowered `acceptance_min: 0`, or a recorded `--skip-acceptance "<reason>"`
+    # (review finding, task-cli PR#118 round 2 — Codex: an earlier version had a SEPARATE,
+    # unconditional `no_criteria = cfg.acceptance_checked and not ticket.acceptance` term that
+    # ignored all three overrides, so `task gate` could refuse a ticket `task done` would
+    # legitimately let close). `no_criteria` below is now purely INFORMATIONAL — which refusal
+    # message to show — never a second, independent way to fail the gate.
+    min_violation = acceptance_min_violation(ticket, cfg)
+    below_minimum = min_violation is not None and not gate_is_skipped(ticket, GATE_ACCEPTANCE)
+    no_criteria = not ticket.acceptance
+    return GateReport(
+        ok=(violation is None and not below_minimum) or bool(reason),
+        unchecked=[c for c in unmet if not c.checked],
+        proofless=[c for c in unmet if c.checked],
+        post_merge_reason=reason,
+        gate_enabled=cfg.acceptance_checked,
+        no_criteria=no_criteria,
+        below_minimum=below_minimum,
     )
 
 

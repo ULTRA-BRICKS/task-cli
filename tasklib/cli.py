@@ -296,6 +296,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="set/replace the due date (empty string clears it)",
     )
     chp.add_argument(
+        "--post-merge-acceptance",
+        dest="post_merge_acceptance",
+        metavar="REASON",
+        help="record that acceptance is inherently post-merge (e.g. a release publish): "
+        "`task gate` passes and reports the reason; `task done` still needs real proofs",
+    )
+    chp.add_argument(
         "--done", action="store_true", help="close the ticket (runs the on-done gates)"
     )
     chp.add_argument(
@@ -349,14 +356,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ckp.add_argument("id", help="ticket id (#123 or HYP-456)")
     ckp.add_argument(
-        "selector", help="which criterion: a 1-based index, or a text substring"
+        "selector",
+        nargs="*",
+        help="which criteria: 1-based indexes, or a text substring (one or several)",
+    )
+    ckp.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_criteria",
+        help="select every criterion (one --proof per criterion in order, or one shared)",
     )
     ckp.add_argument(
         "--proof",
         action="append",
         default=[],
         metavar="PATH",
-        help="visual proof (screenshot/image) for this criterion (repeatable)",
+        help="visual proof (screenshot/image); one per selected criterion in order, "
+        "or a single shared one (repeatable)",
     )
     ckp.add_argument(
         "--screenshot",
@@ -371,6 +387,22 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="REASON",
         help="check WITHOUT a visual proof, recording why one is impossible/impractical",
     )
+
+    # accept — walk the remaining criteria interactively, asking for a proof each
+    acp = sub.add_parser(
+        "accept",
+        parents=[common],
+        help="walk the unaccepted criteria one by one, asking for a proof path (TTY only)",
+    )
+    acp.add_argument("id", help="ticket id (#123 or HYP-456)")
+
+    # gate — the read-only ship-time verdict (agent-tools ci/ship/ship.sh calls this pre-merge)
+    gtp = sub.add_parser(
+        "gate",
+        parents=[common],
+        help="exit 0 only when every criterion is checked WITH a proof (the pre-merge gate)",
+    )
+    gtp.add_argument("id", help="ticket id (#123 or HYP-456)")
 
     # mark-shipped — the `gh ship` post-merge hook entry (agent-tools ci/ship/ship.sh)
     msp = sub.add_parser(
@@ -478,6 +510,8 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "done": cmd_done,
         "check": cmd_check,
+        "accept": cmd_accept,
+        "gate": cmd_gate,
         "audit": cmd_audit,
         "mark-shipped": cmd_mark_shipped,
         "classify": cmd_classify,
@@ -678,6 +712,17 @@ def _config_for_id(cfg, ticket_id: str):
 def _backend_for_id(cfg, ticket_id: str):
     """The backend that owns ``ticket_id`` — see :func:`_config_for_id`."""
     return _backend(_config_for_id(cfg, ticket_id))
+
+
+def _routing_for_id(cfg, ticket_id: str):
+    """Resolve BOTH the backend and the owning project's config for ``ticket_id`` in ONE
+    routing pass — shared by every command that needs both (`cmd_gate`, `cmd_accept`,
+    `cmd_mark_shipped`), so a cross-project ticket's policy is always read from the SAME
+    config the backend was built from, and routing is never derived twice per invocation
+    (review finding, task-cli PR#118 rounds 3-4: each of these three commands had
+    independently reinvented this pairing, one of them re-resolving routing a second time)."""
+    pcfg = _config_for_id(cfg, ticket_id)
+    return _backend(pcfg), pcfg
 
 
 def _route_id_to_project(ticket_id: str, projects: list):
@@ -2685,6 +2730,23 @@ def _search_projects(
     )
 
 
+def _record_post_merge_acceptance(ticket: Ticket, reason: str | None) -> None:
+    """Record the merge-gate opt-out (`--post-merge-acceptance "<reason>"`) on the ticket —
+    under `## Skipped gates`, the ticket's one audited escape-hatch record. `None` = flag not
+    passed (leave as-is); a blank reason is refused (an opt-out without a reason is exactly the
+    silent bypass task-cli#115 exists to stop)."""
+    if reason is None:
+        return
+    from .policy import POST_MERGE_ACCEPTANCE
+
+    text = reason.strip()
+    if not text:
+        raise _UserError(
+            "--post-merge-acceptance needs a reason (why is acceptance only possible after the merge?)"
+        )
+    ticket.skips[POST_MERGE_ACCEPTANCE] = text
+
+
 def cmd_change(args: argparse.Namespace) -> int:
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
@@ -2754,6 +2816,7 @@ def cmd_change(args: argparse.Namespace) -> int:
         if label not in ticket.labels:
             ticket.labels.append(label)
     ticket.skips.update(new_skips)
+    _record_post_merge_acceptance(ticket, args.post_merge_acceptance)
 
     # An edit that TOUCHES a text field is re-scanned for bare references (rule 1) and re-graded
     # on impact quality (rule 5) — whether or not this same command ALSO closes the ticket, so
@@ -2910,84 +2973,191 @@ def cmd_done(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """Check an acceptance criterion off — but only WITH a visual proof (rule 3).
+    """Check acceptance criteria off — but only WITH a visual proof (rule 3).
 
     A checkbox cannot be ticked without a screenshot/image backing it (``--proof <path>``).
     When a visual proof is genuinely impossible, ``--force "<reason>"`` records the reason on
     the criterion (audited). The checked state + proof live in the body, so the on-done gate
-    (rule 2) can refuse a close while any criterion is still unchecked.
+    (rule 2) — and the pre-merge `task gate` — can refuse while any criterion is still open.
+
+    Several criteria at once (task-cli#115): ``task check <id> 1 2 3 --proof a --proof b
+    --proof c`` (one proof per criterion, in order) or ``task check <id> --all --proof shot.png``
+    (one shared proof). The single-selector form keeps its original contract: the first
+    ``--proof`` backs the box, any further ones are attached as implementation screenshots.
     """
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
     from .backends import AmbiguousBackendError, BackendError
-    from .logging import log_event
 
     try:
         ticket = backend.get(args.id)
-    except BackendError as exc:
+    except (BackendError, AmbiguousBackendError) as exc:
         raise _UserError(str(exc)) from exc
 
-    crit = _select_criterion(ticket, args.selector)
+    crits = _select_criteria(ticket, args.selector, args.all_criteria)
     proofs = list(args.proof or [])
+    # A duplicate selector (`1 1 2`) collapsing to fewer criteria than selectors given, combined
+    # with several --proof values, is positionally ambiguous: which proof was meant for the
+    # REPEATED selector? (review finding, task-cli PR#118 round 5, Opus — `1 1 2 --proof a
+    # --proof b` silently paired `b` onto criterion 2 instead of the second `1`, durably
+    # persisting the wrong proof on the wrong box with no error.) Refuse rather than guess.
+    if len(proofs) > 1 and not args.all_criteria and len(crits) < len(args.selector):
+        raise _UserError(
+            f"{len(args.selector)} selectors given but only {len(crits)} distinct criteria — "
+            "a duplicate selector combined with several --proof values is ambiguous (which "
+            "proof was meant for the repeat?). Give one --proof per DISTINCT criterion, in "
+            "order, with no repeated selectors."
+        )
     force_reason = getattr(args, "force_reason", None)
     if not proofs and not force_reason:
+        what = repr(crits[0].text) if len(crits) == 1 else f"{len(crits)} criteria"
         raise _UserError(
-            f"refusing to check {crit.text!r}: a visual proof is required.\n"
+            f"refusing to check {what}: a visual proof is required.\n"
             "  why: a criterion is only 'done' when there's a screenshot/image proving it.\n"
             '  fix: task check <id> <selector> --proof <path>   (or --force "<reason>" if a '
             "proof is genuinely impossible)."
         )
+    per_criterion = _plan_proofs(crits, proofs)
+    # Positions are captured BEFORE the write: `backend.update` returns a fresh Ticket, so
+    # the Criterion objects in `crits` are not the ones in the updated acceptance list.
+    indexes = [_criterion_index(ticket, c) for c in crits]
 
+    attach = _ProofAttacher(backend, ticket.id)
+    extra_shots: list[Screenshot] = []
+    for crit, crit_proofs in zip(crits, per_criterion):
+        _apply_check(attach, crit, crit_proofs, force_reason)
+        extra_shots.extend(
+            Screenshot(ref=p, kind="implementation") for p in crit_proofs[1:]
+        )
+    try:
+        updated = backend.update(ticket)
+        _attach_screenshots(backend, updated.id, extra_shots)
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+
+    _record_session_touch(cfg, backend, updated)
+    _log_checked(updated, indexes, forced=bool(force_reason and not proofs))
+    print(_ok(_checked_summary(updated, indexes, force_reason if not proofs else None)))
+    return 0
+
+
+def _select_criteria(ticket: Ticket, selectors: list[str], all_criteria: bool) -> list[Criterion]:
+    """Resolve the ``check`` selection: ``--all`` (every criterion), or one-or-more selectors
+    (each a 1-based index or a unique text substring, via :func:`_select_criterion`). Exactly
+    one of the two forms; duplicates collapse (``1 1`` is one criterion)."""
+    if all_criteria and selectors:
+        raise _UserError("pass either --all or explicit selectors, not both")
+    if all_criteria:
+        if not ticket.acceptance:
+            raise _UserError(f"ticket {ticket.id or '(unknown)'} has no acceptance criteria to check")
+        return list(ticket.acceptance)
+    if not selectors:
+        raise _UserError(
+            "which criteria? give one or more selectors (a 1-based index or a text "
+            "substring), or --all for every criterion"
+        )
+    chosen: list[Criterion] = []
+    for sel in selectors:
+        crit = _select_criterion(ticket, sel)
+        if not any(crit is c for c in chosen):
+            chosen.append(crit)
+    return chosen
+
+
+def _plan_proofs(crits: list[Criterion], proofs: list[str]) -> list[list[str]]:
+    """Which proofs back which criterion. One criterion: ALL proofs (legacy contract — the
+    first backs the box, the rest are attached as screenshots). Several: exactly one per
+    criterion in order, or a single shared proof, or none (``--force``) — anything else is
+    ambiguous and refused before anything is persisted."""
+    if len(crits) == 1:
+        return [proofs]
+    if not proofs:
+        return [[] for _ in crits]
+    if len(proofs) == 1:
+        return [[proofs[0]] for _ in crits]
+    if len(proofs) == len(crits):
+        return [[p] for p in proofs]
+    raise _UserError(
+        f"{len(crits)} criteria selected but {len(proofs)} proofs given — pass one --proof "
+        "per criterion (in selector order) or a single shared --proof"
+    )
+
+
+class _ProofAttacher:
+    """Turn a raw proof ref into the DURABLE ref the ticket body should carry — once per
+    distinct ref, so a proof shared by several criteria is uploaded a single time.
+
+    HYP-1355: a raw local path (or an unauthenticated-on-fetch backend URL) embedded directly in
+    the criterion text is never actually viewable by anyone reading the ticket — ``attach()`` is
+    the backend's contract for turning a ref into something durable (a real hosted URL, or a
+    registered Linear attachment echoing its own asset URL back). Best-effort: if the durable
+    attach itself fails, fall back to the raw ref rather than losing the proof entirely
+    (matches ``_attach_screenshots``' contract) — logged, because a silent fallback means the
+    printed proof note and the actually-embedded ref can quietly disagree.
+    """
+
+    def __init__(self, backend, ticket_id: str) -> None:
+        self._backend = backend
+        self._ticket_id = ticket_id
+        self._durable: dict[str, str] = {}
+
+    def __call__(self, ref: str) -> str:
+        if ref in self._durable:
+            return self._durable[ref]
+        from .backends import AmbiguousBackendError, BackendError
+        from .logging import log_event
+
+        try:
+            durable = self._backend.attach(self._ticket_id, ref)
+        except (BackendError, AmbiguousBackendError) as exc:
+            durable = ref
+            log_event(
+                "criterion.proof_attach_failed", ticket_id=self._ticket_id, error=str(exc)
+            )
+        self._durable[ref] = durable
+        return durable
+
+
+def _apply_check(attach: _ProofAttacher, crit: Criterion, proofs: list[str], force_reason: str | None) -> None:
+    """Tick one criterion in memory: with its (durably attached) first proof, or forced."""
     crit.checked = True
     if proofs:
-        # Durably attach the FIRST proof before embedding it in the body (HYP-1355): a raw
-        # local path (or an unauthenticated-on-fetch backend URL) embedded directly in the
-        # criterion text is never actually viewable by anyone reading the ticket — attach()
-        # is the backend's contract for turning a ref into something durable (a real hosted
-        # URL, or a registered Linear attachment echoing its own asset URL back), so USE that
-        # return value as the body reference instead of discarding it. Best-effort: if the
-        # durable attach itself fails, fall back to the raw ref rather than losing the proof
-        # entirely (matches _attach_screenshots' existing best-effort contract below). The
-        # fallback is logged (review finding) — a silent fallback here means the operator's
-        # printed proof_note and the actually-embedded ref can quietly disagree.
-        try:
-            crit.proof = backend.attach(ticket.id, proofs[0])
-        except (BackendError, AmbiguousBackendError) as exc:
-            crit.proof = proofs[0]
-            log_event(
-                "criterion.proof_attach_failed", ticket_id=ticket.id, error=str(exc)
-            )
+        crit.proof = attach(proofs[0])
         crit.force_reason = ""
     else:
         crit.proof = ""
         crit.force_reason = force_reason or ""
 
-    try:
-        updated = backend.update(ticket)
-        _attach_screenshots(
-            backend,
-            updated.id,
-            [Screenshot(ref=p, kind="implementation") for p in proofs[1:]],
-        )
-    except BackendError as exc:
-        raise _UserError(str(exc)) from exc
 
-    _record_session_touch(cfg, backend, updated)
-    log_event(
-        "criterion.checked",
-        ticket_id=updated.id,
-        forced=bool(force_reason and not proofs),
+def _log_checked(ticket: Ticket, indexes: list[int], *, forced: bool) -> None:
+    from .logging import log_event
+
+    for _ in indexes:
+        log_event("criterion.checked", ticket_id=ticket.id, forced=forced)
+
+
+def _checked_summary(ticket: Ticket, indexes: list[int], force_reason: str | None) -> str:
+    """The one-line result, read back from the UPDATED ticket by 1-based position (see
+    `cmd_check`: the pre-write Criterion objects are stale after `backend.update`). `crit.proof`,
+    not the raw path the caller typed: when the durable attach succeeded the embedded ref may
+    differ, and the note must match the ticket body."""
+    remaining = len(ticket.unmet_criteria())
+    crits = [ticket.acceptance[i - 1] for i in indexes]
+    if len(crits) == 1:
+        crit = crits[0]
+        proof_note = f"forced ({force_reason})" if force_reason else f"proof {crit.proof}"
+        return f"checked {crit.text!r} on {ticket.id}  ({proof_note}; {remaining} left)"
+    notes = ", ".join(
+        f"[{i}] " + (f"forced ({force_reason})" if force_reason else f"proof {c.proof}")
+        for i, c in zip(indexes, crits)
     )
-    # crit.proof, not proofs[0]: when the durable attach succeeded, crit.proof is the
-    # embedded ref (may differ from the raw proofs[0] the caller passed) — the printed note
-    # must match what's actually in the ticket body, not what the operator typed (review
-    # finding).
-    proof_note = f"proof {crit.proof}" if proofs else f"forced ({force_reason})"
-    remaining = len(updated.unchecked_criteria())
-    print(
-        _ok(f"checked {crit.text!r} on {updated.id}  ({proof_note}; {remaining} left)")
-    )
-    return 0
+    return f"checked {len(crits)} criteria on {ticket.id}  ({notes}; {remaining} left)"
+
+
+def _criterion_index(ticket: Ticket, crit: Criterion) -> int:
+    """The 1-based position of ``crit`` in the ticket's FULL acceptance list — the number
+    `task check <id> <n>` expects. By identity, not equality: two criteria can share text."""
+    return next(i for i, c in enumerate(ticket.acceptance, start=1) if c is crit)
 
 
 def _select_criterion(ticket: Ticket, selector: str) -> Criterion:
@@ -3751,14 +3921,14 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     pr_url, commit_sha = _parse_mark_shipped_flags(args)
     cfg = _load(args)
 
-    # Resolve routing once — `pcfg` feeds both the backend and the acceptance-gate read below.
-    pcfg = _config_for_id(cfg, args.id)
-    backend = _backend(pcfg)
-    from .backends import BackendError
+    # Resolve routing once — `pcfg` feeds both the backend and the acceptance-gate read below
+    # (same shared helper `cmd_gate`/`cmd_accept` use — task-cli PR#118 round 4).
+    backend, pcfg = _routing_for_id(cfg, args.id)
+    from .backends import AmbiguousBackendError, BackendError
 
     try:
         ticket = backend.get(args.id)
-    except BackendError as exc:
+    except (BackendError, AmbiguousBackendError) as exc:
         raise _UserError(str(exc)) from exc
 
     if ticket.state is State.CANCELLED:
@@ -3838,6 +4008,234 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
         acceptance_checked_gate=acceptance_checked_gate,
     )
     return 0
+
+
+# ── gate + accept (the pre-merge acceptance gate, task-cli#115) ─────────────────────
+# Tickets were closing on merge behind task-cli's back: Linear's GitHub integration and
+# GitHub's "Closes #N" flip a ticket to Done the instant the linked PR merges, so the on-done
+# gates (which only run inside `task done`) never fire. `task gate` is the read-only verdict
+# `gh ship` (agent-tools ci/ship/ship.sh) reads BEFORE merging; `task accept` is the
+# convenience that makes passing it cheap.
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    """The read-only ship-time verdict. Exit 0 = accepted (every criterion checked WITH a
+    proof, or a recorded post-merge opt-out, or the gate disabled in config, or a cancelled
+    ticket); exit 1 = NOT accepted (the gaps are listed); exit 2 = could not evaluate (unknown
+    id, backend error). ``--json`` prints the same shape on every 0/1 path — see
+    `_gate_payload` for the contract ship.sh consumes."""
+    cfg = _load(args)
+    backend, pcfg = _routing_for_id(cfg, args.id)
+    from .backends import AmbiguousBackendError, BackendError
+    from .policy import acceptance_gate
+
+    try:
+        ticket = backend.get(args.id)
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(str(exc)) from exc
+
+    # The gate is the OWNING project's policy (`pcfg`), not necessarily the cwd's: `gh ship`
+    # runs this in the code repo while the ticket may live in another project.
+    report = acceptance_gate(ticket, _enforce_config(pcfg))
+    cancelled = ticket.state is State.CANCELLED
+    ok = report.ok or cancelled
+    if args.json:
+        import json
+
+        print(json.dumps(_gate_payload(ticket, report, ok), ensure_ascii=False, indent=2))
+    else:
+        for line in _gate_lines(ticket, report, ok, cancelled):
+            print(line)
+    return 0 if ok else 1
+
+
+def _gate_payload(ticket: Ticket, report, ok: bool) -> dict:
+    """The `task gate --json` contract (consumed by agent-tools' ship.sh — keep the field
+    names stable; documented in README "The pre-merge gate"): ``ok`` (the verdict),
+    ``unchecked`` / ``proofless`` (each ``{index, text}``, 1-based index into the full criteria
+    list = the number `task check` takes), ``post_merge_acceptance`` (the recorded opt-out
+    reason, or null), ``gate_enabled`` (``enforce.acceptance_checked``), ``state``, ``criteria``
+    (the total count — 0 means "nothing to accept", which is itself a refusal), ``below_minimum``
+    (true when `criteria` is fewer than this repo's configured `acceptance_min`, the SAME
+    minimum-count gate `task done` enforces, and it wasn't skipped — a ticket can refuse here
+    with EMPTY `unchecked`/`proofless`, e.g. one fully-proven criterion below a minimum of two;
+    a consumer must check this field too, not just the two gap arrays, to explain a refusal),
+    ``id``."""
+    return {
+        "id": ticket.id,
+        "ok": ok,
+        "state": ticket.state.value,
+        "gate_enabled": report.gate_enabled,
+        "post_merge_acceptance": report.post_merge_reason or None,
+        "criteria": len(ticket.acceptance),
+        "below_minimum": report.below_minimum,
+        "unchecked": [{"index": _criterion_index(ticket, c), "text": c.text} for c in report.unchecked],
+        "proofless": [{"index": _criterion_index(ticket, c), "text": c.text} for c in report.proofless],
+    }
+
+
+def _gate_lines(ticket: Ticket, report, ok: bool, cancelled: bool) -> list[str]:
+    """The human report: verdict first, then the gaps (always, so a passing opt-out still
+    shows what is owed after the merge), then the fix commands.
+
+    Precedence matters (review finding, task-cli#115 round 2): a disabled `acceptance_checked`
+    gate does NOT imply a pass any more — the independent minimum-count gate
+    (`report.below_minimum`) can still refuse a criteria-checked-gate-disabled ticket, so `ok`
+    is checked before assuming "gate disabled" means "gate passes".
+    """
+    total = len(ticket.acceptance)
+    gaps = len(report.unchecked) + len(report.proofless)
+    lines: list[str] = []
+    if cancelled:
+        lines.append(_ok(f"{ticket.id} is cancelled — nothing to accept, gate passes."))
+    elif ok and report.post_merge_reason:
+        lines.append(_ok(f"{ticket.id}: post-merge acceptance recorded — gate passes ({gaps} of {total} still owed after the merge)."))
+        lines.append(_dim(f"  reason: {report.post_merge_reason}"))
+    elif ok and not report.gate_enabled:
+        lines.append(_ok(f"{ticket.id}: the acceptance-checked gate is disabled in this repo's config — gate passes."))
+    elif ok and report.no_criteria:
+        # `ok` here means the MINIMUM-count gate itself allows zero (acceptance_criteria:
+        # false, acceptance_min: 0, or a recorded --skip-acceptance) — "0 of 0 criteria checked
+        # with a proof" would assert proofs that don't exist (review finding, task-cli PR#118
+        # round 4, GLM). There is genuinely nothing to accept, and this repo's config says
+        # that's fine.
+        lines.append(_ok(f"{ticket.id}: gate passes — this repo does not require acceptance criteria (there are none to accept)."))
+    elif ok:
+        lines.append(_ok(f"{ticket.id}: accepted — {total} of {total} criteria checked with a proof."))
+    elif report.no_criteria:
+        lines.append(_err(f"{ticket.id}: not accepted — the ticket has no acceptance criteria, so nothing can be proven."))
+        lines.append(_dim(f'  fix: task change {ticket.id} --acceptance "<criterion>" (repeatable), then accept them'))
+    elif report.below_minimum:
+        noun = "criterion" if total == 1 else "criteria"
+        lines.append(_err(f"{ticket.id}: not accepted — only {total} acceptance {noun} (the minimum is enforced on close too)."))
+        lines.append(_dim(f'  fix: task change {ticket.id} --acceptance "<criterion>" (repeatable), or --skip-acceptance "<reason>" if genuinely N/A'))
+    else:
+        lines.append(_err(f"{ticket.id}: not accepted — {gaps} of {total} criteria still open."))
+    for c in report.unchecked:
+        lines.append(_warn(f"  [{_criterion_index(ticket, c)}] {c.text}  (unchecked)"))
+    for c in report.proofless:
+        lines.append(_warn(f"  [{_criterion_index(ticket, c)}] {c.text}  (checked without a proof)"))
+    if gaps:
+        lines.append(_dim(f"  fix: task accept {ticket.id}   (walks each one, asking for a proof)"))
+        lines.append(_dim(f"       task check {ticket.id} <n> [<n> ...] --proof <path> [--proof <path> ...]"))
+        if not ok:
+            lines.append(_dim(f'       or, if acceptance is inherently post-merge: task change {ticket.id} --post-merge-acceptance "<reason>"'))
+    return lines
+
+
+def cmd_accept(args: argparse.Namespace) -> int:
+    """Walk the criteria that still block the gate, one by one, asking for a proof path each
+    (interactive — a TTY is required; without one it prints the headless equivalent). Every
+    answer is persisted immediately, so an interrupted walk keeps its progress. Exit 0 when
+    the ticket ends up accepted, 1 when something was skipped."""
+    if not sys.stdin.isatty():
+        print(_accept_usage(args.id))
+        return 2
+    cfg = _load(args)
+    # Resolve routing once — pcfg feeds both the backend and every acceptance-gate read below,
+    # matching `cmd_gate` exactly (review finding, task-cli PR#118 rounds 3-4): `gh ship` runs
+    # `task gate` in the code repo while the ticket may live in another project, so `cmd_accept`'s
+    # own completion check must read the SAME owning-project config `task gate` would.
+    backend, pcfg = _routing_for_id(cfg, args.id)
+    from .backends import AmbiguousBackendError, BackendError
+
+    try:
+        ticket = backend.get(args.id)
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(str(exc)) from exc
+
+    pending = ticket.unmet_criteria()
+    if not pending:
+        ok, msg = _accept_completion_message(ticket, pcfg)
+        print(msg)
+        return 0 if ok else 1
+    print(f"{ticket.id}: {len(pending)} criteria to accept. Enter a proof path/URL, "
+          '"force: <reason>" when a proof is impossible, or Enter to skip.')
+    attach = _ProofAttacher(backend, ticket.id)
+    # Walk by 1-based position, not by Criterion object: every `backend.update` hands back a
+    # fresh Ticket, so the objects in `pending` are stale after the first persisted answer.
+    for idx in [_criterion_index(ticket, c) for c in pending]:
+        crit = ticket.acceptance[idx - 1]
+        answer = _prompt_proof(idx, crit)
+        if answer is None:
+            continue
+        proof, force_reason = answer
+        _apply_check(attach, crit, [proof] if proof else [], force_reason)
+        try:
+            ticket = backend.update(ticket)
+        except BackendError as exc:
+            raise _UserError(str(exc)) from exc
+        crit = ticket.acceptance[idx - 1]
+        _log_checked(ticket, [idx], forced=bool(force_reason))
+        print(_ok(f"  checked ({'forced: ' + force_reason if force_reason else 'proof ' + crit.proof})"))
+    _record_session_touch(cfg, backend, ticket)
+    ok, msg = _accept_completion_message(ticket, pcfg)
+    print(msg)
+    return 0 if ok else 1
+
+
+def _accept_completion_message(ticket: Ticket, cfg) -> tuple[bool, str]:
+    """Whether `task accept` should report success, and the lines to print — reusing
+    `_gate_lines` (`task gate`'s OWN message builder), not a second, bespoke message (review
+    finding, task-cli PR#118 round 3, Opus): a hand-written "every criterion is checked with a
+    proof" string collapsed the opt-out/disabled-gate/below-minimum cases into one wording,
+    which could assert a falsehood (e.g. print "checked with a proof" for a ticket accepted
+    only via the post-merge opt-out, with criteria still unchecked). Reusing `_gate_lines`
+    means this can never drift from what `task gate {id}` itself would print.
+
+    ``cfg`` must already be the OWNING project's config (`_config_for_id`, resolved ONCE by the
+    caller — `cmd_accept` — and reused here), matching what `cmd_gate` reads, so the two can
+    never disagree about a cross-project ticket's `acceptance_min`."""
+    from .policy import acceptance_gate
+
+    report = acceptance_gate(ticket, _enforce_config(cfg))
+    cancelled = ticket.state is State.CANCELLED
+    ok = report.ok or cancelled
+    return ok, "\n".join(_gate_lines(ticket, report, ok, cancelled))
+
+
+def _prompt_proof(idx: int, crit: Criterion) -> tuple[str, str] | None:
+    """Ask for one criterion's proof (``idx`` is its 1-based position, the number `task check`
+    takes). Returns ``(proof, "")``, ``("", force_reason)``, or ``None`` to skip. A local path
+    that does not exist is re-prompted (a typo must not be recorded as a proof); a URL is
+    taken as-is. Ctrl-D (EOFError) or Ctrl-C (KeyboardInterrupt) degrades to a skip, like an
+    empty answer, instead of an unhandled traceback (review finding, task-cli PR#118 rounds
+    1/4/5) — every already-answered criterion this session stays persisted either way."""
+    print(f"[{idx}] {crit.text}")
+    while True:
+        try:
+            raw = input("  proof: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print(_dim("  skipped (input closed)"))
+            return None
+        if not raw:
+            print(_dim("  skipped"))
+            return None
+        if raw.lower().startswith("force:"):
+            reason = raw[len("force:"):].strip()
+            if reason:
+                return "", reason
+            print(_warn("  a force needs a reason: force: <why a proof is impossible>"))
+            continue
+        if _looks_like_url(raw) or Path(raw).expanduser().exists():
+            return raw, ""
+        print(_warn(f"  {raw}: not found — give an existing file (e.g. from `dev shot`) or a URL"))
+
+
+def _looks_like_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
+def _accept_usage(ticket_id: str) -> str:
+    return (
+        f"task accept {ticket_id} is interactive and needs a terminal (no TTY on stdin).\n"
+        "  headless equivalents:\n"
+        f"    task check {ticket_id} <n> [<n> ...] --proof <path> [--proof <path> ...]   # one proof per criterion, in order\n"
+        f"    task check {ticket_id} --all --proof <path>                                # one shared proof\n"
+        f'    task check {ticket_id} <n> --force "<reason>"                              # when a proof is impossible\n'
+        f"    task gate {ticket_id} [--json]                                            # the verdict"
+    )
 
 
 def cmd_classify(args: argparse.Namespace) -> int:

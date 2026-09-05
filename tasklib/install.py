@@ -48,6 +48,7 @@ description: >-
   PR speak one shape. Use INSTEAD of raw `gh issue` / `linear` by hand. Backends: GitHub
   Issues (default) and Linear (per-repo). Commands: `task new`/`task create`, `task list`
   (this session's tickets), `task read <id>`, `task find <q>`, `task change <id>`,
+  `task check <id> ... --proof`, `task accept <id>`, `task gate <id>` (the pre-merge verdict),
   `task done <id>`, `task status <id> [<state>]`, `task classify "<text>"`, `task session`.
 metadata:
   author: alex-mextner
@@ -67,6 +68,11 @@ task list --all                  # every known project's tickets, grouped by pro
 task read <id>                   # full ticket (every section) — works outside a repo
 task find "<query>"              # search title+body (cross-project when outside a repo)
 task change <id> --acceptance "..." --screenshot proof.png
+task check <id> 1 2 --proof a.png --proof b.png   # tick criteria WITH a proof each (in order)
+task check <id> --all --proof shot.png            # every criterion, one shared proof
+task accept <id>                 # walk the unaccepted criteria, asking for a proof each (TTY)
+task gate <id> [--json]          # read-only pre-merge verdict: exit 0 only when fully accepted
+task change <id> --post-merge-acceptance "<reason>"  # opt-out when acceptance is inherently post-merge
 task done <id>                   # close a ticket (runs the on-done gates)
 task status <id>                 # read state (works outside a repo)
 task status <id> done            # transition (runs the on-done gates)
@@ -99,6 +105,28 @@ task session                     # show current session + its tickets
 - **Paged like git**: `list`/`find` page through `less` only on an interactive terminal;
   piped/scripted output is plain text. Cap is 100 interactive / 30 piped (override with `-n`).
   Disable with `--no-pager`, `NO_PAGER`, or empty `$PAGER`. `--json` is never paged.
+
+## Accept BEFORE you merge — and never "Closes"/"Fixes" in a PR body
+- **A merge moves the ticket to In Review; only acceptance closes it.** Linear's "PR merged"
+  automation and `task mark-shipped` (the `gh ship` post-merge hook) both leave the ticket in
+  In Review — "awaiting acceptance". Done is reached only through `task done <id>` after every
+  criterion is checked with a proof. A ticket found Done with open criteria was closed behind
+  the gates: reopen it (`task status <id> in-review`) and accept it for real.
+- **`gh ship` runs `task gate <id>` before merging** and refuses while any criterion is
+  unchecked or checked without a proof (the same predicate as the `task done` close gate).
+  Before shipping: `task accept <id>` (interactive) or `task check <id> 1 2 3 --proof a.png
+  --proof b.png --proof c.png` (one proof per criterion, in order; `--force "<reason>"` when a
+  proof is genuinely impossible), then `task gate <id>` to confirm exit 0.
+- **Opt-out** only when acceptance is inherently post-merge (a release publish, a deploy the
+  merge itself triggers): `task change <id> --post-merge-acceptance "<reason>"`. The gate then
+  passes and reports the reason; `task done` still needs real proofs afterwards.
+- **PR bodies say `Refs #N` / `Refs HYP-N` — NEVER `Closes`, `Fixes`, `Resolves` (or their
+  -s/-d forms) followed by an issue or ticket.** Why: GitHub's magic-close keywords and
+  Linear's GitHub integration move the ticket to Done the instant the PR merges — behind
+  task-cli's back, so none of its close gates run and the ticket ends up Done with empty
+  checkboxes (127 of 435 HYP tickets closed since June looked like that). `gh ship` refuses a
+  PR whose title/body carries such a keyword; `Refs` links the PR to the ticket without
+  closing it. The ticket closes only through `task done <id>`, after acceptance.
 """
 
 # One-line SessionStart blurb, same shape the siblings (draw/tg/review) use. The hook cats
