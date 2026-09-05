@@ -2987,15 +2987,27 @@ def cmd_check(args: argparse.Namespace) -> int:
     """
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
 
     try:
         ticket = backend.get(args.id)
-    except BackendError as exc:
+    except (BackendError, AmbiguousBackendError) as exc:
         raise _UserError(str(exc)) from exc
 
     crits = _select_criteria(ticket, args.selector, args.all_criteria)
     proofs = list(args.proof or [])
+    # A duplicate selector (`1 1 2`) collapsing to fewer criteria than selectors given, combined
+    # with several --proof values, is positionally ambiguous: which proof was meant for the
+    # REPEATED selector? (review finding, task-cli PR#118 round 5, Opus — `1 1 2 --proof a
+    # --proof b` silently paired `b` onto criterion 2 instead of the second `1`, durably
+    # persisting the wrong proof on the wrong box with no error.) Refuse rather than guess.
+    if len(proofs) > 1 and not args.all_criteria and len(crits) < len(args.selector):
+        raise _UserError(
+            f"{len(args.selector)} selectors given but only {len(crits)} distinct criteria — "
+            "a duplicate selector combined with several --proof values is ambiguous (which "
+            "proof was meant for the repeat?). Give one --proof per DISTINCT criterion, in "
+            "order, with no repeated selectors."
+        )
     force_reason = getattr(args, "force_reason", None)
     if not proofs and not force_reason:
         what = repr(crits[0].text) if len(crits) == 1 else f"{len(crits)} criteria"
@@ -4186,10 +4198,17 @@ def _prompt_proof(idx: int, crit: Criterion) -> tuple[str, str] | None:
     """Ask for one criterion's proof (``idx`` is its 1-based position, the number `task check`
     takes). Returns ``(proof, "")``, ``("", force_reason)``, or ``None`` to skip. A local path
     that does not exist is re-prompted (a typo must not be recorded as a proof); a URL is
-    taken as-is."""
+    taken as-is. Ctrl-D (EOFError) or Ctrl-C (KeyboardInterrupt) degrades to a skip, like an
+    empty answer, instead of an unhandled traceback (review finding, task-cli PR#118 rounds
+    1/4/5) — every already-answered criterion this session stays persisted either way."""
     print(f"[{idx}] {crit.text}")
     while True:
-        raw = input("  proof: ").strip()
+        try:
+            raw = input("  proof: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print(_dim("  skipped (input closed)"))
+            return None
         if not raw:
             print(_dim("  skipped"))
             return None

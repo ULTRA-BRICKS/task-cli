@@ -410,6 +410,37 @@ def test_check_many_with_mismatched_proof_count_is_clean_error(capsys, _inject_f
     assert not any(c.checked for c in _inject_fake.get(created.id).acceptance), "nothing persisted on refusal"
 
 
+def test_check_duplicate_selector_with_multiple_proofs_is_a_clean_error(capsys, _inject_fake):
+    """Opus finding (task-cli PR#118 round 5): `1 1 2 --proof a --proof b` used to silently
+    collapse the duplicate `1` and pair `b.png` onto criterion 2 instead of the repeated `1` —
+    the wrong proof durably persisted on the wrong box, with no error. Must refuse instead."""
+    created = _seed(_inject_fake)
+    rc = main(["check", created.id, "1", "1", "2", "--proof", "a.png", "--proof", "b.png"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "3 selectors given but only 2 distinct criteria" in out
+    assert "ambiguous" in out
+    assert not any(c.checked for c in _inject_fake.get(created.id).acceptance), "nothing persisted on refusal"
+
+
+def test_check_converts_an_ambiguous_backend_error_to_a_clean_refusal(capsys, monkeypatch, _inject_fake):
+    """Opus finding (round 5): `cmd_check` used to only catch `BackendError` on its `.get`
+    call, unlike `cmd_gate`/`cmd_accept`/`cmd_mark_shipped`, which all convert a mid-read
+    `AmbiguousBackendError` into a clean refusal."""
+    from tasklib.backends import AmbiguousBackendError
+
+    created = _seed(_inject_fake)
+
+    def raise_ambiguous(ticket_id):
+        raise AmbiguousBackendError("connection dropped mid-read")
+
+    monkeypatch.setattr(_inject_fake, "get", raise_ambiguous)
+    rc = main(["check", created.id, "1", "--proof", "shot.png"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "connection dropped mid-read" in out
+
+
 def test_check_many_with_force_reason_applies_to_each(_inject_fake):
     created = _seed(_inject_fake)
     rc = main(["check", created.id, "2", "3", "--force", "no UI to shoot"])
@@ -470,6 +501,32 @@ def test_accept_walks_the_remaining_criteria(capsys, monkeypatch, tmp_path, _inj
     assert stored.acceptance[2].checked and stored.acceptance[2].force_reason == "restart cannot be screenshotted"
     assert "[2] handles the empty case" in out and "[3] survives a restart" in out
     assert "accepted" in out
+
+
+def test_accept_ctrl_d_skips_instead_of_a_traceback(capsys, monkeypatch, tmp_path, _inject_fake):
+    """Review finding (rounds 1/4/5): Ctrl-D (EOFError) or Ctrl-C mid-walk must degrade to a
+    skip like an empty answer, never an unhandled traceback — and whatever was already
+    answered before the interrupt stays persisted."""
+    created = _seed(_inject_fake)
+    shot = tmp_path / "one.png"
+    shot.write_bytes(b"png")
+    answers = iter([str(shot)])
+
+    def fake_input(prompt=""):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise EOFError from None  # stdin stays closed for every prompt after the first
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", fake_input)
+    rc = main(["accept", created.id])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "skipped (input closed)" in out
+    stored = _inject_fake.get(created.id)
+    assert stored.acceptance[0].checked  # the first, already-answered criterion is persisted
+    assert not stored.acceptance[1].checked and not stored.acceptance[2].checked
 
 
 def test_accept_skips_on_empty_answer_and_persists_each_step(capsys, monkeypatch, tmp_path, _inject_fake):
