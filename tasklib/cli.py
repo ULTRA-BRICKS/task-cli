@@ -25,11 +25,14 @@ import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import __version__
 from .model import Criterion, Screenshot, State, Ticket
 from .transitions import TransitionError, validate_transition
+
+if TYPE_CHECKING:
+    from .policy import Violation
 
 # ── tiny output helpers (no color dep; honor NO_COLOR) ──────────────────────────────
 _USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -71,6 +74,7 @@ _SKIP_FLAGS = (
     ("--skip-links", "links"),
     ("--skip-links-url", "links-url"),
     ("--skip-msgref-quote", "msgref-quote"),
+    ("--skip-read-before-edit", "read-before-edit"),
 )
 
 
@@ -917,6 +921,48 @@ def _msgref_resolvable_ids(ticket, cfg_e) -> set[int] | None:
     return set(load_history())
 
 
+def _read_before_edit_violation(
+    ticket_id: str, session_id: str, repo: str, cfg_e
+) -> Violation | None:
+    """Build the read-before-edit ``Violation`` for ``cmd_change --what``, or ``None`` when the
+    edit may proceed (the gate is disabled, or a fresh read is on record).
+
+    The ONLY I/O this gate needs (``read_tracker.is_fresh``) lives here, in the impure `cli.py`
+    layer — `_enforce_edit_or_die` stays I/O-free and just renders whatever `Violation` this
+    returns (see its docstring for the waiver-scoping rationale). Distinguishes
+    ``is_fresh``'s three outcomes (see that function's docstring): ``True`` → no violation;
+    ``False`` → the ordinary "go read it first" refusal; ``None`` → the marker STORE itself is
+    unreadable, a different and more actionable message (retrying `task read` won't fix a
+    broken store) — both ``False`` and ``None`` refuse the edit (fail closed either way), only
+    the message differs.
+    """
+    if not cfg_e.read_before_edit:
+        return None
+    from .policy import GATE_READ_BEFORE_EDIT, Violation
+    from .read_tracker import is_fresh
+
+    fresh = is_fresh(session_id, ticket_id, repo=repo)
+    if fresh is True:
+        return None
+    if fresh is None:
+        return Violation(
+            GATE_READ_BEFORE_EDIT,
+            f"cannot confirm {ticket_id} was read recently — the read-marker store could not "
+            "be read",
+            # `_report_and_die` already auto-appends the "(or --skip-{gate} ...)" suggestion for
+            # every non-hard gate (review finding, task-cli#119: an earlier version repeated it
+            # here too, printing the skip flag twice in the rendered refusal) — this hint
+            # describes only the FIX action, matching every other gate's hint convention.
+            hint="check the marker store's permissions, or verify the current content manually",
+        )
+    return Violation(
+        GATE_READ_BEFORE_EDIT,
+        f"--what would overwrite {ticket_id}'s description, but this session has not read the "
+        "current ticket recently",
+        hint=f"run `task read {ticket_id}` first",
+    )
+
+
 def _enforce_or_die(ticket: Ticket, cfg, phase) -> None:
     from .policy import Phase, check
 
@@ -1107,8 +1153,11 @@ def _enforce_edit_or_die(
     check_links: bool,
     check_impact: bool,
     check_title: bool = False,
+    read_violation: Violation | None = None,
+    read_waived: bool = False,
 ) -> None:
-    """The edit-time gates (rule 1 links, and rule 5 impact-quality when impact was touched).
+    """The edit-time gates (rule 1 links, rule 5 impact-quality when impact was touched, and
+    the read-before-edit gate when ``--what`` was touched).
 
     A plain ``change`` (not a close) doesn't re-run the full create gates — an edit may be a
     partial step. The links rule runs only when the edit TOUCHED a scanned text field, so a
@@ -1125,6 +1174,20 @@ def _enforce_edit_or_die(
     ``--force "<reason>"`` shortcut is a create/new-only flag — on ``change`` ``--force`` is the
     boolean transition-legality override, not a reason). Only a metadata-only edit, which
     touches no scanned field, is exempt.
+
+    ``read_violation``/``read_waived`` carry the read-before-edit gate's outcome, computed by
+    the CALLER (``cmd_change``, via ``_read_before_edit_violation``) — that check needs I/O (a
+    marker-file lookup, ``read_tracker.is_fresh``), and this function stays I/O-free like every
+    other gate it runs. Critically, ``read_waived`` must come from THIS command's OWN
+    ``--skip-read-before-edit`` flag (the ``new_skips`` dict `cmd_change` collects), NOT from
+    ``ticket.skips`` the way every other gate here is waived: ``apply_skips`` treats a gate name
+    in ``ticket.skips`` as a PERMANENT waiver (it round-trips through the rendered body forever),
+    which is correct for ``links``/``user-impact-quality`` (a false-positive match is a
+    false positive forever) but wrong here — a `--skip-read-before-edit` a past command recorded
+    would then silently auto-waive every FUTURE unread edit too, defeating the entire point of a
+    gate that means "did the agent making THIS edit actually look first" (task-cli#119, review
+    finding). So this gate is applied to the result AFTER ``apply_skips`` runs on the others,
+    keyed on the caller-supplied ``read_waived`` instead.
     """
     from .policy import (
         apply_skips,
@@ -1169,8 +1232,15 @@ def _enforce_edit_or_die(
         v = msgref_title_violation(ticket, cfg_e)
         if v is not None:
             raw.append(v)
-    if raw or warnings:
-        _report_and_die(apply_skips(raw, ticket, warnings), "update")
+    result = apply_skips(raw, ticket, warnings)
+    if read_violation is not None:
+        if read_waived:
+            if read_violation.gate not in result.skipped:
+                result.skipped.append(read_violation.gate)
+        else:
+            result.violations.append(read_violation)
+    if result.violations or result.skipped or result.warnings:
+        _report_and_die(result, "update")
 
 
 def _notify_mutation(cfg, ticket, action: str) -> None:
@@ -1428,6 +1498,10 @@ def cmd_create(args: argparse.Namespace) -> int:
     record(
         session.id, created.id, created.title, repo=_safe_backend_coordinate(backend)
     )
+    # task-cli#119: creating a ticket counts as reading it — see _mark_ticket_read's docstring.
+    # `session=session` reuses the detection this function already did above (review finding,
+    # task-cli#119) rather than paying a second `_detect_session` call.
+    _mark_ticket_read(cfg, backend, created, session=session)
     from .logging import log_event
 
     log_event(
@@ -1855,6 +1929,50 @@ def _record_session_touch(cfg, backend, ticket: Ticket) -> None:
         ticket.title,
         repo=_safe_verified_coordinate(cfg, backend, ticket),
     )
+
+
+def _mark_ticket_read(cfg, backend, ticket: Ticket, *, session=None) -> None:
+    """Record ``ticket`` as read by the current session — the write half of the
+    read-before-edit gate (task-cli#119). Shared by `cmd_read`/`cmd_view` (an explicit read),
+    `cmd_create`/`_classify_create` (creating a ticket counts as having read it), and
+    `cmd_change` (a successful ``--what`` edit also counts, since the session just supplied the
+    new content). See `tasklib.read_tracker`'s module docstring for the full design rationale —
+    scope, TTL, fail-closed tri-state, what the marker does and doesn't prove, and the accepted
+    Linear create/get/update coordinate-shape limitation.
+
+    ``session``, when given, is used instead of a fresh `_detect_session(cfg)` call — the
+    session cannot change mid-process, so a caller that already detected it this same command
+    (`cmd_change`'s own gate check) should pass it rather than pay a second detection (which can
+    spawn a `git rev-parse` subprocess on the git-branch fallback; review finding, task-cli#119).
+    Every OTHER call site (`cmd_read`, `cmd_create`, `_classify_create`) omits it and resolves
+    internally, unchanged.
+
+    Unlike `_record_session_touch`, this does NOT skip an unresolved session
+    (`session.source == "none"`) or require the ticket to carry this session's label — those
+    guards exist for the SESSION-TICKET-LIST sidecar's user-visible listing concern, which this
+    gate doesn't have.
+
+    Wrapped in a broad ``except Exception`` (not just the ``OSError`` ``read_tracker.record``
+    already swallows): a bookkeeping side effect of a command whose PRIMARY job (show the
+    ticket / create it / apply the edit) already succeeded by the time this runs must degrade to
+    "not recorded" (fail-closed: the next edit is refused as unread) rather than crash an
+    already-successful command, mirroring `_print_recent_tickets_after_create`'s identical
+    contract for its own best-effort sidecar read.
+    """
+    if not ticket.id:
+        return
+    try:
+        from .read_tracker import record as record_read
+
+        if session is None:
+            session = _detect_session(cfg)
+        record_read(
+            session.id, ticket.id, repo=_safe_verified_coordinate(cfg, backend, ticket)
+        )
+    except Exception as exc:
+        from .logging import log_event
+
+        log_event("read_tracker.mark_read_failed", error=type(exc).__name__)
 
 
 def _print_session_attention_after_mutation(
@@ -2644,6 +2762,7 @@ def cmd_read(args: argparse.Namespace) -> int:
         if save_dir:
             d["saved_attachments"] = saved_lines
         print(json.dumps(d, ensure_ascii=False, indent=2))
+        _mark_ticket_read(cfg, backend, ticket)
         return 0
     print(_bold(f"{ticket.id}  {ticket.title}"))
     print(_dim(f"  state: {ticket.state.value}   {ticket.url}"))
@@ -2672,6 +2791,16 @@ def cmd_read(args: argparse.Namespace) -> int:
             print(_dim(line))
     print()
     print(render(ticket))
+    # Record this session as having read the CURRENT ticket content (task-cli#119) — the read
+    # half of the read-before-edit gate `cmd_change --what` enforces. Placed LAST, after
+    # `_save_attachments` AND every print above have already succeeded (review finding, round
+    # 3: NOT immediately after the fetch) — if `--save-attachments` raises (an unwritable dir)
+    # or a print raises (e.g. a closed pipe), the command exits having shown the caller nothing
+    # (or an incomplete view), and must not still mint a "read" credential for content that was
+    # never actually, fully displayed. Best-effort (see read_tracker.record); a marker-write
+    # failure here just means the next edit is refused as unread, the correct fail-closed
+    # outcome, not a reason to fail this already-successful read.
+    _mark_ticket_read(cfg, backend, ticket)
     return 0
 
 
@@ -2834,12 +2963,43 @@ def cmd_change(args: argparse.Namespace) -> int:
             args.acceptance,
         ]
     )
+    # The read-before-edit gate (task-cli#119) fires ONLY when `--what` itself is being set — the
+    # ticket's core description, which is what Alex asked to stop losing to a blind overwrite.
+    # `--why`/`--impact`/`--if-not-done` are NOT gated: unlike `--what`, they aren't the field
+    # whose loss prompted this (see task-cli#119's ticket body for the scoping call).
+    read_violation = None
+    read_cfg_e = _enforce_config(cfg)
+    # `read_session` is threaded down to the post-edit `_mark_ticket_read` call below too (review
+    # finding, task-cli#119) — the session cannot change mid-process, so detecting it twice in one
+    # `change --what` (once here, once there) is pure waste; `None` here (gate disabled, or no
+    # `--what`) just means that later call falls back to detecting it itself, unchanged.
+    read_session = None
+    # Check `.read_before_edit` BEFORE resolving the session/coordinate: both can be real work —
+    # `_detect_session` falls back to a `git rev-parse` subprocess (5s timeout) when neither
+    # `$TASK_SESSION` nor tmux is set — and `_read_before_edit_violation` already no-ops on a
+    # disabled gate internally, so a repo with `enforce.read_before_edit: false` must not still
+    # pay that cost on every `--what` edit just to discover the gate is off.
+    if args.what and read_cfg_e.read_before_edit:
+        read_session = _detect_session(cfg)
+        read_violation = _read_before_edit_violation(
+            ticket.id,
+            read_session.id,
+            _safe_verified_coordinate(cfg, backend, ticket),
+            read_cfg_e,
+        )
+    from .policy import GATE_READ_BEFORE_EDIT
+
     _enforce_edit_or_die(
         ticket,
         cfg,
         check_links=touched_text,
         check_impact=bool(args.impact),
         check_title=bool(args.title),
+        read_violation=read_violation,
+        # `GATE_READ_BEFORE_EDIT`, not a bare "read-before-edit" literal (review finding,
+        # task-cli#119): the canonical gate name has one home, `policy.py`, matching every
+        # other gate-name comparison in this file.
+        read_waived=GATE_READ_BEFORE_EDIT in new_skips,
     )
 
     if args.done:
@@ -2859,6 +3019,18 @@ def cmd_change(args: argparse.Namespace) -> int:
     from .logging import log_event
 
     _record_session_touch(cfg, backend, updated)
+    # task-cli#119 review finding: a successful `--what` edit that PASSED (or was waived on)
+    # the read-before-edit gate must itself count as reading the ticket going forward —
+    # otherwise `read #1` at T0, `change --what` at T0+10m (passes), `change --what` again at
+    # T0+40m refuses as "blind" even though this session just WROTE the description it would be
+    # overwriting. GATED ON `args.what` (review finding, second round): marking read on EVERY
+    # successful change — including a metadata-only `--due`/`--label` edit that never touched
+    # or displayed the description — would hand out a read credential the session never earned,
+    # opening a two-command bypass (metadata edit first to mint a fresh marker, unrelated blind
+    # `--what` edit next, still within the TTL). Only a command that actually set `--what` (and
+    # therefore supplied/knows the new current text) may refresh the marker.
+    if args.what:
+        _mark_ticket_read(cfg, backend, updated, session=read_session)
     log_event(
         "ticket.changed", ticket_id=updated.id, backend=cfg.backend, closed=args.done
     )
@@ -4380,6 +4552,10 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
     record(
         session.id, created.id, created.title, repo=_safe_backend_coordinate(backend)
     )
+    # task-cli#119: creating a ticket counts as reading it — see _mark_ticket_read's docstring.
+    # `session=session` reuses the detection this function already did above (review finding,
+    # task-cli#119) rather than paying a second `_detect_session` call.
+    _mark_ticket_read(cfg, backend, created, session=session)
     # classify --create is the tg-cli inbound hook path; unlike cmd_create, it must not append
     # a session-attention notice because the hook consumes stdout programmatically.
     print(_ok(f"created {created.id} from message  {created.url}"))
