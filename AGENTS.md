@@ -47,6 +47,17 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   genuinely impossible, recorded on the `Criterion`). Acceptance criteria are `Criterion`
   objects (text + `checked` + `proof`/`force_reason`), round-tripped by `render.py`. Never
   weaken a gate silently; if a gate is wrong, change `policy.py` + add a test.
+- **The close gates only run when task-cli's own commands run them — an external integration
+  (Linear's GitHub-PR-link automation, GitHub's native "Closes #123" auto-close) can still write
+  Done straight to the backend without ever invoking task-cli, so none of `policy.check_done`'s
+  gates run.** `task audit` (`tasklib/audit.py` + `cli.cmd_audit`) is the after-the-fact
+  backstop — see README's "Audit" section for the full incident (HYP-1347), the policy-drift
+  caveat on what a finding does and doesn't prove, the recommended report-only cron wiring, and
+  known limitations (the 100-ticket page cap, the GitHub label-vs-native blind spot). Two
+  separately-tracked tool bugs (HYP-1355: a `task check --proof` upload can 404; HYP-1356:
+  `task check`/`task done` regenerate the whole description via `render(ticket)`, dropping
+  manually-authored content that doesn't round-trip) touch the same proof machinery this
+  backstop assumes is real — not fixed here, flagged so the connection isn't missed.
 - **`render.py` is the single source of truth for the ticket body.** The §5 section template
   (fixed order) is the contract; fields are authoritative, the body is derived. Do not
   hand-format a body anywhere else. `validate_format()` is what the formatting gate calls.
