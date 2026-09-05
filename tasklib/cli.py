@@ -627,24 +627,31 @@ def _known_projects(cfg) -> tuple[list, str | None]:
     return projects, current_coordinate
 
 
-def _backend_for_id(cfg, ticket_id: str):
-    """Resolve the backend that owns ``ticket_id`` — works inside a repo AND outside one.
+def _config_for_id(cfg, ticket_id: str):
+    """Resolve the config to use for ``ticket_id`` — the cwd's when inside a repo (or with a
+    pinned coordinate / ``--repo``), else the config the registered project's overlay resolves
+    to: a Linear id (``HYP-456``) by its team prefix; a GitHub id (``#123``) when exactly one
+    GitHub project is registered. An ambiguous or unroutable id fails with a 3-part error
+    rather than a cryptic backend failure.
 
-    Inside a repo (or with a pinned coordinate / ``--repo``) the cwd's backend is used. Outside
-    a repo the ticket is routed to a registered project: a Linear id (``HYP-456``) by its team
-    prefix; a GitHub id (``#123``) when exactly one GitHub project is registered. An ambiguous
-    or unroutable id fails with a 3-part error rather than a cryptic backend failure.
-    """
+    LIMITATION: only ``backend``/``github``/``linear`` are ever re-pointed by a registry
+    entry's overlay — ``enforce:`` always resolves to the CALLER's own config, whether pinned
+    or registry-routed, never the ticket's owning project's committed `task.yaml` (cross-project
+    `enforce:` override tracked in task-cli#117, an open design question, not an obvious bug)."""
     if _current_project_overlay(cfg) is not None:
-        return _backend(cfg)
+        return cfg
 
     projects, _ = _known_projects(cfg)
     candidates = [p for p in projects if p.explicit]
     chosen = _route_id_to_project(ticket_id, candidates)
     if chosen is None:
         raise _UserError(_unroutable_id_error(ticket_id, candidates))
-    pcfg = _config_for_overlay(cfg, chosen.overlay)
-    return _backend(pcfg)
+    return _config_for_overlay(cfg, chosen.overlay)
+
+
+def _backend_for_id(cfg, ticket_id: str):
+    """The backend that owns ``ticket_id`` — see :func:`_config_for_id`."""
+    return _backend(_config_for_id(cfg, ticket_id))
 
 
 def _route_id_to_project(ticket_id: str, projects: list):
@@ -3128,6 +3135,15 @@ def _acceptance_instructions(ticket: Ticket, *, acceptance_checked_gate: bool = 
                 f"all acceptance criteria are already checked — if the other close gates pass, run `task done {ticket.id}`."
             )
         ]
+    if not acceptance_checked_gate:
+        # Same contract as the Done branch above (review finding): a repo that disabled the
+        # gate will not demand checked criteria on `task done`, so "acceptance needed before
+        # this can be marked Done" would be false advice there.
+        return [
+            _dim(
+                f"{len(unchecked)} criteria unchecked (checked criteria are not enforced on close here) — run `task done {ticket.id}` when the other close gates pass."
+            )
+        ]
     lines = [
         _warn(
             f"acceptance needed before this can be marked Done ({len(unchecked)} unchecked):"
@@ -3430,7 +3446,9 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     pr_url, commit_sha = _parse_mark_shipped_flags(args)
     cfg = _load(args)
 
-    backend = _backend_for_id(cfg, args.id)
+    # Resolve routing once — `pcfg` feeds both the backend and the acceptance-gate read below.
+    pcfg = _config_for_id(cfg, args.id)
+    backend = _backend(pcfg)
     from .backends import BackendError
 
     try:
@@ -3472,7 +3490,7 @@ def cmd_mark_shipped(args: argparse.Namespace) -> int:
     # `_record_shipped_pr`) must not fire there either. It does not add an `already_recorded`
     # clause — the warning fires on this call's own read only (see `_record_shipped_pr`'s
     # docstring).
-    acceptance_checked_gate = _enforce_config(cfg).acceptance_checked
+    acceptance_checked_gate = _enforce_config(pcfg).acceptance_checked
     existing_pr = _stored_pr_url(ticket)
     already_recorded = (
         existing_pr == pr_url

@@ -255,11 +255,10 @@ def test_mark_shipped_retry_on_a_legitimately_done_ticket_stays_idempotent(_inje
     assert len(_inject_fake.comments) == 1  # no second comment
 
 
-def test_mark_shipped_respects_a_disabled_acceptance_checked_gate(tmp_path, _inject_fake):
-    """A repo with `enforce.acceptance_checked: false` never treats unchecked/unproven
-    criteria as a close-gate violation (`policy.unchecked_criteria_violation` returns
-    ``None`` there) — mark-shipped must not contradict that configured contract with a false
-    Done-with-unmet warning."""
+def _repo_without_acceptance_gate(tmp_path) -> str:
+    """A local checkout whose committed `task.yaml` disables `enforce.acceptance_checked` —
+    shared setup for the two "gate disabled" tests below (and their `test_cli_non_repo.py`
+    cousins use their own variant of the same shape)."""
     import subprocess
 
     repo = tmp_path / "repo"
@@ -273,12 +272,58 @@ def test_mark_shipped_respects_a_disabled_acceptance_checked_gate(tmp_path, _inj
         "version: 1\nbackend: github-issues\nenforce:\n  acceptance_checked: false\n",
         encoding="utf-8",
     )
+    return str(repo)
+
+
+def test_mark_shipped_respects_a_disabled_acceptance_checked_gate(tmp_path, _inject_fake):
+    """A repo with `enforce.acceptance_checked: false` never treats unchecked/unproven
+    criteria as a close-gate violation (`policy.unchecked_criteria_violation` returns
+    ``None`` there) — mark-shipped must not contradict that configured contract with a false
+    Done-with-unmet warning."""
+    repo = _repo_without_acceptance_gate(tmp_path)
     created = _seed(_inject_fake, state=State.DONE)  # default acceptance is unchecked
-    rc = main(["mark-shipped", created.id, "--pr", _PR_URL, "--cwd", str(repo)])
+    rc = main(["mark-shipped", created.id, "--pr", _PR_URL, "--cwd", repo])
     assert rc == 0
     _, body = _inject_fake.comments[0]
     assert "WARNING" not in body
     assert "already Done" in body
+
+
+def test_mark_shipped_disabled_gate_also_quiets_the_open_ticket_advice(tmp_path, capsys, _inject_fake):
+    """Review finding: the gate must apply uniformly — an OPEN ticket in a repo with
+    `enforce.acceptance_checked: false` must not be told "acceptance needed before this can be
+    marked Done" either, since `task done` there will not demand it."""
+    repo = _repo_without_acceptance_gate(tmp_path)
+    created = _seed(_inject_fake)
+    capsys.readouterr()
+    rc = main(["mark-shipped", created.id, "--pr", _PR_URL, "--cwd", repo])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "acceptance needed before this can be marked Done" not in out
+    assert "checked criteria are not enforced on close here" in out
+    assert f"task done {created.id}" in out
+
+
+def test_mark_shipped_resolves_ticket_routing_exactly_once(monkeypatch, _inject_fake):
+    """`cmd_mark_shipped` resolves routing exactly once (`_config_for_id`), reusing the result
+    for both the backend and the acceptance-checked-gate read, rather than deriving it twice.
+    This pins an implementation detail (a future legitimate second resolution breaks it by
+    design) — cwd here is the plain FakeBackend path (no registry), so it exercises the
+    early-return branch, not a registry scan."""
+    import tasklib.cli as cli_mod
+
+    calls = []
+    real = cli_mod._config_for_id
+
+    def spy(cfg, ticket_id):
+        calls.append(ticket_id)
+        return real(cfg, ticket_id)
+
+    monkeypatch.setattr(cli_mod, "_config_for_id", spy)
+    created = _seed(_inject_fake)
+    rc = main(["mark-shipped", created.id, "--pr", _PR_URL])
+    assert rc == 0
+    assert calls == [created.id], f"expected exactly one routing resolution, got {calls}"
 
 
 def test_mark_shipped_rejects_a_non_url_pr(capsys, _inject_fake):
