@@ -137,14 +137,34 @@ def test_policy_gate_refuses_a_ticket_with_zero_criteria():
     criteria must not sail through the merge gate on vacuous truth."""
     report = acceptance_gate(Ticket(acceptance=[]), EnforceConfig())
     assert report.ok is False and report.no_criteria is True and report.below_minimum is True
-    # disabling the proof gate alone still leaves the independent minimum-count gate active —
-    # both must be off (or acceptance_min: 0) to genuinely bypass a criteria-less ticket
+    # `no_criteria` is purely INFORMATIONAL (task-cli PR#118 round 2, Codex finding: an earlier
+    # version made it a SECOND, unconditional way to fail the gate, ignoring every legitimate
+    # override `task done` honours) — it stays True (there genuinely are zero criteria) even
+    # when the gate itself passes; `below_minimum` is the only thing that can fail it.
     disabled = acceptance_gate(
         Ticket(acceptance=[]), EnforceConfig(acceptance_checked=False, acceptance_criteria=False)
     )
-    assert disabled.ok is True and disabled.no_criteria is False and disabled.below_minimum is False
+    assert disabled.ok is True and disabled.no_criteria is True and disabled.below_minimum is False
     opted = Ticket(acceptance=[], skips={POST_MERGE_ACCEPTANCE: "publish after merge"})
     assert acceptance_gate(opted, EnforceConfig()).ok is True
+
+
+def test_policy_gate_zero_criteria_with_acceptance_min_zero_passes():
+    """Codex finding (round 2): a repo that sets `acceptance_min: 0` lets `task done` close a
+    zero-criteria ticket — `task gate` must honour that, not just `acceptance_criteria: false`."""
+    report = acceptance_gate(Ticket(acceptance=[]), EnforceConfig(acceptance_min=0))
+    assert report.ok is True and report.below_minimum is False
+
+
+def test_policy_gate_zero_criteria_with_recorded_skip_passes():
+    """Codex finding (round 2): a ticket that recorded `--skip-acceptance "<reason>"` for the
+    minimum-count gate closes via `task done` — `task gate` must honour that skip too, even at
+    zero criteria, not only at "some but too few"."""
+    from tasklib.policy import GATE_ACCEPTANCE
+
+    t = Ticket(acceptance=[], skips={GATE_ACCEPTANCE: "a pure chore, no user-visible outcome to assert"})
+    report = acceptance_gate(t, EnforceConfig())
+    assert report.ok is True and report.below_minimum is False
 
 
 def test_post_merge_opt_out_round_trips_through_the_body():
@@ -444,7 +464,25 @@ def test_accept_on_fully_accepted_ticket_is_a_noop(capsys, monkeypatch, _inject_
     capsys.readouterr()
     rc = main(["accept", created.id])
     assert rc == 0
-    assert "nothing left" in capsys.readouterr().out
+    # review finding (task-cli PR#118 round 2): both the early "nothing pending" return and the
+    # final return now share ONE message, derived from the full `task gate` verdict — not a
+    # bespoke "nothing left" string — so the two paths can never disagree with `task gate`.
+    assert "accepted — every criterion is checked with a proof" in capsys.readouterr().out
+
+
+def test_accept_reports_failure_when_proven_but_below_minimum(capsys, monkeypatch, tmp_path, _inject_fake):
+    """Codex finding (round 2): a ticket with its ONE existing criterion fully proven, but
+    below the configured minimum, must NOT report "accepted" / exit 0 — `task gate` still
+    refuses it, and `task accept` must say so instead of silently disagreeing."""
+    created = _seed(_inject_fake, acceptance=[Criterion(text="only one")])
+    main(["check", created.id, "1", "--proof", "one.png"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    capsys.readouterr()
+    rc = main(["accept", created.id])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "task gate #1` still refuses" in out
+    assert "--acceptance" in out
 
 
 # ── the skill text documents the pre-merge contract ─────────────────────────────────

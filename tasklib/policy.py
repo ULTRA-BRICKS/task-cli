@@ -782,17 +782,20 @@ def acceptance_gate(ticket: Ticket, cfg: EnforceConfig) -> GateReport:
     unmet = ticket.unmet_criteria()
     reason = ticket.skips.get(POST_MERGE_ACCEPTANCE, "").strip()
     violation = unchecked_criteria_violation(ticket, cfg)
-    # Zero criteria is NOT vacuous acceptance: "every criterion is proven" holds trivially on
-    # an empty list, but a ticket with nothing to accept has proven nothing (a ticket authored
-    # in the tracker's web UI without criteria).
-    no_criteria = cfg.acceptance_checked and not ticket.acceptance
-    # The minimum-count gate is independently skippable (`--skip-acceptance "<reason>"`) — a
-    # ticket that recorded that skip must not fail the merge gate for the same reason `task
-    # done` would let it through.
+    # The minimum-count gate — `acceptance_min_violation`, the SAME predicate `_text_gates`/
+    # `check_done` enforce — is the ONLY thing that may fail a zero-criteria ticket. It already
+    # respects every legitimate override `task done` does: disabled via `acceptance_criteria:
+    # false`, a lowered `acceptance_min: 0`, or a recorded `--skip-acceptance "<reason>"`
+    # (review finding, task-cli PR#118 round 2 — Codex: an earlier version had a SEPARATE,
+    # unconditional `no_criteria = cfg.acceptance_checked and not ticket.acceptance` term that
+    # ignored all three overrides, so `task gate` could refuse a ticket `task done` would
+    # legitimately let close). `no_criteria` below is now purely INFORMATIONAL — which refusal
+    # message to show — never a second, independent way to fail the gate.
     min_violation = acceptance_min_violation(ticket, cfg)
     below_minimum = min_violation is not None and GATE_ACCEPTANCE not in ticket.skips
+    no_criteria = not ticket.acceptance
     return GateReport(
-        ok=(violation is None and not no_criteria and not below_minimum) or bool(reason),
+        ok=(violation is None and not below_minimum) or bool(reason),
         unchecked=[c for c in unmet if not c.checked],
         proofless=[c for c in unmet if c.checked],
         post_merge_reason=reason,

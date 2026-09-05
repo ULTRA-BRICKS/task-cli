@@ -4111,8 +4111,9 @@ def cmd_accept(args: argparse.Namespace) -> int:
 
     pending = ticket.unmet_criteria()
     if not pending:
-        print(_ok(f"{ticket.id}: nothing left to accept — every criterion is checked with a proof."))
-        return 0
+        ok, msg = _accept_completion_message(ticket, cfg)
+        print(msg)
+        return 0 if ok else 1
     print(f"{ticket.id}: {len(pending)} criteria to accept. Enter a proof path/URL, "
           '"force: <reason>" when a proof is impossible, or Enter to skip.')
     attach = _ProofAttacher(backend, ticket.id)
@@ -4133,12 +4134,31 @@ def cmd_accept(args: argparse.Namespace) -> int:
         _log_checked(ticket, [idx], forced=bool(force_reason))
         print(_ok(f"  checked ({'forced: ' + force_reason if force_reason else 'proof ' + crit.proof})"))
     _record_session_touch(cfg, backend, ticket)
+    ok, msg = _accept_completion_message(ticket, cfg)
+    print(msg)
+    return 0 if ok else 1
+
+
+def _accept_completion_message(ticket: Ticket, cfg) -> tuple[bool, str]:
+    """Whether `task accept` should report success, and the line to print — consulting the
+    FULL `task gate` verdict (review finding, task-cli PR#118 round 2: an earlier version only
+    checked `ticket.unmet_criteria()`, so a ticket with every EXISTING criterion proven but
+    below the configured minimum count reported "accepted" / exit 0 while `task gate` still
+    refused it). Used at both the early "nothing pending" return and the final one, so the two
+    paths can never give a different verdict than `task gate` would."""
+    from .policy import acceptance_gate
+
+    report = acceptance_gate(ticket, _enforce_config(cfg))
+    if report.ok:
+        return True, _ok(f"{ticket.id}: accepted — every criterion is checked with a proof (`task gate {ticket.id}` passes).")
+    if report.below_minimum:
+        return False, _warn(
+            f"{ticket.id}: every existing criterion is proven, but `task gate {ticket.id}` still refuses — "
+            f"too few for this repo's configured minimum. Add more: task change {ticket.id} "
+            f'--acceptance "<criterion>" (repeatable), or --skip-acceptance "<reason>" if genuinely N/A.'
+        )
     remaining = len(ticket.unmet_criteria())
-    if remaining:
-        print(_warn(f"{ticket.id}: {remaining} left — re-run `task accept {ticket.id}`, then `task gate {ticket.id}`."))
-        return 1
-    print(_ok(f"{ticket.id}: accepted — every criterion is checked with a proof (`task gate {ticket.id}` passes)."))
-    return 0
+    return False, _warn(f"{ticket.id}: {remaining} left — re-run `task accept {ticket.id}`, then `task gate {ticket.id}`.")
 
 
 def _prompt_proof(idx: int, crit: Criterion) -> tuple[str, str] | None:
