@@ -712,9 +712,10 @@ def test_normalize_skip_gate_accepts_new_gates():
 
 
 def test_normalize_skip_gate_accepts_read_before_edit():
-    # task-cli#119 review finding: unlike GATE_DUPLICATE (no real --skip- flag),
-    # read-before-edit DOES have one (--skip-read-before-edit), so it belongs in ALL_GATES /
-    # normalize_skip_gate's aliases like every other skippable gate.
+    # task-cli#119 review finding: a gate with a real --skip- flag (read-before-edit DOES have
+    # one, --skip-read-before-edit) belongs in ALL_GATES / normalize_skip_gate's aliases like
+    # every other skippable gate — the same reasoning now covers GATE_DUPLICATE/GATE_TODO_SHAPED
+    # below, both of which gained their own real --skip- flags alongside this ticket's gates.
     from tasklib.policy import GATE_READ_BEFORE_EDIT
 
     assert normalize_skip_gate("read-before-edit") == GATE_READ_BEFORE_EDIT
@@ -915,3 +916,228 @@ def test_junk_title_violation_redacts_a_fine_grained_pat_title():
     assert v is not None
     assert secret not in v.message
     assert "<redacted>" in v.message
+# ── todo-shaped hint (non-blocking) ──────────────────────────────────────────────────────────
+
+
+def test_todo_shaped_title_warns_but_does_not_block_create():
+    t = _good_ticket(title="Review my current changes before I commit", what="")
+    res = check_create(t, EnforceConfig())
+    assert res.ok  # never blocks
+    assert any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_todo_shaped_hint_is_silenced_by_skip_and_recorded_as_skipped():
+    t = _good_ticket(
+        title="Review my current changes before I commit",
+        what="",
+        skips={"todo-shaped": "deliberately tracking this review round as a real ticket"},
+    )
+    res = check_create(t, EnforceConfig())
+    assert res.ok
+    assert "todo-shaped" in res.skipped
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_todo_shaped_hint_disabled_by_config():
+    t = _good_ticket(title="Review my current changes before I commit it", what="")
+    res = check_create(t, EnforceConfig(todo_shaped_hint=False))
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_todo_shaped_hint_does_not_fire_on_done_phase():
+    # a ticket that already passed create shouldn't be re-nagged on every later `done`/`change`.
+    t = _good_ticket(
+        title="Review my current changes before I commit",
+        what="",
+        acceptance=_checked_criteria(),
+    )
+    res = check_done(t, EnforceConfig())
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_ordinary_ticket_has_no_todo_shaped_warning():
+    res = check_create(_good_ticket(), EnforceConfig())
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+# ── duplicate detection (token/Jaccard, GATE_DUPLICATE) ─────────────────────────────────────
+
+
+def _candidate(id_: str, title: str, what: str = "", session: str = "session:11", updated_at: str = "") -> Ticket:
+    return Ticket(id=id_, title=title, what=what, labels=[session], updated_at=updated_at)
+
+
+def test_duplicate_violation_catches_reworded_near_duplicate():
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Review OMP model-detection ordering diff")
+    v = duplicate_violation("Review OMP lineage-first model detection diff", "", [existing])
+    assert v is not None
+    assert v.gate == "duplicate"
+    assert "#1" in v.message
+
+
+def test_duplicate_violation_sanitizes_a_hostile_candidate_title():
+    # review finding (P2): a candidate ticket's title is UNTRUSTED (read back from the backend)
+    # and was being interpolated verbatim into this diagnostic — a hand-crafted title carrying
+    # a bidi override (or an ANSI escape) could spoof/corrupt the terminal. Must be stripped. A
+    # RIGHT-TO-LEFT OVERRIDE (not alnum) is used here rather than an ANSI CSI sequence so the
+    # injected characters don't also perturb the token/Jaccard match itself (a CSI's digits are
+    # tokenizable and would change which candidate matches — orthogonal to what this test checks).
+    from tasklib.policy import duplicate_violation
+
+    hostile_title = "Review OMP model-detection ordering diff ‮"
+    existing = _candidate("#1", hostile_title)
+    v = duplicate_violation("Review OMP lineage-first model detection diff", "", [existing])
+    assert v is not None
+    assert "‮" not in v.message
+
+
+def test_duplicate_violation_catches_reworded_cyrillic_duplicate():
+    # review finding (P1): an EARLIER version tokenized with `[a-z0-9]+` — ASCII-only — so a
+    # Cyrillic title/body always tokenized to ZERO tokens (`_DUPLICATE_MIN_TOKENS_PER_SIDE`
+    # never met) and every Russian reworded-duplicate check silently no-opped, contradicting
+    # task-cli's own documented support for Russian inbound messages (classify.py).
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Обновить конфигурацию хука Codex для моста")
+    v = duplicate_violation("Обновить хук моста Codex конфигурацию", "", [existing])
+    assert v is not None
+    assert v.gate == "duplicate"
+
+
+def test_duplicate_violation_ignores_unrelated_ticket():
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Add dark mode toggle to settings", "users want a dark theme")
+    v = duplicate_violation("Fix login bug on mobile Safari", "users cannot log in", [existing])
+    assert v is None
+
+
+def test_duplicate_violation_ignores_closed_candidate():
+    from tasklib.model import State
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Review OMP model-detection ordering diff")
+    existing.state = State.DONE
+    v = duplicate_violation("Review OMP lineage-first model detection diff", "", [existing])
+    assert v is None
+
+
+def test_duplicate_violation_boilerplate_alone_is_not_enough():
+    # two DIFFERENT review-diff tickets share only boilerplate words ("review"/"diff"/
+    # "uncommitted") — that must not, on its own, read as a duplicate.
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Review uncommitted worktree GC diff")
+    v = duplicate_violation("Review uncommitted README ecosystem diff", "", [existing])
+    assert v is None
+
+
+def test_duplicate_violation_known_false_positive_shared_domain_vocabulary():
+    # ADVERSARIAL REVIEW FINDING, CONFIRMED AND ACCEPTED (see the module comment on
+    # DUPLICATE_MIN_SHARED_TOKENS/DUPLICATE_JACCARD_THRESHOLD for the full analysis): two
+    # genuinely DIFFERENT security tasks — encrypting API token storage vs. rotating it — share
+    # enough domain vocabulary to clear the primary threshold (Jaccard 0.6). This is a REAL,
+    # KNOWN limitation of token-overlap Jaccard on short titles, not a regression to "fix" by
+    # retuning the threshold (that would break the genuine reworded-duplicate case pinned by
+    # test_duplicate_violation_catches_reworded_near_duplicate, which scores LOWER at 0.5).
+    # Pinned here so the behavior is INTENTIONAL and visible, not silently drifting; the cost is
+    # bounded because the gate is soft and one `--skip-duplicate "<reason>"` clears it.
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Encrypt API token storage")
+    v = duplicate_violation("API token storage rotation", "", [existing])
+    assert v is not None  # a known, accepted false positive — see the module comment
+
+
+# The reworded-OMP-diff pair used elsewhere in this file already clears the PRIMARY threshold
+# (3 shared tokens / Jaccard 0.5) on its own — reused below so these tests isolate the
+# session-recency ANNOTATION (never a separate lower-bar trigger; see the module comment on
+# `DUPLICATE_SESSION_WINDOW_MINUTES` for the false positive that caused this redesign).
+_OMP_EXISTING_TITLE = "Review OMP model-detection ordering diff"
+_OMP_NEW_TITLE = "Review OMP lineage-first model detection diff"
+
+
+def test_duplicate_violation_annotates_same_session_recent_match():
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:x", updated_at="2026-09-05T19:02:47Z"
+    )
+    now = datetime(2026, 9, 5, 19, 10, 0, tzinfo=timezone.utc)
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None
+    assert "same session, filed recently" in v.message
+
+
+def test_duplicate_violation_does_not_annotate_a_different_session_match():
+    # the match still fires (it clears the primary threshold on its own) — only the ANNOTATION
+    # is session-scoped.
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:other", updated_at="2026-09-05T19:02:47Z"
+    )
+    now = datetime(2026, 9, 5, 19, 10, 0, tzinfo=timezone.utc)
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None
+    assert "same session" not in v.message
+
+
+def test_duplicate_violation_does_not_annotate_outside_the_time_window():
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:x", updated_at="2026-09-05T19:02:47Z"
+    )
+    now = datetime(2026, 9, 5, 21, 30, 0, tzinfo=timezone.utc)  # >60min later
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None  # still a duplicate — just not annotated as "recent"
+    assert "same session" not in v.message
+
+
+def test_duplicate_violation_naive_candidate_timestamp_does_not_crash():
+    # a timezone-NAIVE `updated_at` (no offset in the source string — a malformed/legacy value;
+    # real GitHub/Linear always emit one) must not TypeError against the AWARE `now` every real
+    # caller passes (`datetime.now(timezone.utc)`) — it degrades to "not recent", never raises.
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:x", updated_at="2026-09-05T19:02:47"
+    )
+    now = datetime(2026, 9, 5, 19, 10, 0, tzinfo=timezone.utc)
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None
+    assert "same session, filed recently" in v.message  # naive timestamp treated as UTC
+
+
+def test_duplicate_violation_weak_overlap_no_longer_matches_via_session_recency():
+    # review finding (P1): an EARLIER version of this gate relaxed the threshold for a
+    # same-session-recent candidate to 1 shared token / Jaccard >=0.3, and this exact pair —
+    # genuinely DIFFERENT requests sharing only common domain vocabulary — matched at Jaccard
+    # 0.375 despite being unrelated. The relaxed path is gone; same-session-recency is
+    # annotation-only now (see best_duplicate_match's module comment), so this must be None.
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3",
+        "Postgres retry failures require driver upgrade",
+        session="session:x",
+        updated_at="2026-09-05T19:02:47Z",
+    )
+    now = datetime(2026, 9, 5, 19, 7, 0, tzinfo=timezone.utc)  # 5 minutes later
+    v = duplicate_violation(
+        "Upgrade driver for Postgres replica failover", "", [existing], new_session="session:x", now=now
+    )
+    assert v is None

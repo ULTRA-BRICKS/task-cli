@@ -298,6 +298,8 @@ user-impact-quality gates) writes the justification into the ticket's `Skipped g
 | junk-title (create, and any `--title` edit) | don't phrase a title as "Review/Audit/Adversarial [review of] ... diff" — that shape can never lead to a merge on its own; post review findings as a PR comment or run `review diff`/`review quorum` directly instead | **none** (hard; disable the check itself only via `enforce.junk_title: false`) |
 | acceptance-checked (close) | `task check <id> <n> --proof <path>` for each | **none** (hard; disable in config only) |
 | read-before-edit (`change --what` only) | `task read <id>` (or `task view <id>`) THIS session, recently, before overwriting `--what` | `--skip-read-before-edit "<reason>"` — a *persisted* skip from an earlier command never silently waives a later, still-unread one |
+| duplicate (`create`/`new`, token/Jaccard) | give the title/what real, distinguishing content | `--skip-duplicate "<reason>"` (or `--force "<reason>"`) |
+| todo-shaped (`create`/`new`, non-blocking) | rewrite the title/what as a durable, reusable concern | `--skip-todo-shaped "<reason>"` — never blocks even unskipped, see below |
 
 The **read-before-edit** gate (task-cli#119) refuses `task change <id> --what "..."` unless this
 same working session has run `task read <id>` (or just created that ticket with `task new`/
@@ -327,6 +329,31 @@ for local retention, or `tg-cli` isn't installed here. Passing `--skip-msgref-qu
 waives the gate AND suppresses expansion for that command (so a false-positive `tg#N` isn't quoted
 at all). Both gates are disable-able per repo via `enforce.links_url: false` /
 `enforce.msgref_quote: false`.
+
+The **duplicate** gate (`create`/`new` only, `tasklib/policy.py`'s `duplicate_violation`/
+`best_duplicate_match`) is a second, broader net alongside the pre-existing near-exact-title
+block: it compares the new title/what against this session's already-open tickets by TOKEN
+overlap (after stripping this codebase's own boilerplate vocabulary — "review"/"diff"/
+"uncommitted"/…) and flags a match at ≥2 shared meaningful tokens AND Jaccard ≥0.5 — thresholds
+validated against a real ecosystem audit's 13 confirmed duplicates. It catches a REWORDED
+duplicate of the same request the exact-title check misses ("Review OMP model-detection
+ordering diff" vs "Review OMP lineage-first model detection diff"). `task classify`'s
+auto-create path (the hook a repeated inbound message actually goes through) also runs this
+matcher as a fallback when its own near-exact check finds nothing — but only as a WARNING
+("possible duplicate of #N ... creating a new ticket anyway"), never to fold the message into a
+comment: `classify` has no `--skip-duplicate` escape (its parser exposes only `--create`/
+`--update`) and is typically driven autonomously with no human in the loop, so a known false
+positive (see below) auto-folding into an unrelated ticket would be an invisible, unrecoverable
+mistake there. `task new`/`create`'s near-exact-title check still auto-folds on `classify` —
+only the broader token/Jaccard net is advisory-only on that path.
+
+The **todo-shaped** gate (`create`/`new` only, `tasklib/todo_hint.py`) is deliberately
+NON-BLOCKING: it never refuses a create, even unskipped — it prints a hint when the title/what
+reads like an agent's own in-session process step ("review my uncommitted diff before I commit
+it", "adversarial review of...") or names a review/diff-check step with an empty What section,
+suggesting the harness's own ephemeral TodoList tool (TodoWrite/TaskCreate) instead. Silence a
+false positive with `--skip-todo-shaped "<reason>"` (or `--force "<reason>"`) so it isn't
+re-printed on a later command that re-scans the ticket.
 
 ### Checking criteria off — `task check`
 
@@ -517,6 +544,18 @@ change requests; that bias never applies to a genuine `actionable` signal, which
 recognized via the model's explicit `VERDICT: actionable` sentinel. `task classify "<text>"
 --create` is the entry point the `tg-cli` inbound hook calls.
 
+**Multi-ask detection** (`tasklib/classify.py`'s `detect_multi_ask`) splits a message that
+structurally bundles several distinct asks — a numbered/bulleted list, or clauses joined by an
+explicit enumeration marker (English "and also", or the Russian equivalents of "and also
+also"/"also"/"in addition" — see `_ENUMERATION_SEP_RE` in `classify.py` for the exact patterns
+this repo's English-only-docs rule keeps out of here — or a semicolon) — into separate items
+BEFORE classification, printing "N distinct asks detected" and running the rest of `classify`
+once per item (so `--create` files one ticket per ask instead of one vague ticket for all of
+them). An ordinary single-topic message, however long, is never split — a bare English "and"
+(or its Russian equivalent) is deliberately NOT a signal (see the module docstring for why).
+Only applies to `--create`; `--update <ID>` names one explicit target for the whole raw message
+and is left unsplit.
+
 ## Config — `rig.yaml` `task:` block (per-repo) + `task.yaml` + global
 
 The per-repo tracker backend is selected from the repo's committed **`rig.yaml`** — the single
@@ -563,6 +602,11 @@ enforce:
   links_url: required                # the ## Links section holds http(s):// URLs only
   msgref_quote: required             # a body tg#<id> must carry its auto-attached quote
   read_before_edit: true             # `change --what` needs a recent `read` this session first
+  todo_shaped_hint: true             # non-blocking "this looks like a process step, not a
+                                      # durable ticket" hint on create (--skip-todo-shaped to
+                                      # silence a false positive)
+  duplicate: true                    # governs BOTH duplicate-detection mechanisms on create
+                                      # (near-exact-title hard block + the token/Jaccard net)
   screenshots:
     on_create: { required_if_label: [ui, visual] }
     on_done:   { required_if_label: [ui, visual] }
