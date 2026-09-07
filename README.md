@@ -48,6 +48,8 @@ task burn         [--all] [--json] [--since YYYY-MM-DD] [--until YYYY-MM-DD]  # 
 task web start|stop|status|run [--port N]  # local HTML burn chart (default http://127.0.0.1:8765/burn)
 task read <id>     (alias: view)   # the full ticket — every section (works outside a repo)
 task find "<query>"                # search title+body (cross-project when outside a repo)
+task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of — writes a
+#   structured ## Links entry, mirrored on the other ticket (see "Linking tickets" below)
 task check <id> <n|text> --proof p # tick an acceptance criterion (needs a visual proof)
 task check <id> 1 2 3 --proof a --proof b --proof c  # several at once, one proof each (in order)
 task check <id> --all --proof p    # every criterion, one shared proof
@@ -261,7 +263,8 @@ On `create`, and again on `change`→`done`:
 4. **Related entities are links** — anything that names another entity (a tracker id like
    `HYP-789`, an issue/PR `#123`, a commit SHA, a repo/path slug) must be a proper **link**
    (markdown link / full URL), not a bare token. The scan is broad; `--force "<reason>"`
-   overrides a genuine false positive.
+   overrides a genuine false positive. An id already carrying a structured `task link` entry
+   (see "Linking tickets" below) is exempt — it won't ALSO be flagged when mentioned in prose.
 5. **Screenshots** — required at *creation* and at *done* for UI/visual tickets (label-gated,
    configurable). The on-done gate demands the **implementation** proof specifically — a
    creation mock does not let you close a UI ticket. That is why the gate runs twice.
@@ -354,6 +357,27 @@ it", "adversarial review of...") or names a review/diff-check step with an empty
 suggesting the harness's own ephemeral TodoList tool (TodoWrite/TaskCreate) instead. Silence a
 false positive with `--skip-todo-shaped "<reason>"` (or `--force "<reason>"`) so it isn't
 re-printed on a later command that re-scans the ticket.
+
+### Linking tickets — `task link` + the post-create nudge
+
+```
+task link <id> blocks <other-id>         # <id> blocks <other-id>
+task link <id> blocked-by <other-id>     # <id> is blocked by <other-id>
+task link <id> relates-to <other-id>     # symmetric — no canonical direction
+task link <id> duplicate-of <other-id>   # <id> is a duplicate of <other-id> (the canonical one)
+```
+
+Writes a structured entry into `<id>`'s `## Links` section (e.g. `Blocks #149: <url>`).
+`blocks`/`blocked-by`/`relates-to` also write the mirrored entry on the OTHER ticket (`A blocks
+B` implies `B is blocked-by A`); `duplicate-of` is deliberately one-sided (marking something a
+duplicate of a popular ticket shouldn't spam that ticket's own Links section with every dupe
+that ever pointed at it). Re-running the same `task link` call is a no-op — it never adds a
+second entry for the same relation + ticket pair.
+
+After a successful `task new`/`create`, a cheap same-repo scan (title/label keyword overlap —
+no embeddings, no fuzzy matching) checks currently-open tickets for plausible relatives and
+prints a nudge with the exact `task link` command for each candidate. It only ever *suggests* —
+nothing is auto-linked, and a scan hiccup never fails the create.
 
 ### Checking criteria off — `task check`
 

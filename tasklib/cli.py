@@ -7,9 +7,10 @@ filesystem (sidecar). All pure logic lives in the sibling modules (``model``/``r
 the backends) are lazy so ``task --help`` stays fast and dependency-light.
 
 Subcommands: create/new · list · gantt (read-only due-date timeline) · burn (read-only remaining-over-time chart) · web (local HTML burn chart: start/stop/status/run) · read/view · find · change
-· status · done · check · audit (reconciliation backstop — flags/reverts a Done ticket that
-never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close) ·
-mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
+· status · done · check · link (record a typed blocks/blocked-by/relates-to/duplicate-of
+relationship between two tickets) · audit (reconciliation backstop — flags/reverts a Done ticket
+that never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close)
+· mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
 session · daemon (the due-date reminder watcher: start/stop/status/run).
 Global flags: --backend, --repo, --config, --json, --yes, and per-gate --skip-<gate>.
 """
@@ -25,13 +26,15 @@ import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from . import __version__
+from .links import RELATIONS
 from .model import Criterion, Screenshot, State, Ticket
 from .transitions import TransitionError, validate_transition
 
 if TYPE_CHECKING:
+    from .links import LinkEntry
     from .policy import Violation
 
 # ── tiny output helpers (no color dep; honor NO_COLOR) ──────────────────────────────
@@ -452,6 +455,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     acp.add_argument("id", help="ticket id (#123 or HYP-456)")
 
+    # link — a typed relationship between two tickets (task-cli#154)
+    lkp = sub.add_parser(
+        "link",
+        parents=[common],
+        help="record a typed relationship between two tickets (blocks|blocked-by|relates-to|duplicate-of)",
+    )
+    lkp.add_argument("id", help="ticket id (#123 or HYP-456)")
+    lkp.add_argument("relation", choices=list(RELATIONS), help="relation type")
+    lkp.add_argument("other_id", metavar="other-id", help="the other ticket id")
+
     # gate — the read-only ship-time verdict (agent-tools ci/ship/ship.sh calls this pre-merge)
     gtp = sub.add_parser(
         "gate",
@@ -587,6 +600,7 @@ def main(argv: list[str] | None = None) -> int:
         "done": cmd_done,
         "check": cmd_check,
         "accept": cmd_accept,
+        "link": cmd_link,
         "gate": cmd_gate,
         "audit": cmd_audit,
         "mark-shipped": cmd_mark_shipped,
@@ -1681,6 +1695,7 @@ def cmd_create(args: argparse.Namespace) -> int:
     else:
         print(_ok(f"created {created.id}  {created.url}"))
         _print_recent_tickets_after_create(session, backend)
+        _print_related_tickets_nudge(backend, created)
         _print_session_attention_after_mutation(
             args, cfg, backend, current_id=created.id
         )
@@ -2047,6 +2062,52 @@ def _print_recent_tickets_after_create(session, backend) -> None:
         return
     if block:
         print(block)
+
+
+def _print_related_tickets_nudge(backend, created: Ticket) -> None:
+    """Best-effort post-`task new` nudge (task-cli#154): a cheap same-repo relatedness scan
+    (title/label keyword overlap, `tasklib.links.find_related_candidates`) suggesting tickets
+    that MIGHT be worth linking. Never auto-links — only prints the exact `task link` command
+    for a human/agent to run. Mirrors `_print_recent_tickets_after_create`'s fail-soft contract:
+    a backend hiccup here must never turn an already-successful `create` into a failure.
+    """
+    try:
+        block = _related_tickets_block(backend, created)
+    except Exception as exc:
+        from .logging import log_event
+
+        log_event("related_tickets.skipped", error=type(exc).__name__)
+        return
+    if block:
+        print(block)
+
+
+def _related_tickets_block(backend, created: Ticket) -> str:
+    """The nudge text, or `""` when nothing plausibly related was found. Scans up to 100 of the
+    repo's tickets (the same "cheap read" budget `task audit`'s default scan uses) — cheap
+    keyword overlap, not a fuzzy/NLP search (see `links.find_related_candidates`).
+
+    A candidate's TITLE is untrusted (review finding, task-cli#154 round 3, Grok): anyone who
+    can file a ticket in the same repo controls it, and this text lands in agent-facing,
+    copy-pasteable stdout right next to a real `task link` command. Run through the same
+    control/format-char stripper `policy.py` uses for untrusted Links values
+    (`policy.safe_display`) before printing — in particular this removes embedded newlines,
+    closing the injection this finding described: a title carrying a fake `\\n    task link
+    #victim blocks #attacker` line that would otherwise print as if it were the tool's own
+    suggestion.
+    """
+    from .links import find_related_candidates
+    from .policy import safe_display
+
+    candidates = find_related_candidates(created, backend.list(limit=100), limit=5)
+    if not candidates:
+        return ""
+    lines = [_dim("related open tickets found (verify, then link if relevant):")]
+    for c in candidates:
+        title = safe_display(c.ticket.title)
+        lines.append(_dim(f"  {c.ticket.id}  {title}"))
+        lines.append(_dim(f"    task link {created.id} relates-to {c.ticket.id}"))
+    return "\n".join(lines)
 
 
 def _safe_verified_coordinate(cfg, backend, ticket: Ticket) -> str:
@@ -4714,6 +4775,226 @@ def _accept_usage(ticket_id: str) -> str:
         f'    task check {ticket_id} <n> --force "<reason>"                              # when a proof is impossible\n'
         f"    task gate {ticket_id} [--json]                                            # the verdict"
     )
+
+
+_LinkStatus = Literal["linked", "already-linked", "failed", "ambiguous"]
+
+
+@dataclass(frozen=True)
+class _LinkOutcome:
+    """The result of writing (or skipping, or failing to write) one `LinkEntry` — what
+    `cmd_link` reports per entry so a partial multi-backend failure is never silently
+    swallowed (review finding, task-cli#154: two entries can target different backends, and
+    one `backend.update()` succeeding while the other raises must not look identical to either
+    full success or full failure). `"ambiguous"` is distinct from `"failed"`: it means the
+    connection dropped AFTER the backend may have already accepted the write (see
+    `AmbiguousBackendError`) — re-running is still safe (this write is idempotent), but the
+    caller should know the outcome is genuinely unknown, not a clean no-op refusal. `changed`
+    is recorded directly (not re-derived from `status` later — review finding: a string
+    comparison like `status == "linked"` silently breaks the moment a new status value is
+    added, since nothing ties it back to what `apply_entry` actually reported)."""
+
+    ticket: Ticket
+    entry: LinkEntry
+    status: _LinkStatus
+    error: str = ""
+    changed: bool = False
+
+
+def cmd_link(args: argparse.Namespace) -> int:
+    """Record a typed relationship (`blocks`/`blocked-by`/`relates-to`/`duplicate-of`) between
+    two tickets, writing a structured entry into their `## Links` sections (task-cli#154).
+
+    Mirrors `blocks`/`blocked-by`/`relates-to` onto the OTHER ticket too (A blocks B implies B
+    is blocked-by A); `duplicate-of` is deliberately one-sided — see `tasklib/links.py`'s module
+    docstring for why. Idempotent: re-running the identical call writes nothing (the target key
+    already maps to the same URL), so it never accumulates a duplicate Links entry.
+
+    Each entry is written independently and its own outcome recorded (`_LinkOutcome`) — a
+    `BackendError`/`AmbiguousBackendError` on ONE entry (a network blip, an auth hiccup, a
+    different backend's rate limit) does not roll back an entry that already succeeded, and is
+    never hidden behind a generic `_UserError` that would erase the fact that the other entry
+    landed (review finding: the original version raised on the first failure, discarding any
+    already-written result). Exit code: 9 (`EXIT_AMBIGUOUS`) if ANY entry's outcome is unknown
+    (checked first — an unknown outcome takes precedence over a co-occurring clean failure,
+    since "might have landed" is the more cautious read for a caller deciding whether to
+    retry), else 2 if any entry failed cleanly, else 0. Re-running the identical call afterward
+    is always safe either way — idempotency means it only retries the entry(ies) that didn't
+    land.
+
+    The reopen-hazard check (see `_reopen_hazard_reason`) runs only on a ticket this call will
+    ACTUALLY write to (review finding: an earlier version checked both `source`/`other`
+    unconditionally, which wrongly refused a valid `duplicate-of` — that relation never writes
+    to the other ticket — whenever the other ticket happened to carry the hazard).
+
+    CAVEAT (shared with every other command that calls `backend.update`, e.g. `check`/
+    `mark-shipped`): the update re-renders the WHOLE body from the `Ticket` fields
+    (`render.render`), so linking B from A also rewrites B's stored body — including whatever B
+    doesn't round-trip (AGENTS.md's HYP-1355/HYP-1356 note). A caller may run `task link A
+    blocks B` without ever having read B; unlike `change --what`, this command has no
+    `read-before-edit` gate, because it never touches B's prose fields, only `## Links`. Also
+    shared with every other `fetch → replace(...) → update` command in this file: two concurrent
+    writers mirroring onto the SAME third ticket can each build their `links` dict from a
+    now-stale snapshot, and whichever `update()` lands second silently drops the other's entry
+    (review finding) — there is no optimistic-concurrency layer anywhere in this codebase's
+    backend protocol, so this is an accepted, pre-existing risk class, not something this
+    command can fix alone.
+    """
+    cfg = _load(args)
+    from .backends import AmbiguousBackendError, BackendError
+    from .links import apply_entry, plan_link
+    from .policy import is_http_url
+
+    source_backend, source_ticket = _resolve_ticket_for_link(cfg, args.id)
+    other_backend, other_ticket = _resolve_ticket_for_link(cfg, args.other_id)
+    if source_ticket.id == other_ticket.id:
+        raise _UserError(f"cannot link {source_ticket.id} to itself")
+
+    entries = plan_link(
+        source_ticket.id, source_ticket.url, args.relation, other_ticket.id, other_ticket.url
+    )
+    # Validated per-ENTRY, not per-ticket (review finding, task-cli#154 round 4, Opus): for
+    # `duplicate-of`, only ONE entry exists and `source_ticket.url` is never embedded in it —
+    # requiring it to be a valid URL anyway was needlessly strict (the same "only check what
+    # this call actually writes" fix already applied to the reopen-hazard guard). The raw value
+    # is deliberately NOT echoed (round 3, Grok): `is_http_url` also rejects a URL carrying
+    # embedded userinfo or a secret-shaped query value — exactly the cases that must never hit
+    # stdout/a log/tmux scrollback. A `!r`-interpolated rejected value would leak precisely that.
+    for entry in entries:
+        if not is_http_url(entry.url):
+            raise _UserError(
+                f"cannot write {entry.key!r} on {entry.ticket_id} — the linked ticket has no "
+                "usable URL (the backend must report a real http(s) URL, with no embedded "
+                "credentials or secret-shaped value, before it can be linked)"
+            )
+
+    tickets = {source_ticket.id: source_ticket, other_ticket.id: other_ticket}
+    backends = {source_ticket.id: source_backend, other_ticket.id: other_backend}
+    outcomes: list[_LinkOutcome] = []
+    for entry in entries:
+        ticket = tickets[entry.ticket_id]
+        new_links, changed = apply_entry(ticket.links, entry)
+        if not changed:
+            outcomes.append(_LinkOutcome(ticket, entry, "already-linked", changed=False))
+            continue
+        hazard = _reopen_hazard_reason(ticket)
+        if hazard:
+            outcomes.append(_LinkOutcome(ticket, entry, "failed", hazard, changed=False))
+            continue
+        try:
+            updated = backends[entry.ticket_id].update(replace(ticket, links=new_links))
+        except AmbiguousBackendError as exc:
+            outcomes.append(_LinkOutcome(ticket, entry, "ambiguous", str(exc), changed=False))
+            continue
+        except BackendError as exc:
+            outcomes.append(_LinkOutcome(ticket, entry, "failed", str(exc), changed=False))
+            continue
+        tickets[entry.ticket_id] = updated
+        outcomes.append(_LinkOutcome(updated, entry, "linked", changed=True))
+
+    _print_link_result(args, outcomes)
+    if any(o.status == "ambiguous" for o in outcomes):
+        from .backends import EXIT_AMBIGUOUS
+
+        return EXIT_AMBIGUOUS
+    return 2 if any(o.status == "failed" for o in outcomes) else 0
+
+
+def _reopen_hazard_reason(ticket: Ticket) -> str:
+    """`""` when `ticket` is safe to `backend.update()`; otherwise the refusal reason.
+
+    Catches BOTH stale-mismatch directions (Opus review finding, task-cli#154 round 2): the
+    original guard only caught `provider_closed=True` with an active-looking `state` (would
+    silently REOPEN on update — `GitHubIssuesBackend.update` always PATCHes `state` from
+    `ticket.state`, never from `provider_closed`, the same mismatch `stale_notice.py` already
+    treats as authoritative). The mirror case — `state` in `DONE`/`CANCELLED` but
+    `provider_closed=False` (e.g. natively reopened in the GitHub UI with a stale `status:done`
+    label) — would just as silently RE-CLOSE a ticket on update, via the identical mechanism in
+    the opposite direction. Both are refused: `ticket.provider_closed` must agree with whether
+    `state` is a closed state.
+
+    This is a narrow, task-cli#154-scoped guard — it does not touch `backend.update()`'s general
+    PATCH behavior (a pre-existing, wider issue: task-cli#158), it only stops THIS command's
+    write path from walking into it, and only for a ticket the command is ABOUT to write (see
+    `cmd_link`'s docstring for why it's not a blanket pre-check on every ticket named on the
+    command line)."""
+    state_says_closed = ticket.state in (State.DONE, State.CANCELLED)
+    if ticket.provider_closed == state_says_closed:
+        return ""
+    verb = "reopen" if ticket.provider_closed else "re-close"
+    return (
+        f"{ticket.id}'s tracked state ({ticket.state.value!r}) disagrees with the backend's "
+        f"own open/closed flag (a stale managed label) — writing to it would silently {verb} "
+        "it, since the backend re-derives the native open/closed flag from that same stale "
+        f"state on every update. Reconcile the label first (e.g. `task status {ticket.id} "
+        "done`/`in-progress` to match reality), then link it."
+    )
+
+
+def _resolve_ticket_for_link(cfg, ticket_id: str) -> tuple[Any, Ticket]:
+    """Fetch one side of a `task link` call, returning the SAME backend instance the fetch used
+    (so `cmd_link` never re-resolves `_backend_for_id` for the same ticket a second time — the
+    `_routing_for_id` docstring flags exactly that as a prior review finding). Converts a
+    backend failure into `_UserError` — including `AmbiguousBackendError` (review finding,
+    task-cli#154 round 2, Grok): this is a plain read with no side effects, so an ambiguous
+    outcome here is exactly as harmless as a clean one, matching `cmd_check`'s identical
+    `except (BackendError, AmbiguousBackendError)` convention for its own `backend.get()`."""
+    backend = _backend_for_id(cfg, ticket_id)
+    from .backends import AmbiguousBackendError, BackendError
+
+    try:
+        return backend, backend.get(ticket_id)
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(str(exc)) from exc
+
+
+def _print_link_result(args: argparse.Namespace, outcomes: list[_LinkOutcome]) -> None:
+    if args.json:
+        import json
+
+        print(
+            json.dumps(
+                {
+                    "ok": all(o.status not in ("failed", "ambiguous") for o in outcomes),
+                    "links": [
+                        {
+                            "ticket": o.ticket.id,
+                            "key": o.entry.key,
+                            "url": o.entry.url,
+                            "changed": o.changed,
+                            "status": o.status,
+                            "error": o.error or None,
+                        }
+                        for o in outcomes
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    unresolved = [o for o in outcomes if o.status in ("failed", "ambiguous")]
+    for o in outcomes:
+        if o.status == "failed":
+            print(_err(f"failed {o.ticket.id}: {o.entry.key} -> {o.entry.url}  ({o.error})"))
+        elif o.status == "ambiguous":
+            print(
+                _warn(
+                    f"ambiguous {o.ticket.id}: {o.entry.key} -> {o.entry.url}  "
+                    f"(connection dropped after the request — outcome unknown: {o.error})"
+                )
+            )
+        else:
+            verb = "linked" if o.status == "linked" else "already linked"
+            print(_ok(f"{verb} {o.ticket.id}: {o.entry.key} -> {o.entry.url}"))
+    if unresolved:
+        print(
+            _warn(
+                "not fully linked — re-run the same `task link` command to retry; "
+                "already-written entries are skipped (idempotent, safe even after an "
+                "ambiguous outcome)."
+            )
+        )
 
 
 def cmd_classify(args: argparse.Namespace) -> int:

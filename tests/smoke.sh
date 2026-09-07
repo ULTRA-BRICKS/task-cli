@@ -20,7 +20,7 @@ $TASK --version >/dev/null 2>&1 || fail "task --version"
 pass "task --help / --version"
 
 # ── 2. every subcommand --help ────────────────────────────────────────────────
-for sub in create list gantt burn web read view find change status done check audit mark-shipped classify session install-skill daemon; do
+for sub in create list gantt burn web read view find change link status done check audit mark-shipped classify session install-skill daemon; do
   $TASK "$sub" --help >/dev/null 2>&1 || fail "task $sub --help"
 done
 pass "every subcommand --help"
