@@ -21,16 +21,22 @@ from typing import Any
 
 # patterns whose VALUE must be redacted before it can reach a log line.
 _SECRET_KEY_RE = re.compile(r"(token|key|secret|password|authorization|api[_-]?key|bearer)", re.IGNORECASE)
-# token-shaped values (gh ghp_/gho_, linear lin_api_, generic long opaque strings)
+# token-shaped values (gh ghp_/gho_, github_pat_ fine-grained PATs, linear lin_api_, generic
+# long opaque strings)
 _SECRET_VALUE_RE = re.compile(
-    r"(gh[opsureODU]_[A-Za-z0-9]{16,}|lin_api_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})"
+    r"(gh[opsureODU]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|lin_api_[A-Za-z0-9]{16,}"
+    r"|sk-[A-Za-z0-9]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})"
 )
 
 _REDACTED = "<redacted>"
 
 
 def redact(value: Any) -> Any:
-    """Redact a token-shaped value. Strings are scrubbed; other types pass through."""
+    """Redact a token-shaped value. Strings are scrubbed; other types pass through.
+
+    General-purpose: used for log lines AND for user-facing CLI refusal messages that must
+    not echo a token-shaped value to stdout — the threat (don't print a secret to an output
+    stream) is the same in both cases."""
     if not isinstance(value, str):
         return value
     return _SECRET_VALUE_RE.sub(_REDACTED, value)
