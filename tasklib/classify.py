@@ -225,18 +225,21 @@ def build_prompt(message: str) -> str:
 #      each item is one ask. The strongest, least ambiguous signal: the author already
 #      structured the message as a list.
 #   2. No list, but the message chains clauses with an EXPLICIT enumeration marker — English
-#      "also"/"and also"/"additionally"/"plus", Russian "а ещё"/"и ещё"/"также"/"кроме того"
-#      (this project's inbound messages are frequently Russian) — or a semicolon.
+#      "also"/"and also"/"additionally"/"plus", or the Russian equivalents of "and also"/
+#      "also too"/"as well"/"besides that" (this project's inbound messages are frequently
+#      Russian — see `_ENUMERATION_SEP_RE` below for the exact patterns matched; kept out of
+#      this comment per the repo's English-only-docs rule) — or a semicolon.
 #
-# Deliberately NOT a signal: a bare "and"/"и" conjunction, OR a bare "also"/"additionally"/
-# "plus" with nothing else marking it. "and" is the single most common conjunction in ordinary
-# prose ("fix the login bug and improve the error message" could be one combined ask or two —
-# genuinely ambiguous), and a lone "also" is just as often elaborating on the SAME ask ("...and
-# this also happens on the second page" is still describing one bug, not introducing a second
-# one — an early version of this heuristic split exactly that sentence and was caught by this
-# module's own test suite). Only the STRONGER two-word/idiomatic markers below are kept: "and
-# also" (the explicit combo, not bare "also"), and the Russian phrases, which read as enumeration
-# markers much more reliably than their literal word-for-word English gloss suggests.
+# Deliberately NOT a signal: a bare English "and" (or its Russian equivalent) conjunction, OR a
+# bare "also"/"additionally"/"plus" with nothing else marking it. "and" is the single most
+# common conjunction in ordinary prose ("fix the login bug and improve the error message" could
+# be one combined ask or two — genuinely ambiguous), and a lone "also" is just as often
+# elaborating on the SAME ask ("...and this also happens on the second page" is still describing
+# one bug, not introducing a second one — an early version of this heuristic split exactly that
+# sentence and was caught by this module's own test suite). Only the STRONGER two-word/idiomatic
+# markers in `_ENUMERATION_SEP_RE` below are kept ("and also," not bare "also"), and the Russian
+# phrases there, which read as enumeration markers much more reliably than their literal
+# word-for-word English gloss suggests.
 # Anchored at ZERO indentation on purpose (review finding, P1): an earlier version allowed any
 # leading whitespace, so an INDENTED sub-bullet under a parent item ("- do X\n  - a detail of
 # X") was treated as its own independent top-level ask rather than part of X's item. Requiring
@@ -260,7 +263,8 @@ _ENUMERATION_SEP_RE = re.compile(
 _MIN_ASK_WORDS = 3
 _ASK_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
-# A fragment that OPENS with a sequencing word ("then", Russian "затем"/"потом") is a dependent
+# A fragment that OPENS with a sequencing word ("then," or its Russian equivalents — see the
+# regex below, kept out of this comment per the repo's English-only-docs rule) is a dependent
 # NEXT STEP of the PRECEDING fragment, not an independent parallel ask — review finding: a
 # semicolon alone doesn't distinguish "two separate requests" from "two ordered steps of one
 # task" ("Migrate tenant IDs by adding the tenant_id column; then backfill existing rows." is
@@ -273,7 +277,7 @@ _SEQUENCING_FRAGMENT_RE = re.compile(
 # KNOWN, ACCEPTED limitation, not fully closeable here (three separate adversarial review
 # rounds each found a new phrasing this keyword list doesn't catch — e.g. "Upgrade the tenant
 # migration by adding the tenant_id column; backfill existing rows after deployment" has no
-# "then"/"затем"/"потом" at all, yet is still one ordered migration, not two asks). Whether a
+# sequencing word at all, yet is still one ordered migration, not two asks). Whether a
 # semicolon separates two INDEPENDENT asks or two ORDERED STEPS of one task is a discourse-level
 # judgment no closed keyword list can fully capture — every fix here narrows the false-positive
 # rate without ever reaching zero, the same class of tradeoff as the token/Jaccard duplicate
@@ -381,8 +385,8 @@ def _split_enumeration(message: str) -> list[str]:
     is too thin to trust as its own ask, DECLINE TO SPLIT AT ALL (return `[]`, meaning the
     caller keeps the whole message as one ask) rather than silently losing content. Separately,
     a semicolon alone is not sufficient evidence of two INDEPENDENT asks — a fragment beginning
-    with a sequencing word (`_SEQUENCING_FRAGMENT_RE` — "then", "затем"/"потом") is a dependent
-    NEXT STEP of the previous fragment, not a separate request, and also declines the whole
+    with a sequencing word (`_SEQUENCING_FRAGMENT_RE` — "then" or its Russian equivalents) is a
+    dependent NEXT STEP of the previous fragment, not a separate request, and also declines the whole
     split (the two steps stay together as one ask, describing one atomic task). And a marker
     INSIDE a quoted/code span (see `_PROTECTED_SPAN_RE`) is never a real split point.
     """
@@ -429,7 +433,7 @@ def detect_multi_ask(message: str) -> list[str]:
     creation; declining is the safe response, not silently capping and dropping the rest). A
     returned list of length >=2 means the caller should classify/ticket each item separately
     (see `cli.cmd_classify`). See the module comment above for why each signal was chosen and
-    why a bare "and"/"и" conjunction deliberately is NOT one.
+    why a bare English "and" (or its Russian equivalent) conjunction deliberately is NOT one.
     """
     items = _split_list_items(message)
     if items and len(items) <= _MAX_MULTI_ASK_PARTS:
