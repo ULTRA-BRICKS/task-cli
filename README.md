@@ -238,7 +238,8 @@ On `change`→`done` (close) two more gates apply:
    <selector> --proof <path>` and that requires a screenshot/image. When a proof is genuinely
    impossible, `task check … --force "<reason>"` records the reason on the criterion (audited).
 
-Every gate except *every-criterion-checked* and *msgref-title* has an **escape hatch**:
+Every gate except *every-criterion-checked*, *msgref-title*, and *junk-title* has an **escape
+hatch**:
 `--skip-<gate> "<reason>"` (or `--force "<reason>"` on `create`/`new` for the links /
 user-impact-quality gates) writes the justification into the ticket's `Skipped gates` section
 (auditable, recorded forever). Gates are also disable-able per repo via `enforce:` in config.
@@ -256,6 +257,7 @@ user-impact-quality gates) writes the justification into the ticket's `Skipped g
 | screenshots | `--screenshot <path>` | `--skip-screenshots "<reason>"` |
 | formatting | (automatic — body is rendered) | `--skip-formatting "<reason>"` |
 | msgref-title | keep `--title` free of a `tg#<id>` reference (put it in `--what`/`--why`/etc. instead) | **none** (hard; disable in config only via `enforce.msgref_title: false`) |
+| junk-title (create, and any `--title` edit) | don't phrase a title as "Review/Audit/Adversarial [review of] ... diff" — that shape can never lead to a merge on its own; post review findings as a PR comment or run `review diff`/`review quorum` directly instead | **none** (hard; disable the check itself only via `enforce.junk_title: false`) |
 | acceptance-checked (close) | `task check <id> <n> --proof <path>` for each | **none** (hard; disable in config only) |
 | read-before-edit (`change --what` only) | `task read <id>` (or `task view <id>`) THIS session, recently, before overwriting `--what` | `--skip-read-before-edit "<reason>"` — a *persisted* skip from an earlier command never silently waives a later, still-unread one |
 

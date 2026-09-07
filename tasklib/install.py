@@ -90,10 +90,11 @@ task session                     # show current session + its tickets
   resolves in history yet the quote is missing, otherwise warns).
 - **Escape hatch**: most gates are skippable with a written justification recorded ON the
   ticket — `--skip-<gate> "<reason>"` (e.g. `--skip-screenshots "no UI in this change"`).
-  Two are hard (no per-ticket skip, only a config-level toggle disables them, and the config
+  Three are hard (no per-ticket skip, only a config-level toggle disables them, and the config
   key uses an UNDERSCORE, not the gate's hyphenated display name): every-criterion-checked-
-  with-proof on close (`enforce.acceptance_checked: false`), and the title's `tg#<id>` ban
-  (`enforce.msgref_title: false`).
+  with-proof on close (`enforce.acceptance_checked: false`), the title's `tg#<id>` ban
+  (`enforce.msgref_title: false`), and a title shaped like the auto-generated "review this
+  diff" pattern, checked on create and on any `--title` edit (`enforce.junk_title: false`).
 - **Backends call the API directly** and harvest credentials from `gh auth token` /
   `~/.config/linear/credentials.toml` — no extra setup if you've already authed those CLIs.
 - **Session-scoped**: `task list` defaults to the current session (env:TASK_SESSION →

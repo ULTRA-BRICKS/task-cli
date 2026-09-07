@@ -16,3 +16,4 @@ uv.lock
 
 # Per-machine Claude Code harness overrides (shared settings.json IS committed).
 .claude/settings.local.json
+pytest-of-*/

@@ -15,6 +15,8 @@ They differ only in which screenshot kind is demanded; everything else is shared
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -69,6 +71,80 @@ GATE_MSGREF_QUOTE = "msgref-quote"
 # author can't retroactively fix in one step.
 GATE_LINKS_URL = "links-url"
 
+# A title matching the auto-generated "review this diff" shape. An unchecked review pass or
+# inbound-message classifier files this EXACT template when it has no other actionable output:
+# the ticket can never lead to a merge (the review that files it runs read-only, often in a
+# worktree disconnected from the diff it names), so it just sits at status:todo forever and gets
+# refiled on the next pass over the same diff. A real, durable process step is never phrased this
+# way — this gate is a hard, non-skippable refuse ("'Review uncommitted' should guarantee no
+# ticket gets created"), not a warning, because there is no legitimate ticket the FULL template
+# below should ever match.
+#
+# Deliberately narrower than "starts with review/audit/adversarial and contains diff anywhere":
+# that shape over-blocks real product tickets whose title happens to mention a "diff" feature —
+# "Audit diff-view authorization regression", "Review diff parser data-loss fix" — because in
+# those, "diff" is an early NOUN/ADJECTIVE the title is ABOUT, not the trailing OBJECT of a
+# generated "review the diff" sentence. Every real generated example found fits one of four
+# specific shapes instead, so only those are matched:
+#   1. "uncommitted ... diff"                      — "Review uncommitted X diff"
+#   2. "review of ... diff"                        — "Adversarial cross-file review of X diff"
+#   3. "diff for cross-file consistency"           — "Audit X diff for cross-file consistency"
+#   4. starts review/audit/adversarial AND ends in "diff" (the bare form, nothing after it) —
+#      "Review OMP lineage-first model detection diff"
+# None of the false-positive examples above end in a bare "diff", contain "uncommitted", "review
+# of", or the "cross-file consistency" phrase — so none of the four shapes fire on them.
+#
+# Scope boundary: this catches the auto-generated TEMPLATE shape at the create/edit boundary — the
+# threat model is an agent's classifier reflexively filing "Review uncommitted X diff", not an
+# adversary deliberately evading a security control. Accidental-encoding bypasses (trailing
+# punctuation, Unicode terminal characters, a stray zero-width space from a copy-paste) are in
+# scope and normalized away, because those change nothing a human would notice. Deliberate
+# evasion — homoglyphs ("Rеview" with a Cyrillic е), NFKC/fullwidth digit tricks, and similar — is
+# explicitly OUT OF SCOPE: an agent that wants to file junk under a different spelling always can,
+# and chasing every such variant turns a template-catcher into an unwinnable WAF. If a genuinely
+# adversarial actor becomes the real threat model here, that is a different gate.
+#
+# The title is whitespace-normalized (every run of whitespace, including a literal newline,
+# collapsed to one space) before matching: `--title` accepts an embedded newline from the CLI,
+# and `.` does not cross `\n` without `re.DOTALL` — a raw `"Review\nuncommitted policy diff"`
+# would otherwise slip past shape 1 unmatched.
+#
+# Trailing punctuation/markdown is then stripped too: shape 4's terminal matcher requires "diff"
+# to be the literal last word, so ordinary sentence punctuation or markdown wrapping — "Review the
+# payments diff.", "...diff!", "...`diff`" — would put a non-word character after "diff" and slip
+# past unmatched, even though it's still the same generated review-title shape. Match on `\w`
+# (Unicode word characters under Python 3's default str semantics), not an enumerated ASCII
+# punctuation class, so a Unicode terminal character — an ellipsis "…", a CJK full stop "。", a
+# typographic quote — is stripped the same way. Stripping is safe here because it only widens
+# which titles reach the phrase check below, never the phrase check itself — an unrelated title
+# stays unmatched regardless of trailing characters.
+_TRAILING_PUNCT_RE = re.compile(r"[^\w]+$")
+
+
+def _normalize_title_for_junk_check(title: str) -> str:
+    # Strip Unicode format characters (category "Cf": zero-width space, zero-width joiner, RTL/LTR
+    # marks, ...) BEFORE anything else: a zero-width space inserted between two letters of a
+    # required keyword ("di<ZWSP>ff") renders indistinguishably from the plain word but breaks
+    # `\bdiff\b`'s contiguous match, defeating the whole gate. These characters carry no visible
+    # width, so removing them can never change what a human reads.
+    no_format_chars = "".join(ch for ch in (title or "") if unicodedata.category(ch) != "Cf")
+    collapsed = re.sub(r"\s+", " ", no_format_chars).strip()
+    return _TRAILING_PUNCT_RE.sub("", collapsed)
+
+
+# Non-capturing: the lead is never back-referenced, only used to anchor each alternative below.
+_JUNK_TITLE_LEAD = r"^(?:review|audit|adversarial)\b"
+_JUNK_REVIEW_TITLE = re.compile(
+    _JUNK_TITLE_LEAD + r".*(?:"
+    r"\buncommitted\b.*\bdiff\b"  # 1
+    r"|\breview of\b.*\bdiff\b"  # 2
+    r"|\bdiff for cross-file consistency\b"  # 3
+    r"|\bdiff\s*$"  # 4 — bare form, "diff" is the last word
+    r")",
+    re.IGNORECASE,
+)
+GATE_JUNK_TITLE = "junk-title"
+
 # NOT a content gate `check()`/`Phase` ever evaluates — the create-time duplicate guard
 # (`cli._refuse_if_duplicate`) is a separate, session-scoped title-similarity check, not a
 # ticket-content rule. Named here anyway (rather than a bare string literal in cli.py) so the
@@ -97,7 +173,9 @@ DEFAULT_ACCEPTANCE_MIN = 2
 
 # Gates that NO recorded justification can waive — a hard refuse. A ticket must not be closed
 # with an unchecked criterion under any escape hatch; only disabling the gate in config removes it.
-NON_SKIPPABLE_GATES: frozenset[str] = frozenset({GATE_ACCEPTANCE_CHECKED, GATE_MSGREF_TITLE})
+NON_SKIPPABLE_GATES: frozenset[str] = frozenset(
+    {GATE_ACCEPTANCE_CHECKED, GATE_MSGREF_TITLE, GATE_JUNK_TITLE}
+)
 
 # NOT a gate: the recorded post-merge-acceptance opt-out (task-cli#115). A ticket whose
 # acceptance is inherently AFTER the merge (a release publish, a deploy the merge itself
@@ -123,6 +201,7 @@ ALL_GATES: tuple[str, ...] = (
     GATE_MSGREF_TITLE,
     GATE_MSGREF_QUOTE,
     GATE_READ_BEFORE_EDIT,
+    GATE_JUNK_TITLE,
 )
 
 
@@ -175,6 +254,12 @@ class EnforceConfig:
     msgref_quote: bool = True  # refuse a body tg#<id> whose quote is missing yet resolvable (tg#9161)
     links_url: bool = True  # refuse a non-URL value in the Links section (tg#9179)
     read_before_edit: bool = True  # refuse `change --what` without a recent `read` (task-cli#119)
+    # Refuse the auto-generated "review this diff" title shape (task-cli#135). On by default and
+    # NOT per-ticket skippable (see GATE_JUNK_TITLE in NON_SKIPPABLE_GATES) — but, like every
+    # other gate here, a repo can turn the CHECK ITSELF off via `enforce.junk_title: false` if it
+    # genuinely has a legitimate ticket shaped this way; that is a repo-level policy call, not a
+    # per-ticket escape hatch a single caller can grant itself.
+    junk_title: bool = True
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "EnforceConfig":
@@ -225,6 +310,7 @@ class EnforceConfig:
             msgref_quote=_on("msgref_quote"),
             links_url=_on("links_url"),
             read_before_edit=_on("read_before_edit"),
+            junk_title=_on("junk_title"),
         )
 
 
@@ -288,6 +374,15 @@ def check(
     """
     raw: list[Violation] = []
     warnings: list[Violation] = []
+    if phase is Phase.CREATE:
+        # CREATE only (review finding, task-cli#135 round 2): running this in the generic
+        # DONE/close path too would make an already-existing junk ticket — created before this
+        # gate existed, exactly the backlog this gate's own audit found and closed by hand —
+        # permanently uncloseable. The documented contract ("checked on create and any --title
+        # edit") is enforced structurally here, not just in prose.
+        v = junk_title_violation(ticket, cfg)
+        if v is not None:
+            raw.append(v)
     raw.extend(_text_gates(ticket, cfg))
     # links + user-impact-quality are content rules enforced at BOTH create and close: a ticket
     # must not be CREATED carrying a bare reference / thin impact, and must not be CLOSED carrying
@@ -443,6 +538,31 @@ def _scanned_text(ticket: Ticket) -> str:
     parts = [ticket.title, ticket.what, ticket.why, ticket.user_impact, ticket.cost_of_inaction]
     parts += [c.text for c in ticket.acceptance]
     return _strip_quoted_blocks("\n".join(p for p in parts if p))
+
+
+def junk_title_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
+    """Refuse a title matching the auto-generated "review this diff" shape (see
+    :data:`_JUNK_REVIEW_TITLE` for why), unless a repo has explicitly disabled the CHECK itself
+    via ``enforce.junk_title: false``. No PER-TICKET escape hatch — no ``--skip-junk-title``, no
+    ``--force`` — that stays true regardless of ``cfg``; this is not a quality judgment a single
+    caller can waive, it is a structural fact about the title. A real review request belongs in a
+    PR comment or a review-cli run, never a standalone ticket phrased this way."""
+    if not cfg.junk_title:
+        return None
+    if _JUNK_REVIEW_TITLE.match(_normalize_title_for_junk_check(ticket.title)):
+        # Redact before it reaches the diagnostic (review finding): a title carrying a
+        # credential-shaped value ("Review ghp_... diff") must not have that value echoed
+        # verbatim into a message `_report_and_die` prints to stdout — the same posture
+        # `tasklib.logging.redact` already enforces for structured log fields.
+        from .logging import redact
+
+        return Violation(
+            GATE_JUNK_TITLE,
+            f"title matches the auto-generated 'review this diff' shape: {redact(ticket.title)!r}",
+            hint="this ticket can never lead to a merge on its own — post review findings as a PR "
+            "comment or run `review diff`/`review quorum` directly instead of filing a ticket",
+        )
+    return None
 
 
 def links_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
