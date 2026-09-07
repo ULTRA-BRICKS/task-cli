@@ -2044,7 +2044,8 @@ def test_create_force_overrides_unlinked_reference(capsys, _inject_fake):
 def test_change_edit_blocks_unlinked_reference(capsys, _inject_fake):
     main(_create_argv())
     capsys.readouterr()
-    rc = main(["change", "#1", "--what", "now also see tasklib/cli.py"])
+    # a repo slug, not a filename: `tasklib/cli.py` stopped being a reference in task-cli#126
+    rc = main(["change", "#1", "--what", "now also see alex-mextner/task-cli"])
     out = capsys.readouterr().out
     assert rc == 2
     assert "links" in out
