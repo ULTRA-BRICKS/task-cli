@@ -258,8 +258,8 @@ def to_json(chart: BurnChart) -> dict:
     }
 
 
-def to_html(chart: BurnChart) -> str:
-    """Self-contained HTML+SVG burn chart (no CDN, no JS required)."""
+def chart_markup(chart: BurnChart) -> str:
+    """Inner HTML+SVG for the burn chart (no document chrome) so ``task web`` can embed it."""
     title = "Burn chart"
     remaining = chart.remaining
     ideal = chart.ideal
@@ -287,11 +287,28 @@ def to_html(chart: BurnChart) -> str:
 
     start = chart.window.start.isoformat()
     end = chart.window.end.isoformat()
+    return f"""<h1>{title}</h1>
+<p>{html.escape(start)} → {html.escape(end)} · remaining today: {chart.remaining_today} / {chart.total}</p>
+<svg viewBox="0 0 {w} {h}" role="img" aria-label="{title}" data-remaining="{html.escape(rem_csv)}">
+  <line class="axis" x1="{pad}" y1="{pad}" x2="{pad}" y2="{pad + inner_h}" />
+  <line class="axis" x1="{pad}" y1="{pad + inner_h}" x2="{pad + inner_w}" y2="{pad + inner_h}" />
+  <polyline class="ideal" points="{ide_pts}" />
+  <polyline class="remaining" points="{rem_pts}" />
+</svg>
+<ul>
+{listing}
+</ul>
+"""
+
+
+def to_html(chart: BurnChart) -> str:
+    """Self-contained HTML+SVG burn chart (no CDN, no JS required)."""
+    inner = chart_markup(chart)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{title}</title>
+<title>Burn chart</title>
 <style>
 body {{ font-family: ui-sans-serif, system-ui, sans-serif; margin: 1.5rem; color: #111; background: #fff; }}
 h1 {{ font-size: 1.25rem; }}
@@ -303,17 +320,7 @@ ul {{ padding-left: 1.2rem; }}
 </style>
 </head>
 <body>
-<h1>{title}</h1>
-<p>{html.escape(start)} → {html.escape(end)} · remaining today: {chart.remaining_today} / {chart.total}</p>
-<svg viewBox="0 0 {w} {h}" role="img" aria-label="{title}" data-remaining="{html.escape(rem_csv)}">
-  <line class="axis" x1="{pad}" y1="{pad}" x2="{pad}" y2="{pad + inner_h}" />
-  <line class="axis" x1="{pad}" y1="{pad + inner_h}" x2="{pad + inner_w}" y2="{pad + inner_h}" />
-  <polyline class="ideal" points="{ide_pts}" />
-  <polyline class="remaining" points="{rem_pts}" />
-</svg>
-<ul>
-{listing}
-</ul>
+{inner}
 </body>
 </html>
 """
