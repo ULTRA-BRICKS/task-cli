@@ -1192,6 +1192,7 @@ def _enforce_edit_or_die(
     from .policy import (
         apply_skips,
         impact_quality_violation,
+        junk_title_violation,
         links_url_violation,
         links_violation,
         msgref_quote_reports,
@@ -1230,6 +1231,13 @@ def _enforce_edit_or_die(
             raw.append(v)
     if check_title:
         v = msgref_title_violation(ticket, cfg_e)
+        if v is not None:
+            raw.append(v)
+        # A title-only edit (`task change --title`) re-checks the junk-title shape too — the
+        # gate must hold on every path that can leave a ticket with that title persisted, not
+        # only create/done (review finding: `task change --title "Review uncommitted X diff"`
+        # on an already-clean ticket bypassed it entirely).
+        v = junk_title_violation(ticket, cfg_e)
         if v is not None:
             raw.append(v)
     result = apply_skips(raw, ticket, warnings)

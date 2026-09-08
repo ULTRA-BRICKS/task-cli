@@ -2409,6 +2409,31 @@ def test_change_title_with_msgref_refuses(capsys, _inject_fake):
     assert "msgref-title" in out
 
 
+def test_change_title_to_junk_review_shape_refuses(capsys, _inject_fake):
+    # round-1 review finding on task-cli#135: a title-only `change` on an already-clean ticket
+    # only ran the msgref-title gate, letting "Review uncommitted X diff" persist untouched —
+    # exactly the accumulation the junk-title gate exists to prevent.
+    main(_create_argv())
+    capsys.readouterr()
+    rc = main(["change", "#1", "--title", "Review uncommitted policy diff"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "junk-title" in out
+
+
+def test_create_junk_title_refusal_redacts_a_fine_grained_pat(capsys, _inject_fake):
+    # round-4 review finding on task-cli#135: the redactor tasklib.logging shares with this
+    # gate's refusal message did not recognize the `github_pat_...` fine-grained PAT format,
+    # so it reached stdout verbatim through the actual CLI-rendered refusal, not just the
+    # policy helper in isolation.
+    secret = "github_pat_11AAaaBBbbCCccDDddEEeeFFffGGggHHhhIIiiJJ"
+    rc = main(_create_argv(**{"--title": f"Review {secret} diff"}))
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert secret not in out
+    assert "<redacted>" in out
+
+
 def test_change_not_touching_title_does_not_trigger_the_title_gate(_inject_fake):
     # a pre-existing tg#<id> in the title (created before this gate existed, or edited in the
     # web UI) must not block an UNRELATED edit that leaves the title alone.

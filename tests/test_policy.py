@@ -720,3 +720,198 @@ def test_normalize_skip_gate_accepts_read_before_edit():
     assert normalize_skip_gate("read-before-edit") == GATE_READ_BEFORE_EDIT
     assert normalize_skip_gate("read_before_edit") == GATE_READ_BEFORE_EDIT
     assert GATE_READ_BEFORE_EDIT in ALL_GATES
+
+
+# ── junk-title gate: the auto-generated "review this diff" shape (2026-09-07) ──────────────────
+#
+# An ecosystem-wide audit found this exact template is what an unchecked review pass or inbound
+# classifier files when it has no other actionable output — the ticket can never lead to a merge,
+# so it just sits at status:todo and gets refiled. Hard, non-skippable refuse: Alex's own framing
+# was "'Review uncommitted' should guarantee no ticket gets created".
+
+
+def test_junk_review_title_is_blocked_at_create():
+    rc = check_create(_good_ticket(title="Review uncommitted agent-workflow documentation diff"), EnforceConfig())
+    assert not rc.ok
+    assert any(v.gate == "junk-title" for v in rc.violations)
+
+
+def test_junk_title_variants_all_blocked():
+    from tasklib.policy import junk_title_violation
+
+    junk = [
+        "Review uncommitted agent-workflow documentation diff",
+        "Adversarial cross-file review of ticket intake gates diff",
+        "Audit installer retry diff for cross-file consistency",
+        "Review OMP lineage-first model detection diff",
+        "review the payments diff",  # case-insensitive
+    ]
+    for title in junk:
+        assert junk_title_violation(Ticket(title=title), EnforceConfig()) is not None, title
+
+
+def test_junk_title_gate_has_no_escape_hatch():
+    """Non-skippable: recording a skip for it must not waive the violation."""
+    ticket = _good_ticket(
+        title="Review uncommitted agent-workflow documentation diff",
+        skips={"junk-title": "trying to bypass it"},
+    )
+    rc = check_create(ticket, EnforceConfig())
+    assert not rc.ok
+    assert any(v.gate == "junk-title" for v in rc.violations)
+    assert "junk-title" not in rc.skipped
+
+
+def test_legitimate_review_shaped_titles_are_not_blocked():
+    from tasklib.policy import junk_title_violation
+
+    legit = [
+        "Add code review checklist feature",
+        "Fix login button diff-view alignment",
+        "Review the payments module",  # no "diff" — real product ask
+    ]
+    for title in legit:
+        assert junk_title_violation(Ticket(title=title), EnforceConfig()) is None, title
+
+
+def test_junk_title_gate_is_configurable_off():
+    """Repo-level `enforce.junk_title: false` disables the CHECK — distinct from the per-ticket
+    --skip escape hatch, which does not exist for this gate."""
+    ticket = _good_ticket(title="Review uncommitted agent-workflow documentation diff")
+    cfg_off = EnforceConfig(junk_title=False)
+    rc = check_create(ticket, cfg_off)
+    assert rc.ok
+
+
+def test_junk_title_gate_config_from_dict():
+    from tasklib.policy import EnforceConfig as EC
+
+    assert EC.from_dict({"junk_title": False}).junk_title is False
+    assert EC.from_dict({}).junk_title is True
+    assert EC.from_dict(None).junk_title is True
+
+
+def test_junk_title_no_length_cap_bypass():
+    """A classifier padding the gap between the leading word and 'diff' must not slip through —
+    an earlier version capped the gap at 80 chars."""
+    from tasklib.policy import junk_title_violation
+
+    padded = "Review uncommitted " + "x" * 200 + " diff"
+    assert junk_title_violation(Ticket(title=padded), EnforceConfig()) is not None
+
+
+def test_junk_title_gate_applies_to_title_only_edit():
+    """`task change --title` on an already-clean ticket must not be able to persist a junk title
+    (a title-edit path that only ran msgref_title_violation, not junk_title, would miss this)."""
+    from tasklib.policy import check
+
+    ticket = _good_ticket(title="A clean, legitimate title")
+    ticket.title = "Review uncommitted policy diff"
+    rc = check(ticket, EnforceConfig(), Phase.CREATE)
+    assert not rc.ok
+    assert any(v.gate == "junk-title" for v in rc.violations)
+
+
+def test_junk_title_trailing_punctuation_is_still_caught():
+    """shape 4 requires "diff" to be the literal last word, so ordinary
+    sentence punctuation or markdown wrapping after it let the same generated shape slip past
+    unmatched."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review the payments diff."), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments diff!"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments diff?"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments `diff`"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Audit security diff..."), EnforceConfig()) is not None
+
+
+def test_junk_title_zero_width_characters_are_still_caught():
+    """A zero-width space (U+200B) inserted inside a required keyword
+    renders indistinguishably from plain text but breaks `\\bdiff\\b`'s contiguous match. Strip
+    Unicode format characters (category Cf) before matching, not just visible whitespace."""
+    from tasklib.policy import junk_title_violation
+
+    zwsp = "​"
+    zwj = "‍"
+    assert junk_title_violation(Ticket(title=f"Review uncommitted policy di{zwsp}ff"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title=f"Re{zwj}view uncommitted policy diff"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title=f"Review the payments di{zwsp}ff{zwsp}."), EnforceConfig()) is not None
+
+
+def test_junk_title_unicode_trailing_punctuation_is_still_caught():
+    """An earlier fix enumerated ASCII punctuation only, so a Unicode
+    terminal character (ellipsis, CJK full stop, typographic quotes) reached the same unmatched
+    state. Match on non-word characters generally instead of an ASCII allowlist."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review the payments diff…"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments diff。"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments “diff”"), EnforceConfig()) is not None
+
+
+def test_junk_title_trailing_punctuation_does_not_widen_legitimate_titles():
+    """The punctuation strip must not turn an unrelated title into a false positive — it only
+    changes whether "diff" reads as the last word, not the phrase check itself."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review the changelog."), EnforceConfig()) is None
+    assert junk_title_violation(Ticket(title="Audit diff-view authorization regression."), EnforceConfig()) is None
+    assert junk_title_violation(Ticket(title="Review diff parser data-loss fix."), EnforceConfig()) is None
+
+
+def test_junk_title_multiline_is_still_caught():
+    """A newline embedded in --title must not let the shape slip past the word-gap scan
+    ("Review\\nuncommitted policy diff" bypassed the un-normalized match)."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review\nuncommitted policy diff"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Audit\nsecurity diff"), EnforceConfig()) is not None
+
+
+def test_junk_title_narrowed_shape_avoids_real_product_titles():
+    """An earlier, broader shape ('starts with review/audit and contains diff anywhere')
+    shape over-blocked real tickets ABOUT a diff-related feature. Only the four specific
+    generated-template shapes should match."""
+    from tasklib.policy import junk_title_violation
+
+    legit = [
+        "Audit diff-view authorization regression",
+        "Review diff parser data-loss fix",
+    ]
+    for title in legit:
+        assert junk_title_violation(Ticket(title=title), EnforceConfig()) is None, title
+
+
+def test_junk_title_gate_does_not_block_closing_a_pre_existing_junk_ticket():
+    """Running the gate in the generic DONE path too would make an
+    already-existing junk ticket (created before this gate existed — exactly the backlog this
+    gate's own audit found and closed by hand) permanently uncloseable. CREATE-only."""
+    ticket = _good_ticket(
+        title="Review uncommitted agent-workflow documentation diff",
+        acceptance=_checked_criteria(),
+    )
+    rc = check_done(ticket, EnforceConfig())
+    assert not any(v.gate == "junk-title" for v in rc.violations)
+
+
+def test_junk_title_violation_redacts_a_credential_shaped_title():
+    """A title carrying a token must not be echoed verbatim into the
+    violation message, which _report_and_die prints to stdout."""
+    from tasklib.policy import junk_title_violation
+
+    v = junk_title_violation(Ticket(title="Review ghp_abcdefghijklmnopqrstuvwxyz012345 diff"), EnforceConfig())
+    assert v is not None
+    assert "ghp_abcdefghijklmnopqrstuvwxyz012345" not in v.message
+
+
+def test_junk_title_violation_redacts_a_fine_grained_pat_title():
+    """An earlier version of tasklib.logging's redactor did not recognize the
+    ``github_pat_...`` fine-grained PAT format, so it reached stdout verbatim through this
+    gate's refusal message even though classic ``ghp_`` tokens were already scrubbed."""
+    from tasklib.policy import junk_title_violation
+
+    secret = "github_pat_11AAaaBBbbCCccDDddEEeeFFffGGggHHhhIIiiJJ"
+    v = junk_title_violation(Ticket(title=f"Review {secret} diff"), EnforceConfig())
+    assert v is not None
+    assert secret not in v.message
+    assert "<redacted>" in v.message
