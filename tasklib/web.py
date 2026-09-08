@@ -26,6 +26,7 @@ import json
 import os
 import signal
 import sys
+import threading
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -124,7 +125,8 @@ def run(
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
     def _stop(_signum=None, _frame=None) -> None:
-        server.shutdown()
+        # serve_forever() blocks this thread; stdlib shutdown() must run on another.
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
