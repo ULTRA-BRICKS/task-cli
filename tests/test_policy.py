@@ -802,6 +802,7 @@ def test_legitimate_review_shaped_titles_are_not_blocked():
         # "uncommitted" as a domain noun, not the review-uncommitted process template
         "Audit uncommitted transaction handling",
         "Add a review of uncommitted files to the status bar",
+        "Add a review of the current uncommitted files to the status bar",
         "Support review of uncommitted transaction handling in the admin console",
         "Add review of uncommitted document changes to the approval workflow",
     ]

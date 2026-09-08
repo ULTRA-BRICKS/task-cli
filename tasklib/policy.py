@@ -161,7 +161,7 @@ _JUNK_TITLE_LEAD = r"^(?:review|audit|adversarial)\b"
 # so a product title about reviewing uncommitted files still creates.
 _JUNK_REVIEW_UNCOMMITTED = re.compile(
     r"(?:^review\s*[:\-–—,.]?\s*(?:the\s+)?uncommitted\b|"
-    r"\breview of (?:the\s+)?current\s+uncommitted\b)",
+    r"^(?:(?:read-only|adversarial|cross-file)\s+)*review of (?:the\s+)?current\s+uncommitted\b)",
     re.IGNORECASE,
 )
 _JUNK_REVIEW_TITLE = re.compile(
