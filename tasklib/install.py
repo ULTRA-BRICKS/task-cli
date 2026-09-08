@@ -100,9 +100,10 @@ task session                     # show current session + its tickets
   key uses an UNDERSCORE, not the gate's hyphenated display name): every-criterion-checked-
   with-proof on close (`enforce.acceptance_checked: false`), the title's `tg#<id>` ban
   (`enforce.msgref_title: false`), and a title shaped like "Review uncommitted …" or the
-  auto-generated "review this diff" pattern, checked on create and on any `--title` edit
-  (`enforce.junk_title: false`). Process / review-uncommitted work belongs in `harness task`,
-  not `task new`.
+  auto-generated "review this diff" pattern (including "Review … diff for performance
+  regressions"), checked on create and on any `--title` edit (`enforce.junk_title: false`).
+  Process / review-uncommitted work belongs in `harness task`, not `task new` against a
+  product GitHub/Linear tracker.
 - **Post-`task new` relatedness nudge**: after creating a ticket, a cheap title/label keyword
   scan over open tickets suggests plausibly related ones and prints the exact `task link`
   command for each — it never auto-links, only suggests; run the printed command if the
