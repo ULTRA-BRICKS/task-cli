@@ -212,6 +212,238 @@ def build_prompt(message: str) -> str:
     return CLASSIFY_PROMPT + message.strip()
 
 
+# ── Multi-ask detection ──────────────────────────────────────────────────────────────────────
+#
+# An ecosystem-wide audit of task-cli intake (2026-09) found a large share of auto-created
+# tickets were empty/vague in the body — one contributor: an inbound message that actually
+# bundles SEVERAL distinct asks gets lumped into one `change` classification and one vague
+# ticket, because nothing upstream of `cmd_classify` ever notices the message wasn't about one
+# thing. `detect_multi_ask` is a deliberately STRUCTURAL heuristic (never prose-length or topic
+# guessing) so an ordinary single-topic paragraph — even a long, detailed one — is never split:
+#
+#   1. A numbered/bulleted list (`1. ...`, `2) ...`, `- ...`, `* ...`, `• ...`) with >=2 items —
+#      each item is one ask. The strongest, least ambiguous signal: the author already
+#      structured the message as a list.
+#   2. No list, but the message chains clauses with an EXPLICIT enumeration marker — English
+#      "also"/"and also"/"additionally"/"plus", or the Russian equivalents of "and also"/
+#      "also too"/"as well"/"besides that" (this project's inbound messages are frequently
+#      Russian — see `_ENUMERATION_SEP_RE` below for the exact patterns matched; kept out of
+#      this comment per the repo's English-only-docs rule) — or a semicolon.
+#
+# Deliberately NOT a signal: a bare English "and" (or its Russian equivalent) conjunction, OR a
+# bare "also"/"additionally"/"plus" with nothing else marking it. "and" is the single most
+# common conjunction in ordinary prose ("fix the login bug and improve the error message" could
+# be one combined ask or two — genuinely ambiguous), and a lone "also" is just as often
+# elaborating on the SAME ask ("...and this also happens on the second page" is still describing
+# one bug, not introducing a second one — an early version of this heuristic split exactly that
+# sentence and was caught by this module's own test suite). Only the STRONGER two-word/idiomatic
+# markers in `_ENUMERATION_SEP_RE` below are kept ("and also," not bare "also"), and the Russian
+# phrases there, which read as enumeration markers much more reliably than their literal
+# word-for-word English gloss suggests.
+# Anchored at ZERO indentation on purpose (review finding, P1): an earlier version allowed any
+# leading whitespace, so an INDENTED sub-bullet under a parent item ("- do X\n  - a detail of
+# X") was treated as its own independent top-level ask rather than part of X's item. Requiring
+# zero indentation means only genuinely top-level bullets are split points; an indented line
+# (nested bullet or a wrapped continuation line) is swept into the CONTAINING item's text.
+_LIST_ITEM_RE = re.compile(r"^(?:[-*•]|\d{1,2}[.)])[ \t]+\S", re.MULTILINE)
+_LIST_MARKER_STRIP_RE = re.compile(r"^(?:[-*•]|\d{1,2}[.)])[ \t]+")
+
+_ENUMERATION_SEP_RE = re.compile(
+    r"\s*;\s*"
+    r"|\s+(?:"
+    r"а\s+ещ[её]|и\s+ещ[её]|а\s+также|также|кроме\s+того"  # Russian
+    r"|and\s+also"  # English (bare "also"/"plus"/"additionally" deliberately excluded — too
+    # easily elaborates on the SAME ask rather than introducing a new one; see comment above)
+    r")\s+",
+    re.IGNORECASE,
+)
+
+# A split fragment must carry at least this many words to count as a distinct ask — a trailing
+# "; thanks" or a one-word aside must not be treated as its own item.
+_MIN_ASK_WORDS = 3
+_ASK_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+# A fragment that OPENS with a sequencing word ("then," or its Russian equivalents — see the
+# regex below, kept out of this comment per the repo's English-only-docs rule) is a dependent
+# NEXT STEP of the PRECEDING fragment, not an independent parallel ask — review finding: a
+# semicolon alone doesn't distinguish "two separate requests" from "two ordered steps of one
+# task" ("Migrate tenant IDs by adding the tenant_id column; then backfill existing rows." is
+# ONE atomic migration, not two asks). A leading "and then"/"and" is included too, since "and
+# then X" carries the same dependency signal as bare "then X".
+_SEQUENCING_FRAGMENT_RE = re.compile(
+    r"^(?:and\s+)?then\b|^затем\b|^потом\b", re.IGNORECASE
+)
+
+# KNOWN, ACCEPTED limitation, not fully closeable here (three separate adversarial review
+# rounds each found a new phrasing this keyword list doesn't catch — e.g. "Upgrade the tenant
+# migration by adding the tenant_id column; backfill existing rows after deployment" has no
+# sequencing word at all, yet is still one ordered migration, not two asks). Whether a
+# semicolon separates two INDEPENDENT asks or two ORDERED STEPS of one task is a discourse-level
+# judgment no closed keyword list can fully capture — every fix here narrows the false-positive
+# rate without ever reaching zero, the same class of tradeoff as the token/Jaccard duplicate
+# gate's documented "Encrypt API token storage" vs "API token storage rotation" false positive
+# (see policy.py). Accepted because the cost is bounded and reversible: a wrongly-split message
+# creates two tickets instead of one, which a human closes/merges — never silent data loss, and
+# no worse than the pre-existing failure mode (one vague ticket covering several real asks) this
+# feature exists to fix. Further narrowing needs real inbound-message data to validate against,
+# not another guessed keyword.
+
+
+def _split_list_items(message: str) -> list[str]:
+    """Split `message` at bullet/numbered list item boundaries. `[]` unless >=2 items result.
+
+    Real bugs fixed here (review findings, P1/P2): a PREAMBLE before the first bullet ("Only
+    enterprise plans:\n- add the flag\n- expose it in admin") was silently DISCARDED — the
+    shared constraint never reached any item, not even the one whose text happened to include
+    it — and a shared line/paragraph attached to ONE bullet's block (whether trailing after the
+    LAST bullet: "...\n- expose it in admin\n\nBoth must preserve SSO behavior.", WITHOUT a blank
+    line: "...\n- Update client configuration\nBoth must use the new key identifier.", or
+    sandwiched between two bullets: "- update client configuration\nBoth changes must preserve
+    SSO.\n- rotate signing keys") was misrepresented as specific to just that one ask when it
+    applies to all of them. All these shapes mean the message carries context this heuristic
+    cannot safely partition among items, so — same principle as `_split_enumeration`'s
+    thin-fragment handling — DECLINE TO SPLIT AT ALL rather than lose or misattribute it; the
+    caller keeps the whole message (preamble, list, and any extra content together) as one ask.
+    The rule is simply "EVERY item's own line block must be exactly one line" (checked for ALL
+    items, not only the last — an earlier version checked only the last item's block, missing
+    the sandwiched-between-bullets shape entirely) — ANY extra line in ANY item's block
+    (blank-separated or not) is ambiguous between "a wrapped continuation of that one bullet"
+    and "a shared note for every bullet," and there is no reliable way to tell them apart from
+    text shape alone — UNLESS the extra line is itself INDENTED, which is the same signal
+    `_LIST_ITEM_RE`'s zero-indentation anchor already uses to recognize a nested sub-bullet or
+    an explicitly subordinate continuation as belonging to the bullet directly above it (an
+    indented line can never be a "shared note for every bullet" — that shape is always flush
+    top-level prose). So: an extra line that starts with whitespace stays attached to its
+    item; an extra line that does NOT (flush prose, or a blank line) declines the whole split.
+    """
+    lines = message.splitlines()
+    starts = [i for i, ln in enumerate(lines) if _LIST_ITEM_RE.match(ln)]
+    if len(starts) < 2:
+        return []
+    preamble = "\n".join(lines[: starts[0]]).strip()
+    if preamble:
+        return []
+    items: list[str] = []
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        block = lines[start:end]
+        if any(not extra[:1].isspace() for extra in block[1:]):
+            return []
+        text = "\n".join(block).strip()
+        text = _LIST_MARKER_STRIP_RE.sub("", text, count=1).strip()
+        if text:
+            items.append(text)
+    return items if len(items) >= 2 else []
+
+
+# A backtick/double-quote-delimited span ("`alpha; beta`", '"alpha; beta"') protects any
+# enumeration marker inside it from being treated as a split point (review finding): a semicolon
+# inside inline code/a literal string is punctuation belonging to THAT quoted content, not a
+# separator between two asks ("Please preserve literal `alpha; beta gamma delta` in the
+# generated output" is ONE request, not two). Deliberately simple (non-overlapping, first-match
+# greedy pairing) — good enough for the common inline-code/quote shapes; a message with
+# mismatched or nested delimiters just protects less than ideal, never more (a missed split
+# opportunity is the safe direction, matching this module's overall "decline over guess" bias).
+#
+# SINGLE quotes are deliberately NOT included (review finding, a real bug in an earlier version
+# that DID include them): English contractions/possessives ("Don't", "user's") use apostrophes
+# far more often than genuine quoting, so pairing them up greedily protected everything BETWEEN
+# two unrelated apostrophes — "Don't change the login flow; and also update the user's
+# documentation" had its real `;` separator falsely hidden inside the "t ... user'" span. That
+# violates this module's own "a missed protection is the safe direction" claim (over-protecting
+# is the wrong direction, since it SUPPRESSES a real split rather than merely failing to add
+# one). Backticks and double quotes don't have this ambiguity in ordinary English prose.
+#
+# KNOWN LIMITATION, not fixed here (review finding, Medium — flagged for follow-up rather than
+# adding delimiter-balance detection to an already deep heuristic): an UNTERMINATED backtick or
+# double-quote (`Please preserve "alpha; beta gamma delta`, cut off mid-message — truncated
+# input, a copy-paste error) matches no protected span at all, so the semicolon inside it is
+# treated as a real separator and the message can still be mis-split. Detecting and declining on
+# an odd number of an unpaired delimiter would close this; the common well-formed case (which
+# this module optimizes for) is unaffected either way.
+_PROTECTED_SPAN_RE = re.compile(r"`[^`]*`|\"[^\"]*\"")
+
+
+def _protected_spans(message: str) -> list[tuple[int, int]]:
+    return [m.span() for m in _PROTECTED_SPAN_RE.finditer(message)]
+
+
+def _in_any_span(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in spans)
+
+
+def _split_enumeration(message: str) -> list[str]:
+    """Split on an explicit enumeration marker/semicolon. `[]` unless every resulting part is
+    substantial (`>= _MIN_ASK_WORDS` words) AND there are >=2 of them.
+
+    Three real bugs fixed here (review findings): an EARLIER version dropped any part below the
+    word floor and returned the rest — for `"fix login regression now; add tests; update API
+    docs"` that silently threw away "add tests" (2 words), returning only the other two parts
+    as if that were the complete set of asks: the request to add tests VANISHED, never
+    classified or ticketed. The floor exists only to recognize a trailing aside ("...; thanks")
+    as NOT a second ask; it must never cause a genuine part to be dropped. So now: if ANY part
+    is too thin to trust as its own ask, DECLINE TO SPLIT AT ALL (return `[]`, meaning the
+    caller keeps the whole message as one ask) rather than silently losing content. Separately,
+    a semicolon alone is not sufficient evidence of two INDEPENDENT asks — a fragment beginning
+    with a sequencing word (`_SEQUENCING_FRAGMENT_RE` — "then" or its Russian equivalents) is a
+    dependent NEXT STEP of the previous fragment, not a separate request, and also declines the whole
+    split (the two steps stay together as one ask, describing one atomic task). And a marker
+    INSIDE a quoted/code span (see `_PROTECTED_SPAN_RE`) is never a real split point.
+    """
+    spans = _protected_spans(message)
+    matches = [m for m in _ENUMERATION_SEP_RE.finditer(message) if not _in_any_span(m.start(), spans)]
+    if not matches:
+        return []
+    raw_parts: list[str] = []
+    prev_end = 0
+    for m in matches:
+        raw_parts.append(message[prev_end : m.start()])
+        prev_end = m.end()
+    raw_parts.append(message[prev_end:])
+    parts = [p.strip() for p in raw_parts if p.strip()]
+    if len(parts) < 2:
+        return []
+    if any(len(_ASK_WORD_RE.findall(p)) < _MIN_ASK_WORDS for p in parts):
+        return []
+    if any(_SEQUENCING_FRAGMENT_RE.match(p) for p in parts):
+        return []
+    return parts
+
+
+# A hard cap on how many asks one message may split into (review finding, Medium — a real
+# resource-exhaustion risk, not just a quality one): each returned part becomes its own model
+# classification call PLUS a potential ticket creation (`cli._classify_multi`), so an unbounded
+# split size means an unbounded number of both per inbound message. A message built from
+# thousands of list-item lines ("- request number 1\n- request number 2\n...") would otherwise
+# split into thousands of parts and fire thousands of classifier calls / ticket creations from
+# ONE `classify --create` invocation. 20 is generous for a genuine bundled request (the audit
+# this feature is based on never saw more than a handful of asks in one message) while making
+# a message THIS long simply decline to split — same "decline over guess" principle as every
+# other ambiguity in this module, just triggered by size instead of shape.
+_MAX_MULTI_ASK_PARTS = 20
+
+
+def detect_multi_ask(message: str) -> list[str]:
+    """Split an inbound message into distinct asks when it structurally bundles more than one.
+
+    Returns `[message]` (unsplit) when neither structural signal fires — the overwhelmingly
+    common case, so an ordinary single-topic message is never touched — OR when a signal fires
+    but produces MORE than `_MAX_MULTI_ASK_PARTS` items (review finding: an unbounded split size
+    is a resource-exhaustion risk, each part costing its own classifier call and possible ticket
+    creation; declining is the safe response, not silently capping and dropping the rest). A
+    returned list of length >=2 means the caller should classify/ticket each item separately
+    (see `cli.cmd_classify`). See the module comment above for why each signal was chosen and
+    why a bare English "and" (or its Russian equivalent) conjunction deliberately is NOT one.
+    """
+    items = _split_list_items(message)
+    if items and len(items) <= _MAX_MULTI_ASK_PARTS:
+        return items
+    items = _split_enumeration(message)
+    if items and len(items) <= _MAX_MULTI_ASK_PARTS:
+        return items
+    return [message]
+
+
 # Leading markdown blockquote decoration (`>`, `>>`, `> >`, mixed with spaces/tabs) that a
 # model's echo commonly wraps each line in, tolerated per-line when matching an echoed template
 # — a QUOTED echo of the prompt is recognized too, not just a byte-identical one. NOTE: this

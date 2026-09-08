@@ -75,6 +75,8 @@ _SKIP_FLAGS = (
     ("--skip-links-url", "links-url"),
     ("--skip-msgref-quote", "msgref-quote"),
     ("--skip-read-before-edit", "read-before-edit"),
+    ("--skip-duplicate", "duplicate"),
+    ("--skip-todo-shaped", "todo-shaped"),
 )
 
 
@@ -611,6 +613,22 @@ class _UserError(Exception):
     """A user-facing error → printed as ``error: ...`` and exit 2 (no traceback)."""
 
 
+class _ClassifyBatchAmbiguous(Exception):
+    """Internal-only signal (never escapes `_classify_multi`): a multi-ask batch item hit an
+    AMBIGUOUS backend write (review finding, "High" — the connection may have dropped AFTER the
+    backend already accepted the request) — either a fresh CREATE (`_create_ticket_or_ambiguous`
+    returns `(None, exit_code)`, no confirmed ticket id) or a dedup-fold-in COMMENT (the restated
+    text may have already posted to the matched ticket). Either way there is nothing safe to
+    record into `batch_resolved_ids`, which means a LATER batch item's dedup check would see the
+    possibly-affected ticket as an ORDINARY (non-excluded) candidate and could wrongly fold a
+    genuinely distinct ask into it. The only safe response is to stop the whole batch here —
+    raised instead of returned so `_classify_multi` can tell "this item finished with some exit
+    code" apart from "stop processing the remaining items now."""
+
+    def __init__(self, exit_code: int) -> None:
+        self.exit_code = exit_code
+
+
 # ── shared plumbing ─────────────────────────────────────────────────────────────────
 
 
@@ -1089,15 +1107,21 @@ def _apply_force(
     """Record ``reason`` as the skip justification for whichever ``forceable`` gates actually fire.
 
     This is how ``--force "<reason>"`` overrides the new content gates (links / user-impact-
-    quality): the reason is written onto the ticket's ``skips``, so it lands — audited — in the
+    quality) — and, when ``GATE_TODO_SHAPED`` is in ``forceable``, the non-blocking todo-shaped
+    hint too: the reason is written onto the ticket's ``skips``, so it lands — audited — in the
     body's ``Skipped gates`` section, exactly like ``--skip-<gate>``. Only gates that genuinely
-    fail are recorded, so a force never pollutes the audit trail with gates that passed.
+    fire are recorded, so a force never pollutes the audit trail with gates that passed.
+
+    Scans BOTH ``result.violations`` and ``result.warnings``: todo-shaped never appears in
+    ``violations`` (it never blocks — see ``check()``'s own comment), so a force-set that
+    includes it would otherwise silently never fire (review finding while wiring the new gate).
     """
     if not reason:
         return
     from .policy import check
 
-    for v in check(ticket, _enforce_config(cfg), phase).violations:
+    result = check(ticket, _enforce_config(cfg), phase)
+    for v in (*result.violations, *result.warnings):
         if v.gate in forceable:
             ticket.skips.setdefault(v.gate, reason)
 
@@ -1105,8 +1129,17 @@ def _apply_force(
 def _session_dedup_candidates(backend, session) -> list[Ticket]:
     """This session's tickets for a dedup scan, degrading to `[]` on ANY backend hiccup.
 
-    Shared by `_refuse_if_duplicate` and `_classify_create` so both dedup checks fail open the
-    same way. Catches BOTH `BackendError` and `AmbiguousBackendError`: this is a read-only GET,
+    Shared by `_refuse_if_duplicate`, `_enforce_similar_duplicate_or_die`, and `_classify_create`
+    so every dedup mechanism fails open the same way — AND shares the same bounded coverage
+    (review finding, P2, explicitly called out as part of the contract rather than left silent):
+    `limit=30` (the `TicketBackend` protocol's own default) means only the 30 most recent
+    session tickets are ever considered. A duplicate of a ticket OUTSIDE that window is never
+    caught by any duplicate-detection mechanism — no warning, no recorded waiver, just a
+    silently-created second ticket. Raising the limit or paginating would cost an extra
+    API round-trip on every `create`/`classify --create`; for a session-scoped dedup scan (most
+    sessions stay well under 30 tickets) that trade wasn't judged worth it here, but a caller
+    relying on duplicate detection for a long-lived, high-volume session should know its actual
+    bound. Catches BOTH `BackendError` and `AmbiguousBackendError`: this is a read-only GET,
     so an ambiguous outcome here is harmless (nothing was mutated either way) — unlike
     `AmbiguousBackendError` from a WRITE, which must never be silently swallowed. Missing
     `AmbiguousBackendError` here was itself a review-caught bug: `session_tickets()` funnels
@@ -1123,7 +1156,7 @@ def _session_dedup_candidates(backend, session) -> list[Ticket]:
 
 
 def _refuse_if_duplicate(
-    backend, session, force_reason: str | None, ticket: Ticket
+    candidates: list[Ticket], force_reason: str | None, ticket: Ticket
 ) -> None:
     """Block `create` when a close-duplicate ticket already exists in this session.
 
@@ -1133,17 +1166,27 @@ def _refuse_if_duplicate(
     `AmbiguousBackendError`) could silently create a genuine duplicate ticket (task-cli review
     finding).
 
+    Takes the already-fetched session-scoped `candidates` (the caller, `cmd_create`, fetches
+    them once via `_session_dedup_candidates` and reuses them for the broader token/Jaccard
+    gate too — `_enforce_similar_duplicate_or_die` — rather than each gate re-fetching).
+
     `force_reason` (`--force "<reason>"`) overrides the block; the reason is recorded under
     `policy.GATE_DUPLICATE` in the ticket's `skips` (renders in the `Skipped gates` section) ONLY
     when it actually overrode a detected match — a force that found nothing to override never
     pollutes the audit trail, mirroring `_apply_force`'s same rule for the policy gates.
-    """
-    from .policy import GATE_DUPLICATE
 
-    candidates = _session_dedup_candidates(backend, session)
+    `--skip-duplicate "<reason>"` ALSO overrides this hard block, not only the broader
+    token/Jaccard gate (`_enforce_similar_duplicate_or_die`) below it — both mechanisms share
+    `policy.GATE_DUPLICATE`, so one waiver name must waive both, or the README's documented
+    escape hatch would silently not work for the near-exact-title case (review finding).
+    """
+    from .policy import GATE_DUPLICATE, gate_is_skipped
+
     match = _best_dedup_match(ticket.title, candidates)
     if match is None:
         return
+    if gate_is_skipped(ticket, GATE_DUPLICATE):
+        return  # already recorded via --skip-duplicate; nothing further to record here
     if force_reason:
         ticket.skips.setdefault(GATE_DUPLICATE, force_reason)
         return
@@ -1159,6 +1202,43 @@ def _refuse_if_duplicate(
         f"    task change '{match.id}' ...               edit it instead of creating a new one\n"
         f'    task new ... --force "<reason>"          create anyway (records the override)'
     )
+
+
+def _enforce_similar_duplicate_or_die(
+    ticket: Ticket, candidates: list[Ticket], session, force_reason: str | None
+) -> None:
+    """The token/Jaccard-similarity duplicate gate (`policy.duplicate_violation`) — broader than
+    `_refuse_if_duplicate`'s near-exact-title check above, catching a REWORDED duplicate of the
+    same underlying request (task-cli ecosystem audit, 2026-09: 13 confirmed duplicates from
+    `task classify`'s auto-create path used exactly this shape — same ask, different wording,
+    so the title-only SequenceMatcher check never fired).
+
+    Reported through the SAME `PolicyResult`/`_report_and_die` pipeline every other soft gate
+    uses, so it prints and refuses like the others, and `--skip-duplicate "<reason>"` (or
+    `--force "<reason>"`, mirroring `_apply_force`'s "only record what actually fired" rule)
+    silences it.
+    """
+    from datetime import datetime, timezone
+
+    from .policy import PolicyResult, duplicate_violation, gate_is_skipped
+
+    v = duplicate_violation(
+        ticket.title,
+        ticket.what,
+        candidates,
+        new_session=session.label,
+        now=datetime.now(timezone.utc),
+    )
+    if v is None:
+        return
+    if force_reason:
+        ticket.skips.setdefault(v.gate, force_reason)
+    result = PolicyResult()
+    if gate_is_skipped(ticket, v.gate):
+        result.skipped.append(v.gate)
+    else:
+        result.violations.append(v)
+    _report_and_die(result, "create")
 
 
 def _derive_title_from_message(text: str) -> str:
@@ -1552,16 +1632,23 @@ def cmd_create(args: argparse.Namespace) -> int:
         due=due,
     )
 
-    from .policy import GATE_LINKS, GATE_USER_IMPACT_QUALITY, Phase
+    from .policy import GATE_LINKS, GATE_TODO_SHAPED, GATE_USER_IMPACT_QUALITY, Phase
 
     force_reason = getattr(args, "force_reason", None)
     _apply_force(
-        ticket, cfg, Phase.CREATE, force_reason, {GATE_LINKS, GATE_USER_IMPACT_QUALITY}
+        ticket,
+        cfg,
+        Phase.CREATE,
+        force_reason,
+        {GATE_LINKS, GATE_USER_IMPACT_QUALITY, GATE_TODO_SHAPED},
     )
     _enforce_or_die(ticket, cfg, Phase.CREATE)
 
     backend = _backend(cfg)
-    _refuse_if_duplicate(backend, session, force_reason, ticket)
+    if _enforce_config(cfg).duplicate:
+        candidates = _session_dedup_candidates(backend, session)
+        _refuse_if_duplicate(candidates, force_reason, ticket)
+        _enforce_similar_duplicate_or_die(ticket, candidates, session, force_reason)
 
     created, ambiguous_exit = _create_ticket_or_ambiguous(backend, ticket)
     if ambiguous_exit is not None:
@@ -4630,7 +4717,151 @@ def _accept_usage(ticket_id: str) -> str:
 
 
 def cmd_classify(args: argparse.Namespace) -> int:
+    """Entry point for `task classify`: split a multi-ask message, then classify each part.
+
+    Splitting happens BEFORE classification (`classify.detect_multi_ask` is a pure structural
+    heuristic — see its module docstring for why) and ONLY for the auto-CREATE path
+    (`args.create` and not `args.update`): a plain `task classify "<text>"` with neither flag is
+    classification-only — it prints exactly one verdict and has no side effect either way — and
+    a caller relying on that single-verdict-per-call contract must not silently get two verdicts
+    for a multi-ask message (review finding: an earlier version gated on `not args.update` alone,
+    so a classification-only call with a numbered-list message ran the classifier TWICE with no
+    `--create` to justify it). `--update` means the caller already picked ONE target ticket for
+    the whole raw message, so splitting it there would be a surprising behavior change to a
+    narrower, explicit operation. Each part is classified/created independently through
+    :func:`_classify_one`, which holds the ENTIRE former body of this function unchanged.
+
+    The split DECISION runs on the tg-cli-inbound-wrap-STRIPPED text (review finding, P1): the
+    real hook payload shape is `[TG from Alex tg#42] 1. fix login\n2. update email` — the wrap
+    sits on the SAME line as item 1, so `detect_multi_ask`'s list-marker regex (anchored at
+    column 0) never matched line 1 against the raw wrapped text, and the message silently never
+    split at all. `msgrefs.strip_inbound_wrap` is the SAME stripper `_derive_title_from_message`
+    already uses. The single-item (non-split) fallthrough below still passes the ORIGINAL
+    `args.text` (wrap included) to `_classify_one`, unchanged from before this fix, since that
+    path's own downstream title-derivation already strips the wrap itself.
+
+    The wrap is RE-ATTACHED to every resulting part (review finding, P1 — an earlier version of
+    this fix stripped it for the split decision and then simply discarded it): the wrap's own
+    `tg#<id>` is what `_classify_create`'s `_expand_msgrefs` call finds and quotes into `what` —
+    the single-message path gets this because the wrap stays embedded in `args.text` there. A
+    split part built from the UNWRAPPED text alone would carry no `tg#<id>` at all, silently
+    losing the message-reference/quote every part would otherwise get. Each part is prefixed
+    with the SAME wrap the original message had (or left alone if there was none), so every
+    resulting ticket still traces back to the one inbound message they all came from — the wrap
+    is stripped again per-part by `_derive_title_from_message`, exactly as the single-item path
+    already does, so it never leaks into a derived title.
+    """
     cfg = _load(args)
+    if args.create and not args.update:
+        from .classify import detect_multi_ask
+        from .msgrefs import strip_inbound_wrap
+
+        stripped = args.text.strip()
+        unwrapped = strip_inbound_wrap(stripped)
+        wrap = stripped[: len(stripped) - len(unwrapped)]
+        parts = detect_multi_ask(unwrapped)
+        if len(parts) > 1:
+            return _classify_multi([wrap + p for p in parts], args, cfg)
+    return _classify_one(args, cfg)
+
+
+def _classify_multi(parts: list[str], args: argparse.Namespace, cfg) -> int:
+    """Classify/create each distinct ask found by `detect_multi_ask` separately.
+
+    Prints one "N distinct asks detected" banner, then reuses `_classify_one` per part via a
+    shallow `Namespace` copy with `.text` swapped — every downstream behavior (dedup, auto-skip,
+    session recording) stays byte-for-byte identical to the single-message path. Returns the
+    WORST (highest) exit code across parts, so a caller checking `rc == 0` still sees a failure
+    if any single part failed, even though the others may have succeeded.
+
+    Passes a SHARED, growing `batch_resolved_ids` set to every part (review finding, P1): without
+    it, a genuinely two-part split like "- Fix iOS login error\n- Fix Android login error" would
+    create ticket #1 for "Fix iOS login error", then — because `_classify_create` re-fetches the
+    session's candidates AFRESH for part 2 and #1 is now IN that list — part 2's own dedup check
+    would score #1 as a near/token duplicate of itself and fold "Fix Android login error" into a
+    COMMENT on #1 instead of creating a second ticket. That defeats the entire point of having
+    just split them: `detect_multi_ask` already decided these are separate asks, so dedup within
+    the SAME batch is never correct — only dedup against tickets that existed BEFORE this
+    `classify` call is meaningful. `_classify_create` excludes every id in this set from its
+    candidates and adds its OWN part's resolved id to it before returning — whether that id came
+    from a fresh CREATE or an EARLIER part's dedup-comment match (review finding, P1: a part
+    that matched a pre-existing ticket via dedup must ALSO be excluded from a later part's
+    candidates, not only a part that created a brand new one — the near-exact matcher's 0.7
+    ratio threshold is lenient enough on templated titles, e.g. "Fix iOS login authentication
+    error" vs "Fix Android login authentication error" at 0.889, that a later part can otherwise
+    collapse into whatever an earlier part already resolved to) — so ticket 2 never "sees"
+    ticket 1's resolution (or ticket 3 tickets 1 and 2's, etc.).
+
+    The banner/progress lines go to STDERR, not stdout: `_classify_create`'s own comment notes
+    "classify --create is the tg-cli inbound hook path... it must not append a session-attention
+    notice because the hook consumes stdout programmatically" — stdout here is machine-consumed
+    (one verdict/`created <id>` line per part), so a human-facing progress banner must not land
+    there either.
+
+    **KNOWN INTEGRATION RISK, not fixed here (review finding, "High"):** a multi-ask message
+    now emits N stdout units (one per part) instead of one — a caller that assumed exactly one
+    verdict/outcome per `classify` call (e.g. the `tg-cli` inbound hook — AGENTS.md's "Out of
+    scope" section explicitly says that hook is a separate repo, not built or testable here) may
+    only process the FIRST unit and silently drop the rest. Coordinate a hook-side update (or a
+    kill switch / opt-in on the hook side) BEFORE this reaches any environment using that hook;
+    do not treat this docstring note as the fix.
+
+    Two failure-isolation rules, both review findings ("High"), keep one bad part from silently
+    losing the others:
+      - A `_UserError` from one part (e.g. a non-skippable gate refusing that part's derived
+        title) is caught HERE, reported the same way `main()`'s top-level handler would
+        (`error: ...`, contributing exit 2), and the loop CONTINUES to the next part — an
+        earlier version let this exception unwind the whole loop, silently never classifying or
+        creating anything for the remaining parts.
+      - An AMBIGUOUS create (`_ClassifyBatchAmbiguous`, raised by `_classify_create` — see its
+        docstring) STOPS the batch entirely rather than continuing: with no confirmed id for the
+        possibly-created ticket, a later part's dedup check can't safely exclude it, so
+        continuing risks silently folding a genuinely distinct ask into a comment on a ticket
+        that may or may not actually exist.
+    """
+    import copy
+
+    print(
+        _warn(f"  {len(parts)} distinct asks detected in this message — classifying each separately"),
+        file=sys.stderr,
+    )
+    worst = 0
+    batch_resolved_ids: set[str] = set()
+    for i, part in enumerate(parts, 1):
+        # Deliberately no raw-text preview here: `part` is untrusted inbound content and could
+        # itself contain something that LOOKS like tool status (e.g. a crafted "VERDICT:
+        # actionable" — see test_classify_echoed_injected_verdict_does_not_bypass_ticket_creation,
+        # the same injection class `classify.parse_verdict` already guards against for the
+        # model's own echo). An index-only progress line can't be confused with a real verdict.
+        print(_dim(f"  [{i}/{len(parts)}] classifying..."), file=sys.stderr)
+        item_args = copy.copy(args)
+        item_args.text = part
+        try:
+            worst = max(worst, _classify_one(item_args, cfg, batch_resolved_ids=batch_resolved_ids))
+        except _ClassifyBatchAmbiguous as exc:
+            remaining = len(parts) - i
+            print(
+                _err(
+                    f"error: ambiguous create for ask {i}/{len(parts)} — stopping the batch; "
+                    f"{remaining} remaining ask(s) were not processed"
+                )
+            )
+            return max(worst, exc.exit_code)
+        except _UserError as exc:
+            print(_err(f"error: {exc}"))
+            worst = max(worst, 2)
+    return worst
+
+
+def _classify_one(
+    args: argparse.Namespace, cfg, batch_resolved_ids: set[str] | None = None
+) -> int:
+    """Classify ONE message (`args.text`) and act on the verdict — the pre-multi-ask body of
+    `cmd_classify`, extracted so `_classify_multi` can call it once per split part.
+
+    `batch_resolved_ids` (only ever non-`None` when called FROM `_classify_multi`) is forwarded
+    to `_classify_create`'s dedup check — see that function's docstring for why a multi-ask
+    batch must not dedup its own parts against each other."""
     from .classify import Verdict, build_prompt, parse_verdict, resolve_chain
 
     # `actionable` (task-cli#80) is deliberately EXCLUDED from the configurable-bias set (review
@@ -4681,24 +4912,114 @@ def cmd_classify(args: argparse.Namespace) -> int:
     if args.update:
         return _classify_append(args, cfg)
     if args.create:
-        return _classify_create(args, cfg)
+        return _classify_create(args, cfg, batch_resolved_ids=batch_resolved_ids)
     return 0
 
 
-def _classify_create(args: argparse.Namespace, cfg) -> int:
-    """`change` + --create: dedup against the session, else create from the message."""
+def _classify_create(
+    args: argparse.Namespace, cfg, batch_resolved_ids: set[str] | None = None
+) -> int:
+    """`change` + --create: dedup against the session, else create from the message.
+
+    `batch_resolved_ids` (see `_classify_multi`'s docstring for the full rationale): when this
+    call is one part of a multi-ask batch, every id already RESOLVED by an EARLIER part in the
+    SAME batch — whether created fresh or matched via dedup — is excluded from the dedup
+    candidate set. The splitter already decided these are distinct asks, so one part matching
+    another part's resolution is never a real duplicate, only same-batch noise. This function
+    adds its own part's resolved id to the set before returning (on EITHER the create path or
+    the dedup-comment path), so a LATER part in the batch also excludes it.
+    """
     backend = _backend(cfg)
     session = _detect_session(cfg)
     from .backends import BackendError
 
-    # dedup: same session + high title similarity
-    candidates = _session_dedup_candidates(backend, session)
-    match = _best_dedup_match(args.text, candidates)
+    match = None
+    advisory_match = None
+    candidates: list[Ticket] = []
+    if _enforce_config(cfg).duplicate:
+        # dedup: same session + high title similarity (near-exact wording) AUTO-FOLDS into a
+        # comment, exactly as before this ticket's changes — that matcher is the original,
+        # already-tested, high-confidence check. The broader token/Jaccard net
+        # (policy.best_duplicate_match) is ADVISORY ONLY here (review finding, P1 — "High"): it
+        # catches a REWORDED duplicate the near-exact check misses (the shape the ecosystem
+        # audit found `_best_dedup_match` alone was missing, 13 confirmed duplicates from this
+        # exact auto-create path; task-cli intake gates, 2026-09), but it is also lower-
+        # confidence and has a CONFIRMED false-positive class (two DIFFERENT tickets sharing
+        # dense domain vocabulary — see policy.py's "Encrypt API token storage" vs "API token
+        # storage rotation" pinned example). On `task new`, that false positive is a soft,
+        # SKIPPABLE gate (`--skip-duplicate`/`--force`). `classify` has no such escape — its
+        # parser exposes only `--create`/`--update`, and it is typically driven autonomously by
+        # the tg-cli hook with no human in the loop to add a flag — so silently auto-folding a
+        # genuinely NEW request into an unrelated ticket's comment thread would be an
+        # unrecoverable, invisible action with zero override. Print a warning naming the
+        # candidate instead and CREATE the ticket normally; both mechanisms are still gated
+        # together behind `enforce.duplicate` — an earlier version left `_best_dedup_match`
+        # unconditional, so `enforce.duplicate: false` silently failed to disable the near-exact
+        # half of dedup on this path.
+        candidates = _session_dedup_candidates(backend, session)
+        if batch_resolved_ids:
+            candidates = [c for c in candidates if c.id not in batch_resolved_ids]
+        match = _best_dedup_match(args.text, candidates)
+        if match is None:
+            from datetime import datetime, timezone
+
+            from .policy import best_duplicate_match
+
+            advisory_match = best_duplicate_match(
+                _derive_title_from_message(args.text),
+                args.text,
+                candidates,
+                new_session=session.label,
+                now=datetime.now(timezone.utc),
+            )
+    if advisory_match is not None:
+        # `.title` is UNTRUSTED (a candidate ticket read back from the backend) — sanitized with
+        # the SAME `policy.safe_display` the duplicate-detection Violation message already uses,
+        # for the same reason (review finding, P2: a crafted title containing a terminal escape
+        # sequence, printed verbatim, could clear/spoof the console).
+        from .policy import safe_display
+
+        print(
+            _warn(
+                f"  possible duplicate of {advisory_match.id}  {safe_display(advisory_match.title)} "
+                "(token-similarity match, not exact — creating a new ticket anyway; "
+                f"task read '{advisory_match.id}' to check)"
+            ),
+            file=sys.stderr,
+        )
     if match is not None:
+        from .backends import AmbiguousBackendError
+
         try:
             backend.comment(match.id, f"(restated) {args.text.strip()}")
+        except AmbiguousBackendError as exc:
+            # review finding: the comment call may have already landed server-side before the
+            # connection dropped — same ambiguity `_create_ticket_or_ambiguous` handles for a
+            # fresh create, but this is the DEDUP-FOLD-IN path, which previously let this
+            # exception propagate uncaught (a raw traceback). That was tolerable as an isolated
+            # single-command crash; inside a multi-ask BATCH it would also silently abandon
+            # every remaining part with no controlled exit code — so this path now needs the
+            # same explicit handling `cmd_create`'s create path already has.
+            print(_err(f"ambiguous: {exc}"))
+            print(
+                _warn(
+                    f"  the comment on {match.id} may have already been posted — check the "
+                    "backend before retrying, to avoid a duplicate comment."
+                )
+            )
+            if batch_resolved_ids is not None:
+                raise _ClassifyBatchAmbiguous(exc.exit_code) from exc
+            return exc.exit_code
         except BackendError as exc:
             raise _UserError(str(exc)) from exc
+        if batch_resolved_ids is not None:
+            # review finding (P1): a LATER batch part must exclude a ticket an EARLIER part
+            # matched via dedup, not only a ticket an earlier part CREATED — otherwise the
+            # near-exact matcher (0.7 ratio) can fold a genuinely distinct part into the SAME
+            # pre-existing ticket a sibling part just matched, exactly the same "detect_multi_ask
+            # already decided these are separate" violation `batch_resolved_ids` exists to
+            # prevent for freshly-created tickets. Symmetric with the `.add(created.id)` below.
+            batch_resolved_ids.add(match.id)
         _record_session_touch(cfg, backend, match)
         print(_ok(f"appended to {match.id} (dedup)"))
         return 0
@@ -4765,7 +5086,14 @@ def _classify_create(args: argparse.Namespace, cfg) -> int:
 
     created, ambiguous_exit = _create_ticket_or_ambiguous(backend, ticket)
     if ambiguous_exit is not None:
+        if batch_resolved_ids is not None:
+            # We're inside a multi-ask batch and have no confirmed id for this possibly-created
+            # ticket to exclude from a LATER part's dedup candidates — see
+            # `_ClassifyBatchAmbiguous`'s docstring for why the only safe response is to stop.
+            raise _ClassifyBatchAmbiguous(ambiguous_exit)
         return ambiguous_exit
+    if batch_resolved_ids is not None:
+        batch_resolved_ids.add(created.id)  # a LATER batch part must not dedup against this one
     from .session import record
 
     record(
@@ -4791,11 +5119,21 @@ def _auto_skip_failing_gates(ticket: Ticket, cfg) -> list:
     legitimate exception (e.g. ``msgref-title``) must not be silently waived just because this
     path can't fill in every field up front (task-cli#45 review finding). The caller must refuse
     the create when this returns anything.
+
+    Also prints any advisory ``result.warnings`` to stderr (review finding): this is the ONLY
+    call site on the classify auto-create path that ever runs ``check()``, so it is also the
+    only place the todo-shaped hint (``PolicyResult.warnings``, never ``.violations`` — it must
+    never block) can surface. Without this, `task classify "Adversarial review of uncommitted
+    safe-cleanup diff" --create` created a ticket with NO hint ever printed — the exact
+    inbound-hook path the audit that motivated this hint was itself about.
     """
     from .policy import NON_SKIPPABLE_GATES, Phase, check
 
+    result = check(ticket, _enforce_config(cfg), Phase.CREATE)
+    for w in result.warnings:
+        print(_warn(f"  ⚠ {w.gate}: {w.message}"), file=sys.stderr)
     blocking = []
-    for v in check(ticket, _enforce_config(cfg), Phase.CREATE).violations:
+    for v in result.violations:
         if v.gate in NON_SKIPPABLE_GATES:
             blocking.append(v)
         else:

@@ -46,7 +46,16 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   --proof <path>`, which requires a **visual proof** (or `--force "<reason>"` when a proof is
   genuinely impossible, recorded on the `Criterion`). Acceptance criteria are `Criterion`
   objects (text + `checked` + `proof`/`force_reason`), round-tripped by `render.py`. Never
-  weaken a gate silently; if a gate is wrong, change `policy.py` + add a test.
+  weaken a gate silently; if a gate is wrong, change `policy.py` + add a test. **Two more
+  create-only gates** (task-cli intake hardening, 2026-09): **duplicate**
+  (`duplicate_violation`/`best_duplicate_match`) is a token/Jaccard-similarity net catching a
+  REWORDED duplicate of an already-open session ticket — broader than the pre-existing
+  near-exact-title hard block (`cli._refuse_if_duplicate`), which it does NOT replace; both
+  share `GATE_DUPLICATE` and `--skip-duplicate "<reason>"`. **todo-shaped**
+  (`tasklib/todo_hint.py`) is deliberately NON-BLOCKING: it never refuses a create, only prints
+  a hint (via `PolicyResult.warnings`, never `.violations`) when the title/what reads as a
+  session-local process step ("review my uncommitted diff before I commit it") rather than
+  durable product work — pointing at the harness's own TodoList tool instead.
 - **`read-before-edit` gates `change --what` on a recent `task read` (task-cli#119).** It refuses
   to overwrite a ticket's `what` (its core description) unless THIS session ran `task read`/
   `view` on it (or just created it, or itself just wrote `--what` on a prior edit) within a
