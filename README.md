@@ -218,20 +218,21 @@ Empty input prints a "no tickets" message and exits 0. Nothing is mutated.
 
 ### Web (`task web start|stop|status|run`)
 
-`task web` serves the same burn chart as a local page (stdlib `http.server`,
+`task web` serves the burn and gantt charts as local pages (stdlib `http.server`,
 127.0.0.1 only). Lifecycle matches the reminder daemon, but the pid-file identity
 includes `web` so the two cannot be confused.
 
 ```
-task web run                   # foreground server on http://127.0.0.1:8765/burn
+task web run                   # foreground server on http://127.0.0.1:8765/
 task web start                 # detach (idempotent — already-running is a no-op)
 task web status                # running/stopped + pid + url
 task web stop                  # SIGTERM, then clear the pid-file
 task web run --port 9000       # override the listen port
 ```
 
-Pages: `/` and `/burn` (HTML), `/burn.json` (JSON), `/gantt` (existing gantt render
-in `<pre>`). Append `?all=1` to chart every ticket, not just this session.
+Pages: `/` (both SVG charts), `/burn` and `/gantt` (HTML+SVG), `/burn.json` and
+`/gantt.json`. Append `?all=1` to chart every ticket, not just this session.
+Each HTML page has a nav between Both / Burn / Gantt. No CDN, no JavaScript.
 
 ### Example
 
