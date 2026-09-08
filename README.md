@@ -44,6 +44,8 @@ task create                        # alias of `new` (same arguments, same gates)
 task list                          # THIS session's tickets (falls back to all when empty)
 task list --all                    # every known project's tickets, grouped by project
 task gantt        [--all] [--json] # read-only due-date timeline (Gantt) — see below
+task burn         [--all] [--json] [--since YYYY-MM-DD] [--until YYYY-MM-DD]  # remaining-over-time burn chart — see below
+task web start|stop|status|run [--port N]  # local HTML burn chart (default http://127.0.0.1:8765/burn)
 task read <id>     (alias: view)   # the full ticket — every section (works outside a repo)
 task find "<query>"                # search title+body (cross-project when outside a repo)
 task check <id> <n|text> --proof p # tick an acceptance criterion (needs a visual proof)
@@ -191,6 +193,42 @@ always includes today; a degenerate (single-date) range still renders. Tickets w
 date** are listed in a clearly-marked `undated` section — never hidden. It is purely a view:
 no ticket is mutated. Output is paged like `list` in an interactive terminal (`--no-pager` /
 `NO_PAGER` opt out); `--json` is never paged.
+
+### Burn chart (`task burn`)
+
+`task burn` is a **read-only** remaining-over-time chart: it plots how many tickets are
+still open on each calendar day, using each ticket's created/closed timestamps from
+GitHub (`created_at` / `closed_at`) or Linear (`createdAt` / `completedAt` or
+`canceledAt`). A ticket closed on day D is gone on D. The ideal line is a straight
+drop from the first day's remaining count to zero on the last day.
+
+```
+task burn                      # this session's tickets (OPEN+CLOSED) as a burn chart
+task burn --all                # every known project's tickets
+task burn --json               # remaining / ideal series (window + per-day counts)
+task burn --html               # self-contained HTML+SVG on stdout (not paged)
+task burn --since 2026-06-01 --until 2026-06-30
+task burn --width 60           # override chart width (default: auto-fit the terminal)
+```
+
+Empty input prints a "no tickets" message and exits 0. Nothing is mutated.
+
+### Web (`task web start|stop|status|run`)
+
+`task web` serves the same burn chart as a local page (stdlib `http.server`,
+127.0.0.1 only). Lifecycle matches the reminder daemon, but the pid-file identity
+includes `web` so the two cannot be confused.
+
+```
+task web run                   # foreground server on http://127.0.0.1:8765/burn
+task web start                 # detach (idempotent — already-running is a no-op)
+task web status                # running/stopped + pid + url
+task web stop                  # SIGTERM, then clear the pid-file
+task web run --port 9000       # override the listen port
+```
+
+Pages: `/` and `/burn` (HTML), `/burn.json` (JSON), `/gantt` (existing gantt render
+in `<pre>`). Append `?all=1` to chart every ticket, not just this session.
 
 ### Example
 

@@ -128,6 +128,8 @@ class GitHubIssuesBackend:
             id=f"#{row.get('number')}",
             url=row.get("html_url", ""),
             updated_at=row.get("updated_at", "") or "",
+            created_at=row.get("created_at", "") or "",
+            closed_at=row.get("closed_at", "") or "",
             reporter=reporter,
             # the issue's own open/closed truth, independent of the (possibly stale)
             # status:<state> label `_derive_state` prioritizes — see Ticket.provider_closed.
