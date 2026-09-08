@@ -623,9 +623,17 @@ def links_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
     """
     if not cfg.links:
         return None
+    from .links import linked_other_ids
     from .references import find_unlinked_references
 
-    refs = find_unlinked_references(_scanned_text(ticket))
+    # A bare reference that already has a structured `task link` entry pointing at it (its id
+    # sits in `ticket.links`, see `links.linked_other_ids`) is not a violation — the relation is
+    # already recorded in the `## Links` section, prose mentioning it again is not the "un-linked
+    # reference" this gate exists to catch (task-cli#154).
+    already_linked = linked_other_ids(ticket.links)
+    refs = [
+        r for r in find_unlinked_references(_scanned_text(ticket)) if r.text not in already_linked
+    ]
     if not refs:
         return None
     listed = "; ".join(f"{r.text} [{r.kind}]" for r in refs)
@@ -771,7 +779,8 @@ def safe_display(s: str) -> str:
     diagnostic printed to the console or forwarded to a Telegram notification.
     ``str.isprintable()`` is False for exactly those (Cc/Cf/Zl/Zp). Public (no leading
     underscore) because `cli.py` also sanitizes an untrusted candidate title with it — see
-    `duplicate_violation`'s and `cli._classify_create`'s call sites."""
+    `duplicate_violation`'s, `cli._classify_create`'s, and the post-`task new` relatedness
+    nudge's call sites."""
     return "".join(ch for ch in s if ch.isprintable())
 
 

@@ -221,6 +221,28 @@ def test_linked_reference_passes():
     assert check_create(_good_ticket(what="blocked by [HYP-789](https://linear/HYP-789)"), EnforceConfig()).ok
 
 
+def test_structurally_linked_reference_is_not_double_flagged():
+    # task-cli#154: a bare reference whose id already has a `task link`-written structured entry
+    # in ticket.links must not ALSO trip the bare-reference gate when it's mentioned in prose.
+    t = _good_ticket(
+        what="blocked by #2 until it lands",
+        links={"Blocked by #2": "https://fake/2"},
+    )
+    assert check_create(t, EnforceConfig()).ok
+
+
+def test_a_different_bare_reference_is_still_flagged_alongside_a_linked_one():
+    # the exemption is per-id, not a blanket "any Links entry silences the gate" pass
+    t = _good_ticket(
+        what="blocked by #2 until it lands, also see HYP-789",
+        links={"Blocked by #2": "https://fake/2"},
+    )
+    res = check_create(t, EnforceConfig())
+    assert not res.ok
+    v = next(v for v in res.violations if v.gate == "links")
+    assert "HYP-789" in v.message and "#2" not in v.message
+
+
 def test_clean_linked_ticket_closes_after_gate_expansion():
     # the close gates now include links + impact-quality; a close-ready ticket with a PROPERLY
     # linked reference and a good impact must still close cleanly (no over-blocking of valid closes).

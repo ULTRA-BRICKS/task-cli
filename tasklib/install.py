@@ -48,8 +48,11 @@ description: >-
   PR speak one shape. Use INSTEAD of raw `gh issue` / `linear` by hand. Backends: GitHub
   Issues (default) and Linear (per-repo). Commands: `task new`/`task create`, `task list`
   (this session's tickets), `task read <id>`, `task find <q>`, `task change <id>`,
-  `task check <id> ... --proof`, `task accept <id>`, `task gate <id>` (the pre-merge verdict),
-  `task done <id>`, `task status <id> [<state>]`, `task classify "<text>"`, `task session`.
+  `task link <id> <relation> <other-id>` (blocks/blocked-by/relates-to/duplicate-of — record a
+  relationship between two tickets; `task new` nudges you toward this when it spots a
+  plausibly related open ticket), `task check <id> ... --proof`, `task accept <id>`,
+  `task gate <id>` (the pre-merge verdict), `task done <id>`, `task status <id> [<state>]`,
+  `task classify "<text>"`, `task session`.
 metadata:
   author: alex-mextner
   repo: https://github.com/alex-mextner/task-cli
@@ -67,6 +70,8 @@ task list                        # THIS session's tickets (falls back to all whe
 task list --all                  # every known project's tickets, grouped by project
 task read <id>                   # full ticket (every section) — works outside a repo
 task find "<query>"              # search title+body (cross-project when outside a repo)
+task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of — records a
+#   relationship in ## Links, mirrored on the other ticket (except duplicate-of, one-sided)
 task change <id> --acceptance "..." --screenshot proof.png
 task check <id> 1 2 --proof a.png --proof b.png   # tick criteria WITH a proof each (in order)
 task check <id> --all --proof shot.png            # every criterion, one shared proof
@@ -95,6 +100,10 @@ task session                     # show current session + its tickets
   with-proof on close (`enforce.acceptance_checked: false`), the title's `tg#<id>` ban
   (`enforce.msgref_title: false`), and a title shaped like the auto-generated "review this
   diff" pattern, checked on create and on any `--title` edit (`enforce.junk_title: false`).
+- **Post-`task new` relatedness nudge**: after creating a ticket, a cheap title/label keyword
+  scan over open tickets suggests plausibly related ones and prints the exact `task link`
+  command for each — it never auto-links, only suggests; run the printed command if the
+  suggestion is real.
 - **Backends call the API directly** and harvest credentials from `gh auth token` /
   `~/.config/linear/credentials.toml` — no extra setup if you've already authed those CLIs.
 - **Session-scoped**: `task list` defaults to the current session (env:TASK_SESSION →
