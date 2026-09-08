@@ -738,7 +738,14 @@ def test_create_nudges_a_related_open_ticket(capsys, _inject_fake):
     main(_create_argv(**{"--title": "daemon activity not tracked in rig stats reporting"}))
     capsys.readouterr()
 
-    rc = main(_create_argv(**{"--title": "rig stats reporting misses daemon activity"}))
+    rc = main(
+        _create_argv(
+            **{
+                "--title": "rig stats reporting misses daemon activity",
+                "--skip-duplicate": "relatedness-nudge fixture, not a reworded duplicate",
+            }
+        )
+    )
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -788,7 +795,15 @@ def test_create_json_omits_the_nudge(capsys, _inject_fake):
     main(_create_argv(**{"--title": "daemon activity not tracked in rig stats reporting"}))
     capsys.readouterr()
 
-    rc = main(_create_argv(**{"--title": "rig stats reporting misses daemon activity"}) + ["--json"])
+    rc = main(
+        _create_argv(
+            **{
+                "--title": "rig stats reporting misses daemon activity",
+                "--skip-duplicate": "relatedness-nudge fixture, not a reworded duplicate",
+            }
+        )
+        + ["--json"]
+    )
     out = capsys.readouterr().out
 
     assert rc == 0
