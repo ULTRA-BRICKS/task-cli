@@ -583,7 +583,9 @@ def links_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
     return Violation(
         GATE_LINKS,
         f"related entities must be links, not bare references: {listed}",
-        hint="make each a markdown link [text](url) or paste a full URL; waive a false positive "
+        hint="write the link INSIDE the text field that names it (--what/--why/--impact/"
+        "--if-not-done/--acceptance): either a markdown link [text](https://…) or the bare "
+        "https://… URL — there is no --links flag; waive a false positive "
         'with --skip-links "<reason>" (works on new and on close; --force "<reason>" is a '
         "create/new-only shorthand)",
     )

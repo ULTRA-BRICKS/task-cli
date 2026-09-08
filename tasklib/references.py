@@ -49,6 +49,30 @@ _SHA_RE = re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b")
 _SLUG_RE = re.compile(r"(?<![\w./@-])([A-Za-z0-9][\w.-]*(?:/[A-Za-z0-9][\w.-]*)+)")
 _SLUG_SIGNAL_RE = re.compile(r"[.\-_0-9]")
 _HAS_ALPHA_RE = re.compile(r"[A-Za-z]")
+# Sentence punctuation the slug regex swallows at the end of a phrase (`reads/writes.`): stripped
+# before a segment is judged, so a trailing full stop is never the "signal" that flags an
+# ordinary English pair (task-cli#126).
+_SLUG_TRAILING_PUNCT = ".,;:!?"
+# A segment that is a CSS length / plain measurement (`48px`, `1.5em`, `100%`): a pair of those
+# (`48px/48px`) is a size ratio in prose, not a repo/path (task-cli#125).
+_MEASUREMENT_RE = re.compile(r"^\d+(?:\.\d+)?(?:px|em|rem|pt|vh|vw|%|ms|s|x)?$", re.IGNORECASE)
+# A last segment carrying a file extension (`docs/index.mdx`, `src/app.ts`): a FILENAME named in
+# prose, which has no link target of its own (it needs a repo + ref to become one). Treated as
+# prose, not a reference (task-cli#126) — a canonical file link carries a host and is a URL.
+_FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+# Context that marks an all-decimal `#RRGGBB` as a CSS colour rather than an issue number: a
+# colour word within the surrounding window. `#767676` and `#292929` are structurally identical
+# to six-digit issue refs; only the sentence around them tells (task-cli#126).
+_COLOUR_CONTEXT_RE = re.compile(
+    r"\b(?:colou?rs?|contrast|background|foreground|hex|rgba?|palette|swatch|theme|shade|tint)\b",
+    re.IGNORECASE,
+)
+_COLOUR_WINDOW = 80
+# A sha "standing alone as a reference" (`regressed in 6103ec8`, `see 6103ec8`, a bare sha on its
+# own line) is flagged; a sha QUOTED inside a prose sentence — surrounded by more than this many
+# other words on its line, or set in backticks — is evidence, not a reference (task-cli#126).
+_SHA_STANDALONE_MAX_OTHER_WORDS = 3
+_WORD_RE = re.compile(r"[A-Za-z0-9_'-]+")
 
 
 def find_unlinked_references(text: str) -> list[UnlinkedRef]:
@@ -69,9 +93,13 @@ def find_unlinked_references(text: str) -> list[UnlinkedRef]:
             continue  # an encoding/hash/standard token, not a tracker id
         add(tok, "tracker id", f"link it: [{tok}](<tracker-url>)")
     for m in _HASH_REF_RE.finditer(masked):
+        if _is_css_colour(masked, m):
+            continue
         tok = "#" + m.group(1)
         add(tok, "issue/PR ref", f"link it: [{tok}](<issue-or-pr-url>)")
     for m in _SHA_RE.finditer(masked):
+        if not _sha_stands_alone(masked, m):
+            continue
         tok = m.group(0)
         add(tok, "commit sha", f"link it: [{tok}](<commit-url>)")
     for tok in _find_repo_slugs(masked):
@@ -103,6 +131,10 @@ def _find_repo_slugs(text: str) -> list[str]:
     dates/ratios (``06/28``, ``24/7``, ``9/11``) are not mistaken for a repo/path, while
     ``owner/task-cli`` and ``tasklib/cli.py`` are flagged.
 
+    A trailing sentence stop is stripped first (``reads/writes.`` is the English pair), a last
+    segment with a file extension is a FILENAME named in prose (``docs/index.mdx``), and a pair
+    of measurements (``48px/48px``) is a ratio — none of those is flagged (task-cli#126/#125).
+
     DELIBERATE false-negative: a two-segment, all-LETTER single-slash slug (``facebook/react``,
     ``django/django``) is NOT flagged — it is indistinguishable in prose from an ordinary
     English/jargon pair (``read/write``, ``input/output``, ``client/server``) without a
@@ -113,9 +145,33 @@ def _find_repo_slugs(text: str) -> list[str]:
     """
     out: list[str] = []
     for m in _SLUG_RE.finditer(text):
-        slug = m.group(1)
+        slug = m.group(1).rstrip(_SLUG_TRAILING_PUNCT)
         segs = slug.split("/")
-        candidate = len(segs) >= 3 or any(_SLUG_SIGNAL_RE.search(s) for s in segs)
-        if candidate and any(_HAS_ALPHA_RE.search(s) for s in segs):
+        if len(segs) < 2 or _FILE_EXT_RE.search(segs[-1]):
+            continue  # a bare word once the sentence stop is gone, or a filename named in prose
+        if all(_MEASUREMENT_RE.match(seg) for seg in segs):
+            continue  # `48px/48px`, `24/7`: a ratio or size pair
+        candidate = len(segs) >= 3 or any(_SLUG_SIGNAL_RE.search(seg) for seg in segs)
+        if candidate and any(_HAS_ALPHA_RE.search(seg) for seg in segs):
             out.append(slug)
     return out
+
+
+def _is_css_colour(text: str, m: re.Match[str]) -> bool:
+    """An all-decimal `#NNNNNN` is a CSS colour when a colour word sits in the window around it."""
+    if len(m.group(1)) != 6:
+        return False
+    window = text[max(0, m.start() - _COLOUR_WINDOW): m.end() + _COLOUR_WINDOW]
+    return bool(_COLOUR_CONTEXT_RE.search(window))
+
+
+def _sha_stands_alone(text: str, m: re.Match[str]) -> bool:
+    """True when the sha is a REFERENCE (few other words on its line, not in backticks) rather
+    than a value quoted inside a prose sentence."""
+    if m.start() > 0 and text[m.start() - 1] == "`" and text[m.end(): m.end() + 1] == "`":
+        return False
+    line_start = text.rfind("\n", 0, m.start()) + 1
+    line_end = text.find("\n", m.end())
+    line = text[line_start: len(text) if line_end < 0 else line_end]
+    others = [w for w in _WORD_RE.findall(line) if w != m.group(0)]
+    return len(others) <= _SHA_STANDALONE_MAX_OTHER_WORDS
