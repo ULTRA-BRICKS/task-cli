@@ -6,7 +6,7 @@ filesystem (sidecar). All pure logic lives in the sibling modules (``model``/``r
 ``policy``/``classify``/``session``/``config``). Heavy/optional imports (yaml via config,
 the backends) are lazy so ``task --help`` stays fast and dependency-light.
 
-Subcommands: create/new · list · gantt (read-only due-date timeline) · read/view · find · change
+Subcommands: create/new · list · gantt (read-only due-date timeline) · burn (read-only remaining-over-time chart) · web (local HTML burn chart: start/stop/status/run) · read/view · find · change
 · status · done · check · audit (reconciliation backstop — flags/reverts a Done ticket that
 never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close) ·
 mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
@@ -224,6 +224,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="bar-area width in columns (default: auto from terminal)",
     )
     gp.add_argument(
+        "--no-pager",
+        action="store_true",
+        dest="no_pager",
+        help="never page output (also honors NO_PAGER, $PAGER='')",
+    )
+
+    # burn — read-only remaining-open-over-time chart (same scoping as gantt/list)
+    bp = sub.add_parser(
+        "burn",
+        parents=[common],
+        help="render remaining tickets over time (read-only burn chart)",
+    )
+    bp.add_argument(
+        "--all", action="store_true", help="all tickets, not just this session"
+    )
+    bp.add_argument(
+        "--state", help="filter by state (todo|in-progress|in-review|done|cancelled)"
+    )
+    bp.add_argument(
+        "--label", action="append", default=[], help="filter by label (repeatable)"
+    )
+    bp.add_argument(
+        "-n",
+        type=int,
+        default=None,
+        dest="limit",
+        help="max tickets (default 100 interactive, 30 piped)",
+    )
+    bp.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="chart width in columns (default: auto from terminal)",
+    )
+    bp.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        help="window start date (default: earliest created date or today)",
+    )
+    bp.add_argument(
+        "--until",
+        metavar="YYYY-MM-DD",
+        help="window end date (default: today or last closed date)",
+    )
+    bp.add_argument(
+        "--html",
+        action="store_true",
+        help="print a self-contained HTML burn chart to stdout (not paged)",
+    )
+    bp.add_argument(
         "--no-pager",
         action="store_true",
         dest="no_pager",
@@ -492,6 +542,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="start (spawn detached) | stop | status | run (foreground loop)",
     )
 
+    # web — local HTML burn chart (start/stop/status/run lifecycle)
+    wp = sub.add_parser(
+        "web",
+        parents=[common],
+        help="local HTML burn chart (start|stop|status|run)",
+    )
+    wp.add_argument(
+        "action",
+        choices=["start", "stop", "status", "run"],
+        help="start (spawn detached) | stop | status | run (foreground HTTP server)",
+    )
+    wp.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="listen port (default 8765)",
+    )
+
     return p
 
 
@@ -507,6 +575,8 @@ def main(argv: list[str] | None = None) -> int:
         "new": cmd_create,  # `new` is an alias of `create` (CTO-requested verb)
         "list": cmd_list,
         "gantt": cmd_gantt,
+        "burn": cmd_burn,
+        "web": cmd_web,
         "read": cmd_read,
         "view": cmd_read,
         "find": cmd_find,
@@ -2440,6 +2510,142 @@ def cmd_gantt(args: argparse.Namespace) -> int:
 
     text = _g.render(chart, color=_c, today=today)
     _emit_list(args, [text])
+    return 0
+
+
+# ── burn (read-only remaining-over-time chart) ──────────────────────────────────
+
+
+def _parse_iso_day(value: str | None, flag: str):
+    """Parse ``YYYY-MM-DD`` or raise ``_UserError``. ``None``/empty stays ``None``."""
+    from datetime import date as _date
+
+    if not value:
+        return None
+    try:
+        return _date.fromisoformat(value)
+    except ValueError as exc:
+        raise _UserError(
+            f"invalid {flag} {value!r} (want YYYY-MM-DD).\n"
+            f"  why: the burn window is a calendar date range.\n"
+            f"  fix: pass {flag} 2026-06-01"
+        ) from exc
+
+
+def cmd_burn(args: argparse.Namespace) -> int:
+    """Render remaining-open tickets over calendar days (read-only). Scoping mirrors gantt/list.
+
+    Default state is None so OPEN+CLOSED both come back (burn needs closures). ``--json``
+    emits the remaining/ideal series; ``--html`` prints a self-contained page (not paged).
+    Empty charts exit 0.
+    """
+    from datetime import date
+
+    from . import burn as _b
+
+    cfg = _load(args)
+    state = _parse_state(args.state) if args.state else None
+    tickets = _gantt_tickets(args, cfg, state)
+    today = date.today()
+    since = _parse_iso_day(getattr(args, "since", None), "--since")
+    until = _parse_iso_day(getattr(args, "until", None), "--until")
+    if getattr(args, "width", None) is not None:
+        width = max(1, args.width)
+    else:
+        import shutil
+
+        width = _b.fit_width(shutil.get_terminal_size(fallback=(80, 24)).columns)
+    chart = _b.layout(tickets, today, since=since, until=until, width=width)
+
+    if args.json:
+        import json
+
+        print(json.dumps(_b.to_json(chart), ensure_ascii=False, indent=2))
+        return 0
+    if getattr(args, "html", False):
+        print(_b.to_html(chart), end="")
+        return 0
+
+    text = _b.render(chart, color=_c)
+    _emit_list(args, [text])
+    return 0
+
+
+# ── web (local HTML burn chart) ─────────────────────────────────────────────────
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    """Dispatch the local web-server lifecycle (start | stop | status | run)."""
+    from . import web as _web
+
+    cfg = _load(args)
+    coordinate = _daemon_coordinate(cfg)
+    port = getattr(args, "port", None) or _web.DEFAULT_PORT
+
+    def load_tickets(*, include_all: bool = False):
+        prev = bool(getattr(args, "all", False))
+        args.all = prev or include_all
+        try:
+            return _gantt_tickets(args, cfg, None)
+        finally:
+            args.all = prev
+
+    if args.action == "run":
+        print(f"task web: serving {_web.url_for(port)}  (Ctrl-C to stop)")
+        return _web.run(port, load_tickets, coordinate=coordinate)
+    if args.action == "start":
+        outcome, pid = _web.start(
+            coordinate,
+            port=port,
+            cwd=str(cfg.repo_root),
+            child_flags=_daemon_child_flags(args),
+        )
+        if outcome == "already-running":
+            print(_dim(f"web already running (pid {pid}) for {coordinate}  {_web.url_for(port)}"))
+        else:
+            print(_ok(f"web started (pid {pid}) for {coordinate}  {_web.url_for(port)}"))
+        return 0
+    if args.action == "stop":
+        outcome, pid = _web.stop(coordinate)
+        if outcome == "stopped":
+            print(_ok(f"web stopped (was pid {pid})"))
+        elif outcome == "timeout":
+            print(_warn(f"web (pid {pid}) did not exit in time; pid-file cleared"))
+        elif outcome == "not-ours":
+            print(_warn(f"pid {pid} is alive but is not task web; not signalled, pid-file cleared"))
+        else:
+            print(_dim("no running web server"))
+        return 0
+
+    # status
+    pid_path = _web.paths_for(coordinate)
+    status, pid = _web.pid_status_for(coordinate)
+    url = _web.url_for(port)
+    if getattr(args, "json", False):
+        import json
+
+        print(
+            json.dumps(
+                {
+                    "status": status,
+                    "pid": pid,
+                    "coordinate": coordinate,
+                    "url": url,
+                    "pidfile": str(pid_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    line = {
+        "running": _ok(f"running (pid {pid})  {url}"),
+        "not-ours": _warn(f"recycled pid-file (pid {pid} is alive but is a foreign process)"),
+        "stale": _warn(f"stale pid-file (pid {pid} is gone)"),
+        "stopped": _dim("stopped"),
+    }.get(status, _warn(f"{status} (pid {pid})"))
+    print(f"web: {line}  for {coordinate}")
+    print(_dim(f"  pidfile={pid_path}"))
     return 0
 
 

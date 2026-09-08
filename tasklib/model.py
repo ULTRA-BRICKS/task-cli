@@ -206,6 +206,17 @@ class Ticket:
     # config, which task-cli#83's session-sidecar attribution needs to be honest.
     backend_project_id: str = ""
 
+    # Also appended last (same reasoning as ``due`` above). GitHub ``created_at`` / Linear
+    # ``createdAt``, as a UTC ISO8601 string; "" means the backend didn't supply one.
+    # Operational metadata for the burn chart — never part of the rendered body.
+    created_at: str = ""
+
+    # Also appended last (same reasoning as ``due`` above). GitHub ``closed_at`` / Linear
+    # ``completedAt`` or ``canceledAt`` (whichever is set), as a UTC ISO8601 string; "" means
+    # still open or the backend didn't supply one. Operational metadata for the burn chart —
+    # never part of the rendered body.
+    closed_at: str = ""
+
     def __post_init__(self) -> None:
         # Coerce plain-string criteria to unchecked Criterion objects. This keeps construction
         # ergonomic (`Ticket(acceptance=["a", "b"])`) while the rest of the code — render, parse,

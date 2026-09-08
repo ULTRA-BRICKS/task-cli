@@ -233,6 +233,8 @@ class LinearBackend:
             # section) still carries its due date; parse() lets the body's Due section override.
             due=str(node.get("dueDate") or "").strip(),
             updated_at=str(node.get("updatedAt") or ""),
+            created_at=str(node.get("createdAt") or ""),
+            closed_at=str(node.get("completedAt") or node.get("canceledAt") or ""),
             reporter=str((node.get("creator") or {}).get("id") or ""),
             # Unlike GitHub, Linear's normalized state IS derived straight from its native
             # workflow state (no separate managed label to lag behind it), so there is no
@@ -257,7 +259,7 @@ class LinearBackend:
         )
         return parse(node.get("description") or "", base)
 
-    _ISSUE_FIELDS_BASE = "id identifier url title description dueDate updatedAt state{type name} labels{nodes{name}} creator{id}"
+    _ISSUE_FIELDS_BASE = "id identifier url title description dueDate updatedAt createdAt completedAt canceledAt state{type name} labels{nodes{name}} creator{id}"
     # review finding: Linear's `attachments` connection defaults to a 50-item page — an issue
     # with 51+ attachments would silently lose everything past the first page. `first: 250` is
     # not exhaustive cursor-based pagination (a genuinely unbounded connection would still need

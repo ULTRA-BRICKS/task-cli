@@ -223,6 +223,37 @@ def test_github_row_to_ticket_defaults_updated_at_to_empty():
     assert be._row_to_ticket(row).updated_at == ""
 
 
+
+
+def test_github_row_to_ticket_maps_created_and_closed_at():
+    # burn chart reads Ticket.created_at / closed_at; GitHub REST rows carry these natively.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    row = {
+        "number": 1,
+        "title": "a",
+        "state": "closed",
+        "labels": [],
+        "body": "",
+        "html_url": "https://github.com/o/r/issues/1",
+        "created_at": "2026-06-01T12:00:00Z",
+        "closed_at": "2026-06-05T12:00:00Z",
+    }
+    ticket = be._row_to_ticket(row)
+    assert ticket.created_at == "2026-06-01T12:00:00Z"
+    assert ticket.closed_at == "2026-06-05T12:00:00Z"
+
+
+def test_github_row_to_ticket_defaults_created_and_closed_at_to_empty():
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    row = {"number": 1, "title": "a", "state": "open", "labels": [], "body": ""}
+    ticket = be._row_to_ticket(row)
+    assert ticket.created_at == ""
+    assert ticket.closed_at == ""
+
 def test_github_row_to_ticket_maps_reporter_from_issue_author():
     # issue #59 stale-nudge, review P2: the scan must scope to the current user's OWN tickets.
     # GitHub's row carries the issue author as `user.login` — task-cli's own `create()` never
@@ -626,6 +657,56 @@ def test_linear_node_to_ticket_maps_updated_at():
     }
     assert be._node_to_ticket(node).updated_at == "2026-07-01T12:00:00.000Z"
 
+
+
+
+def test_linear_node_to_ticket_maps_created_and_closed_at():
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    node = {
+        "identifier": "HYP-7",
+        "title": "t",
+        "url": "https://linear/HYP-7",
+        "description": "",
+        "dueDate": None,
+        "updatedAt": "2026-07-01T12:00:00.000Z",
+        "createdAt": "2026-06-01T12:00:00.000Z",
+        "completedAt": "2026-06-05T12:00:00.000Z",
+        "canceledAt": None,
+        "state": {"type": "completed"},
+        "labels": {"nodes": []},
+    }
+    ticket = be._node_to_ticket(node)
+    assert ticket.created_at == "2026-06-01T12:00:00.000Z"
+    assert ticket.closed_at == "2026-06-05T12:00:00.000Z"
+
+
+def test_linear_node_to_ticket_uses_canceled_at_when_not_completed():
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    node = {
+        "identifier": "HYP-8",
+        "title": "t",
+        "url": "https://linear/HYP-8",
+        "description": "",
+        "createdAt": "2026-06-01T12:00:00.000Z",
+        "completedAt": None,
+        "canceledAt": "2026-06-03T12:00:00.000Z",
+        "state": {"type": "canceled"},
+        "labels": {"nodes": []},
+    }
+    ticket = be._node_to_ticket(node)
+    assert ticket.closed_at == "2026-06-03T12:00:00.000Z"
+
+
+def test_linear_issue_fields_request_created_and_closed_timestamps():
+    from tasklib.backends.linear import LinearBackend
+
+    assert "createdAt" in LinearBackend._ISSUE_FIELDS_BASE
+    assert "completedAt" in LinearBackend._ISSUE_FIELDS_BASE
+    assert "canceledAt" in LinearBackend._ISSUE_FIELDS_BASE
 
 def test_linear_issue_fields_requests_attachments_beyond_default_page_size():
     # review finding: Linear's `attachments` connection defaults to a 50-item page; without an

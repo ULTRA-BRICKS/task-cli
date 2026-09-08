@@ -54,6 +54,12 @@ def test_no_command_prints_help(capsys):
         ["gantt"],
         ["gantt", "--all", "--width", "60"],
         ["gantt", "--state", "todo", "--label", "ui", "--json"],
+        ["burn"],
+        ["burn", "--all", "--width", "60"],
+        ["burn", "--since", "2026-01-01", "--until", "2026-12-31", "--json"],
+        ["burn", "--html"],
+        ["web", "start"],
+        ["web", "run", "--port", "9000"],
         ["read", "#1"],
         ["view", "#1"],
         ["find", "query"],
@@ -1716,6 +1722,62 @@ def test_gantt_width_zero_clamps_not_crash(capsys, _inject_fake):
     import json
 
     assert json.loads(out)["window"]["width"] == 1  # floored to 1, no divide-by-zero
+
+
+# ── burn (read-only remaining-over-time) ─────────────────────────────────────────────
+
+
+def test_burn_renders_remaining(capsys, _inject_fake):
+    main(_create_argv())
+    t = _inject_fake.get("#1")
+    t.created_at = "2026-06-01T00:00:00Z"
+    capsys.readouterr()
+    rc = main(["burn", "--no-pager", "--since", "2026-06-01", "--until", "2026-06-10"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Burn chart" in out or "remaining" in out.lower()
+
+
+def test_burn_json_shape(capsys, _inject_fake):
+    main(_create_argv())
+    t = _inject_fake.get("#1")
+    t.created_at = "2026-06-01T00:00:00Z"
+    capsys.readouterr()
+    rc = main(["burn", "--json", "--since", "2026-06-01", "--until", "2026-06-10"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    import json
+
+    payload = json.loads(out)
+    assert "remaining" in payload and "ideal" in payload
+    assert payload["remaining"][0] == 1
+    assert payload["total"] == 1
+
+
+def test_burn_empty_is_clean(capsys, _inject_fake):
+    rc = main(["burn", "--all", "--no-pager"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no tickets" in out.lower()
+
+
+def test_burn_does_not_mutate(_inject_fake):
+    main(_create_argv())
+    t = _inject_fake.get("#1")
+    t.created_at = "2026-06-01T00:00:00Z"
+    before = t.state
+    main(["burn", "--no-pager"])
+    main(["burn", "--json"])
+    assert _inject_fake.get("#1").state == before
+    assert _inject_fake.comments == []
+    assert _inject_fake.attachments == []
+
+
+def test_web_start_parses():
+    parser = build_parser()
+    ns = parser.parse_args(["web", "start"])
+    assert ns.command == "web"
+    assert ns.action == "start"
 
 
 # ── read / change / status ──────────────────────────────────────────────────────────
