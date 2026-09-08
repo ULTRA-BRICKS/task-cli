@@ -1035,7 +1035,13 @@ DUPLICATE_SESSION_WINDOW_MINUTES = 60
 
 
 def _duplicate_tokens(text: str) -> set[str]:
-    """Lowercase word-ish tokens, boilerplate stripped, single-character tokens dropped."""
+    """Lowercase word-ish tokens, boilerplate stripped, single-character tokens dropped.
+
+    Generated ``tg#<id>`` quote blocks are stripped first: they are the same machine-appended
+    excerpt on every ticket that referenced that message, so leaving them in would let one
+    shared quote dominate the Jaccard sets of otherwise unrelated tickets.
+    """
+    text = _strip_quoted_blocks(text)
     tokens = {t for t in _DUPLICATE_TOKEN_RE.findall(text.lower()) if len(t) > 1}
     return tokens - _DUPLICATE_BOILERPLATE_WORDS
 
@@ -1160,11 +1166,15 @@ def duplicate_violation(
     # `match.title` is UNTRUSTED — it's a candidate ticket's title read back from the backend,
     # which could carry a hand-crafted ANSI/bidi control sequence (review finding, P2: a title
     # containing a terminal escape, printed verbatim into this diagnostic, could clear/spoof the
-    # console). Sanitize with the SAME `safe_display` the links gate already uses for exactly
-    # this class of untrusted-value injection, rather than inventing a second sanitizer.
+    # console) or a token-shaped credential. Run the logging redactor (same as
+    # junk_title_violation / _redact_link_display) then safe_display so neither class of payload
+    # reaches stdout.
+    from .logging import redact
+
+    shown = safe_display(redact(match.title))
     return Violation(
         GATE_DUPLICATE,
-        f"a similar ticket may already exist{context}: {match.id}  {safe_display(match.title)}",
+        f"a similar ticket may already exist{context}: {match.id}  {shown}",
         hint=f"task read '{match.id}' to check — if this is genuinely separate work, create it anyway",
     )
 

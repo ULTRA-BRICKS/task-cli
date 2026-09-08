@@ -335,10 +335,10 @@ def test_create_distinct_title_is_not_flagged_as_duplicate(capsys, _inject_fake)
 def test_create_blocks_reworded_duplicate_title(capsys, _inject_fake):
     # a REWORDED duplicate of the same request — different wording, same meaningful content —
     # is exactly the shape the near-exact-title SequenceMatcher check above misses.
-    main(_create_argv(**{"--title": "Review OMP model-detection ordering diff"}))
+    main(_create_argv(**{"--title": "OMP model-detection ordering regression"}))
     capsys.readouterr()
 
-    rc = main(_create_argv(**{"--title": "Review OMP lineage-first model detection diff"}))
+    rc = main(_create_argv(**{"--title": "OMP lineage-first model detection regression"}))
     out = capsys.readouterr().out
     assert rc == 2
     assert "duplicate" in out
@@ -347,13 +347,13 @@ def test_create_blocks_reworded_duplicate_title(capsys, _inject_fake):
 
 
 def test_create_skip_duplicate_bypasses_the_token_jaccard_block(capsys, _inject_fake):
-    main(_create_argv(**{"--title": "Review OMP model-detection ordering diff"}))
+    main(_create_argv(**{"--title": "OMP model-detection ordering regression"}))
     capsys.readouterr()
 
     rc = main(
         _create_argv(
             **{
-                "--title": "Review OMP lineage-first model detection diff",
+                "--title": "OMP lineage-first model detection regression",
                 "--skip-duplicate": "genuinely separate work, tracking both",
             }
         )
@@ -410,14 +410,14 @@ def test_duplicate_detection_has_a_documented_bounded_coverage(capsys, _inject_f
         for i in range(30):
             main(_create_argv(**{"--title": f"Filler ticket number {i}"}))
             capsys.readouterr()
-        main(_create_argv(**{"--title": "Review OMP model-detection ordering diff"}))  # ticket #31
+        main(_create_argv(**{"--title": "OMP model-detection ordering regression"}))  # ticket #31
         capsys.readouterr()
     assert len(_inject_fake.list(limit=100)) == 31  # FakeBackend.list() defaults to limit=30 too
 
     # a near-exact AND a token/Jaccard duplicate of #31 both slip through: #31 is outside the
     # 30-ticket window `_session_dedup_candidates` fetches. Real duplicate detection is back in
     # effect here (the `with` block above already exited).
-    rc = main(_create_argv(**{"--title": "Review OMP lineage-first model detection diff"}))
+    rc = main(_create_argv(**{"--title": "OMP lineage-first model detection regression"}))
     assert rc == 0
     assert len(_inject_fake.list(limit=100)) == 32
 

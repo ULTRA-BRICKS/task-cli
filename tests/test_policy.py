@@ -993,6 +993,40 @@ def test_duplicate_violation_sanitizes_a_hostile_candidate_title():
     assert "‮" not in v.message
 
 
+def test_duplicate_violation_redacts_a_credential_shaped_title():
+    """A matching backend title carrying a token must not be echoed to stdout."""
+    from tasklib.policy import duplicate_violation
+
+    secret = "ghp_" + "abcdefghijklmnopqrstuvwxyz012345"
+    existing = _candidate("#1", f"Fix checkout cart inventory pricing pipeline {secret}")
+    v = duplicate_violation("Fix checkout cart inventory pricing pipeline", "", [existing])
+    assert v is not None
+    assert secret not in v.message
+    assert "<redacted>" in v.message
+
+
+def test_duplicate_violation_ignores_shared_generated_quote_blocks():
+    """Two unrelated tickets that both quote the same tg# message must not match on that quote."""
+    from tasklib.policy import duplicate_violation
+
+    quote = (
+        "> **tg#99** — Alex, 2026-09-01: checkout cart inventory pricing discount coupon "
+        "shipping warehouse fulfillment pipeline regression\n"
+        "<!-- tasklib:msgref-quote:99 -->"
+    )
+    existing = _candidate(
+        "#1",
+        "Add dark mode toggle to settings",
+        what="users want a dark theme\n\n" + quote,
+    )
+    v = duplicate_violation(
+        "Fix login bug on mobile Safari",
+        "users cannot log in\n\n" + quote,
+        [existing],
+    )
+    assert v is None
+
+
 def test_duplicate_violation_catches_reworded_cyrillic_duplicate():
     # review finding (P1): an EARLIER version tokenized with `[a-z0-9]+` — ASCII-only — so a
     # Cyrillic title/body always tokenized to ZERO tokens (`_DUPLICATE_MIN_TOKENS_PER_SIDE`
