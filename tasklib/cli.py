@@ -3446,6 +3446,8 @@ def cmd_attach(args: argparse.Namespace) -> int:
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
 
+    from .backends import AmbiguousBackendError, EXIT_AMBIGUOUS
+    from .logging import log_event, redact
     from .policy import is_http_url
 
     for path in args.path:
@@ -3453,45 +3455,62 @@ def cmd_attach(args: argparse.Namespace) -> int:
             continue
         if not Path(path).is_file():
             raise _UserError(
-                f"cannot attach {path} — not a file and not an http(s) URL\n"
+                f"cannot attach {redact(path)} — not a file and not an http(s) URL\n"
                 "  why: task attach needs a Playwright/agent-browser capture "
                 "(or a hosted URL); a missing path is not proof\n"
                 "  fix: pass an existing image path, or a URL already hosting "
                 "the screenshot"
             )
 
-    # Attach BEFORE rewriting the body so a failed upload cannot mint an
-    # implementation screenshot that satisfies the on-done gate with no
-    # durable backend proof (review finding, task-cli#167).
+    attached: list[str] = []
+    fail: BackendError | None = None
+    ambiguous: AmbiguousBackendError | None = None
     for path in args.path:
         try:
             backend.attach(ticket.id, path)
+            attached.append(path)
+        except AmbiguousBackendError as exc:
+            ambiguous = exc
+            break
+        except BackendError as exc:
+            fail = exc
+            break
+
+    new_shots = [Screenshot(ref=path, kind="implementation") for path in attached]
+    updated = ticket
+    if new_shots:
+        ticket.screenshots.extend(new_shots)
+        try:
+            updated = backend.update(ticket)
         except BackendError as exc:
             raise _UserError(str(exc)) from exc
+        _record_session_touch(cfg, backend, updated)
+        log_event(
+            "ticket.attached",
+            ticket_id=updated.id,
+            backend=cfg.backend,
+            count=len(new_shots),
+        )
+        _notify_mutation(cfg, updated, "attached")
 
-    new_shots = [Screenshot(ref=path, kind="implementation") for path in args.path]
-    ticket.screenshots.extend(new_shots)
-    try:
-        updated = backend.update(ticket)
-    except BackendError as exc:
-        raise _UserError(str(exc)) from exc
+    if ambiguous is not None:
+        print(_err(f"ambiguous: {ambiguous}"))
+        print(
+            _warn(
+                "  an attach may already have landed — run `task read "
+                f"{ticket.id}` before retrying, to avoid a duplicate."
+            )
+        )
+        return EXIT_AMBIGUOUS
+    if fail is not None:
+        raise _UserError(str(fail))
 
-    from .logging import log_event
-
-    _record_session_touch(cfg, backend, updated)
-    log_event(
-        "ticket.attached",
-        ticket_id=updated.id,
-        backend=cfg.backend,
-        count=len(new_shots),
-    )
-    _notify_mutation(cfg, updated, "attached")
     if args.json:
         import json
 
         print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
     else:
-        names = ", ".join(s.ref for s in new_shots)
+        names = ", ".join(redact(s.ref) for s in new_shots)
         print(_ok(f"attached {names} to {updated.id}  {updated.url}"))
     return 0
 

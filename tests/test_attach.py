@@ -150,3 +150,53 @@ def test_skill_documents_task_attach():
     from tasklib.install import SKILL_MD
 
     assert "task attach" in SKILL_MD
+
+def test_attach_redacts_token_shaped_path(tmp_path, capsys, fake):
+    shot = tmp_path / "ghp_secret1234567890abcdef.png"
+    shot.write_bytes(b"png")
+    main(_create_argv())
+    capsys.readouterr()
+    rc = main(["attach", "#1", str(shot)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ghp_secret1234567890abcdef" not in out
+
+
+def test_attach_ambiguous_returns_9(capsys, fake):
+    from tasklib.backends import AmbiguousBackendError, EXIT_AMBIGUOUS
+
+    main(_create_argv())
+    capsys.readouterr()
+
+    def boom(ticket_id, file_path):
+        raise AmbiguousBackendError("connection dropped mid-write")
+
+    fake.attach = boom
+    rc = main(["attach", "#1", "https://example.com/shot.png"])
+    out = capsys.readouterr().out
+    assert rc == EXIT_AMBIGUOUS
+    assert "ambiguous:" in out
+    assert fake.get("#1").screenshots == []
+
+
+def test_attach_persists_prefix_when_later_path_fails(tmp_path, capsys, fake):
+    a = tmp_path / "a.png"
+    a.write_bytes(b"a")
+    main(_create_argv())
+    capsys.readouterr()
+    original = fake.attach
+    n = {"i": 0}
+
+    def sometimes(ticket_id, file_path):
+        n["i"] += 1
+        if n["i"] == 1:
+            return original(ticket_id, file_path)
+        raise BackendError("second upload rejected")
+
+    fake.attach = sometimes
+    rc = main(["attach", "#1", str(a), "https://example.com/b.png"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "second upload rejected" in out
+    impl = [s.ref for s in fake.get("#1").screenshots if s.kind == "implementation"]
+    assert impl == [str(a)]
