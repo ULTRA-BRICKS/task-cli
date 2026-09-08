@@ -51,7 +51,7 @@ description: >-
   `task link <id> <relation> <other-id>` (blocks/blocked-by/relates-to/duplicate-of — record a
   relationship between two tickets; `task new` nudges you toward this when it spots a
   plausibly related open ticket), `task check <id> ... --proof`, `task accept <id>`,
-  `task gate <id>` (the pre-merge verdict), `task done <id>`, `task status <id> [<state>]`,
+  `task attach <id> <path>`, `task gate <id>` (the pre-merge verdict), `task done <id>`, `task status <id> [<state>]`,
   `task classify "<text>"`, `task session`.
 metadata:
   author: alex-mextner
@@ -73,6 +73,7 @@ task find "<query>"              # search title+body (cross-project when outside
 task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of — records a
 #   relationship in ## Links, mirrored on the other ticket (except duplicate-of, one-sided)
 task change <id> --acceptance "..." --screenshot proof.png
+task attach <id> shot.png            # add implementation screenshot (repeatable paths)
 task check <id> 1 2 --proof a.png --proof b.png   # tick criteria WITH a proof each (in order)
 task check <id> --all --proof shot.png            # every criterion, one shared proof
 task accept <id>                 # walk the unaccepted criteria, asking for a proof each (TTY)

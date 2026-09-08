@@ -67,6 +67,8 @@ def test_no_command_prints_help(capsys):
         ["find", "query"],
         ["change", "#1", "--title", "x"],
         ["link", "#1", "blocks", "#2"],
+        ["attach", "#1", "shot.png"],
+        ["attach", "#1", "a.png", "b.png"],
         ["status", "#1"],
         ["status", "#1", "done"],
         ["classify", "some text"],
@@ -2098,6 +2100,7 @@ def test_list_bad_state_is_clean_error(capsys, _inject_fake):
 def test_create_calls_attach_for_screenshots(_inject_fake):
     main(_create_argv() + ["--label", "ui", "--screenshot", "mock.png"])
     assert ("#1", "mock.png") in _inject_fake.attachments
+
 
 
 def test_change_close_refuses_ui_without_implementation_screenshot(

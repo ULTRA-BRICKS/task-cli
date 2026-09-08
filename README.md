@@ -61,6 +61,7 @@ task mark-shipped <id> --pr <url> [--commit <sha>]  # record a merged PR; NEVER 
 #   ticket (the `gh ship` post-merge hook — see agent-tools' ci/ship/ship.sh) — moves
 #   TODO/IN_PROGRESS to in-review, posts a durable comment, and prints what's still needed
 #   before a genuine `task done`.
+task attach <id> <path> [path...]  # add implementation screenshot(s) (Playwright/agent-browser capture, not screencapture)
 task done <id>    [--screenshot p] # close a ticket — runs the on-done gates (all criteria checked)
 task change <id>  [--due ...] [--done]  # update; --due sets/clears the due date; --done closes (gates)
 task status <id> [<new-state>]     # read or transition state (works outside a repo)

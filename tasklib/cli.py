@@ -7,7 +7,7 @@ filesystem (sidecar). All pure logic lives in the sibling modules (``model``/``r
 the backends) are lazy so ``task --help`` stays fast and dependency-light.
 
 Subcommands: create/new · list · gantt (read-only due-date timeline) · burn (read-only remaining-over-time chart) · web (local HTML burn chart: start/stop/status/run) · read/view · find · change
-· status · done · check · link (record a typed blocks/blocked-by/relates-to/duplicate-of
+· attach (implementation screenshot proof) · status · done · check · link (record a typed blocks/blocked-by/relates-to/duplicate-of
 relationship between two tickets) · audit (reconciliation backstop — flags/reverts a Done ticket
 that never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close)
 · mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
@@ -371,6 +371,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_skip_flags(chp)
 
+    # attach — dedicated screenshot-proof verb (task-cli#167). Same durable path as
+    # `change --screenshot`, without the field-edit flags agents were missing.
+    atp = sub.add_parser(
+        "attach",
+        parents=[common],
+        help="attach screenshot(s) to a ticket as implementation proof",
+    )
+    atp.add_argument("id", help="ticket id (#123 or HYP-456)")
+    atp.add_argument(
+        "path",
+        nargs="+",
+        metavar="PATH",
+        help="screenshot path or URL (one or more)",
+    )
+
     # status
     stp = sub.add_parser(
         "status", parents=[common], help="read or transition a ticket's state"
@@ -596,6 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         "view": cmd_read,
         "find": cmd_find,
         "change": cmd_change,
+        "attach": cmd_attach,
         "status": cmd_status,
         "done": cmd_done,
         "check": cmd_check,
@@ -3408,6 +3424,75 @@ def cmd_change(args: argparse.Namespace) -> int:
         print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
     else:
         print(_ok(f"updated {updated.id}  {updated.url}"))
+    return 0
+
+
+
+def cmd_attach(args: argparse.Namespace) -> int:
+    """Attach screenshot path(s) as implementation proof.
+
+    The dedicated verb agents reach for (task-cli#167 / ask 017): `task attach <id>
+    shot.png` instead of having to know `task change <id> --screenshot shot.png`.
+    Same durable path as change: body Screenshots section + backend.attach. Does not
+    close the ticket and does not run close gates. Capture itself is out of scope —
+    pass a path already taken via Playwright/agent-browser, never screencapture.
+    """
+    cfg = _load(args)
+    backend = _backend_for_id(cfg, args.id)
+    from .backends import BackendError
+
+    try:
+        ticket = backend.get(args.id)
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+
+    from .policy import is_http_url
+
+    for path in args.path:
+        if is_http_url(path):
+            continue
+        if not Path(path).is_file():
+            raise _UserError(
+                f"cannot attach {path} — not a file and not an http(s) URL\n"
+                "  why: task attach needs a Playwright/agent-browser capture "
+                "(or a hosted URL); a missing path is not proof\n"
+                "  fix: pass an existing image path, or a URL already hosting "
+                "the screenshot"
+            )
+
+    # Attach BEFORE rewriting the body so a failed upload cannot mint an
+    # implementation screenshot that satisfies the on-done gate with no
+    # durable backend proof (review finding, task-cli#167).
+    for path in args.path:
+        try:
+            backend.attach(ticket.id, path)
+        except BackendError as exc:
+            raise _UserError(str(exc)) from exc
+
+    new_shots = [Screenshot(ref=path, kind="implementation") for path in args.path]
+    ticket.screenshots.extend(new_shots)
+    try:
+        updated = backend.update(ticket)
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+
+    from .logging import log_event
+
+    _record_session_touch(cfg, backend, updated)
+    log_event(
+        "ticket.attached",
+        ticket_id=updated.id,
+        backend=cfg.backend,
+        count=len(new_shots),
+    )
+    _notify_mutation(cfg, updated, "attached")
+    if args.json:
+        import json
+
+        print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
+    else:
+        names = ", ".join(s.ref for s in new_shots)
+        print(_ok(f"attached {names} to {updated.id}  {updated.url}"))
     return 0
 
 
