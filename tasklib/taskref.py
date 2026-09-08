@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .logging import redact
+
 
 class TaskRefError(ValueError):
     """Raised by github_issue_number / linear_identifier on a malformed code."""
@@ -45,6 +47,11 @@ _DIGITS = re.compile(r"^[0-9]+$")
 _LINEAR = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-([0-9]+)$")
 
 _FIX = "Run `task find` to look up an existing ticket or `task new` to create one."
+
+
+def _shown(code: str) -> str:
+    """User-facing form of a rejected code — token-shaped values are redacted."""
+    return redact(str(code))
 
 
 def _fail(code: str, backend: str, what: str, why: str) -> ValidationResult:
@@ -76,7 +83,7 @@ def github_issue_number(code: str) -> str:
     if _DIGITS.fullmatch(stripped):
         return stripped
     raise TaskRefError(
-        f"{code!r} is not a GitHub issue number. "
+        f"{_shown(code)!r} is not a GitHub issue number. "
         "Same-repo codes are #N or N (digits after stripping exactly one leading #). "
         f"{_FIX}"
     )
@@ -88,13 +95,13 @@ def linear_identifier(code: str, team: str) -> str:
     text = str(code).strip()
     if not team:
         raise TaskRefError(
-            f"{code!r} cannot be validated as a Linear identifier because no team is configured. "
+            f"{_shown(code)!r} cannot be validated as a Linear identifier because no team is configured. "
             f"{_FIX}"
         )
     match = _LINEAR.fullmatch(text)
     if match is None or match.group(1).upper() != team.upper():
         raise TaskRefError(
-            f"{code!r} is not a Linear identifier for team {team.upper()}. "
+            f"{_shown(code)!r} is not a Linear identifier for team {team.upper()}. "
             f"Codes must look like {team.upper()}-<n>. {_FIX}"
         )
     return f"{team.upper()}-{match.group(2)}"
@@ -145,7 +152,7 @@ def validate(code, repo_root=None, *, backend=None, linear_team="", github_repo=
             return _fail(
                 text,
                 resolved_backend,
-                f"{text!r} is not a GitHub issue number.",
+                f"{_shown(text)!r} is not a GitHub issue number.",
                 "This repo uses github-issues, which only accepts #N, N, or owner/repo#N.",
             )
         return _ok(text, canonical, resolved_backend)
@@ -155,7 +162,7 @@ def validate(code, repo_root=None, *, backend=None, linear_team="", github_repo=
             return _fail(
                 text,
                 resolved_backend,
-                f"{text!r} cannot be validated as a Linear identifier.",
+                f"{_shown(text)!r} cannot be validated as a Linear identifier.",
                 "This repo uses linear but no team is configured "
                 "(set linear.team in task.yaml or the rig.yaml task: block).",
             )
@@ -165,7 +172,7 @@ def validate(code, repo_root=None, *, backend=None, linear_team="", github_repo=
             return _fail(
                 text,
                 resolved_backend,
-                f"{text!r} is not a Linear identifier for team {team.strip().upper()}.",
+                f"{_shown(text)!r} is not a Linear identifier for team {team.strip().upper()}.",
                 f"This repo uses linear; codes must look like {team.strip().upper()}-<n>.",
             )
         return _ok(text, canonical, resolved_backend)
@@ -173,6 +180,6 @@ def validate(code, repo_root=None, *, backend=None, linear_team="", github_repo=
     return _fail(
         text,
         str(resolved_backend),
-        f"{text!r} cannot be validated.",
+        f"{_shown(text)!r} cannot be validated.",
         f"Unknown backend {resolved_backend!r}; expected github-issues or linear.",
     )

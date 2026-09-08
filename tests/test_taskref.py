@@ -167,3 +167,15 @@ def test_linear_get_rejects_invented_code_without_http():
     be._gql = boom
     with pytest.raises(BackendError):
         be.get("TEST-1")
+
+
+def test_rejected_token_shaped_code_is_redacted_in_errors():
+    secret = "ghp_" + ("a" * 20)
+    with pytest.raises(TaskRefError) as exc:
+        github_issue_number(secret)
+    assert secret not in str(exc.value)
+    assert "<redacted>" in str(exc.value)
+    result = validate(secret)
+    assert not result.ok
+    assert secret not in result.reason
+    assert "<redacted>" in result.reason
