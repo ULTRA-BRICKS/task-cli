@@ -73,6 +73,53 @@ def test_non_ui_ticket_skips_screenshot_gate():
     assert check_create(t, EnforceConfig()).ok
 
 
+def test_screenshot_mention_without_attach_blocks_create():
+    t = _good_ticket(what="see screenshot foo.png of the broken dialog")
+    res = check_create(t, EnforceConfig())
+    assert not res.ok
+    v = next(v for v in res.violations if v.gate == "screenshots")
+    assert "attach" in (v.message + " " + v.hint).lower()
+    assert "screenshot" in (v.message + " " + v.hint).lower()
+    combined = (v.message + " " + v.hint).lower()
+    assert "do not dodge" in combined or "don't dodge" in combined
+    assert "deleting the word" in combined
+    assert "--screenshot" in (v.message + " " + v.hint)
+
+
+def test_cyrillic_screenshot_mention_without_attach_blocks_create():
+    t = _good_ticket(what="см. скриншот сломанного диалога")
+    res = check_create(t, EnforceConfig())
+    assert any(v.gate == "screenshots" for v in res.violations)
+
+
+def test_screenshot_mention_with_attach_passes_create():
+    t = _good_ticket(
+        what="see screenshot foo.png of the broken dialog",
+        screenshots=[Screenshot(ref="a.png", kind="creation")],
+    )
+    assert check_create(t, EnforceConfig()).ok
+
+
+def test_screenshot_mention_skip_waives_create():
+    t = _good_ticket(
+        what="see screenshot foo.png",
+        skips={"screenshots": "prose uses the word, no image exists"},
+    )
+    res = check_create(t, EnforceConfig())
+    assert res.ok
+    assert "screenshots" in res.skipped
+
+
+def test_screenshot_mention_does_not_block_close():
+    # create-time only — a pre-existing ticket that talks about a screenshot
+    # must still be closeable (same posture as junk-title).
+    t = _good_ticket(
+        what="see screenshot foo.png",
+        acceptance=_checked_criteria(),
+    )
+    assert check_done(t, EnforceConfig()).ok
+
+
 def test_done_phase_demands_implementation_screenshot():
     # a creation shot alone does NOT satisfy the on-done gate — that is why it runs again.
     creation_only = _good_ticket(labels=["visual"], screenshots=[Screenshot(ref="a.png", kind="creation")])

@@ -266,8 +266,10 @@ On `create`, and again on `change`→`done`:
    overrides a genuine false positive. An id already carrying a structured `task link` entry
    (see "Linking tickets" below) is exempt — it won't ALSO be flagged when mentioned in prose.
 5. **Screenshots** — required at *creation* and at *done* for UI/visual tickets (label-gated,
-   configurable). The on-done gate demands the **implementation** proof specifically — a
-   creation mock does not let you close a UI ticket. That is why the gate runs twice.
+   configurable). Also required at *creation* when any prose field mentions screenshot or
+   скриншот (any case) — attach with `--screenshot <path>`; do not dodge by deleting the
+   word. The on-done gate (UI/visual only) demands the **implementation** proof specifically — a
+   creation mock does not let you close a UI ticket. That is why the label-gated gate runs twice.
 6. **Formatting** — the body must match the fixed section template (`render.py` validates).
 
 On `change`→`done` (close) two more gates apply:

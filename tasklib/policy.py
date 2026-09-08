@@ -545,31 +545,44 @@ def _text_gates(ticket: Ticket, cfg: EnforceConfig) -> list[Violation]:
 
 
 def _screenshot_gate(ticket: Ticket, cfg: EnforceConfig, phase: Phase) -> list[Violation]:
-    """The label-gated screenshot proof: a creation shot on create, an implementation shot on done."""
-    required = (
-        (phase is Phase.CREATE and cfg.screenshots_on_create)
-        or (phase is Phase.DONE and cfg.screenshots_on_done)
-    ) and _ticket_needs_screenshots(ticket, cfg)
-    if not required:
+    """Screenshot proof: label-gated (ui/visual) on create AND done, plus a create-time
+    mention gate — prose that says screenshot/скриншот with no image attached is refused
+    (task-cli#166, same hole tg-cli#337 closed for outbound Telegram)."""
+    if phase is Phase.CREATE and cfg.screenshots_on_create:
+        if ticket.screenshots:
+            return []
+        if _ticket_needs_screenshots(ticket, cfg):
+            return [
+                Violation(
+                    GATE_SCREENSHOTS,
+                    "a creation screenshot is required for UI/visual tickets",
+                    hint="add --screenshot <path>",
+                )
+            ]
+        if mentions_screenshot(_scanned_text(ticket)):
+            return [
+                Violation(
+                    GATE_SCREENSHOTS,
+                    "ticket mentions a screenshot but none is attached",
+                    hint="add --screenshot <path>. Do not dodge by deleting the word — attach the screenshot.",
+                )
+            ]
         return []
-    if phase is Phase.CREATE:
-        # any screenshot satisfies the creation gate (the "what we want to build" proof).
-        has = bool(ticket.screenshots)
-        want = "creation"
-    else:
+    if phase is Phase.DONE and cfg.screenshots_on_done and _ticket_needs_screenshots(ticket, cfg):
         # the on-done gate demands the IMPLEMENTATION proof specifically — a creation
         # shot alone does not let you close a UI ticket. This is why the gate runs again.
-        has = any(s.kind == "implementation" for s in ticket.screenshots)
-        want = "implementation"
-    if has:
-        return []
-    return [
-        Violation(
-            GATE_SCREENSHOTS,
-            f"a {want} screenshot is required for UI/visual tickets",
-            hint="add --screenshot <path>",
-        )
-    ]
+        # Mention-based attach is CREATE-only so a pre-existing ticket that talks about
+        # a screenshot remains closeable (same posture as junk-title).
+        if any(s.kind == "implementation" for s in ticket.screenshots):
+            return []
+        return [
+            Violation(
+                GATE_SCREENSHOTS,
+                "an implementation screenshot is required for UI/visual tickets",
+                hint="add --screenshot <path>",
+            )
+        ]
+    return []
 
 
 def _formatting_gate(ticket: Ticket, cfg: EnforceConfig) -> list[Violation]:
@@ -1298,6 +1311,14 @@ def _ticket_needs_screenshots(ticket: Ticket, cfg: EnforceConfig) -> bool:
     """Screenshots are label-gated: required only when the ticket carries a gating label."""
     ticket_labels = {label.strip().lower() for label in ticket.labels}
     return bool(ticket_labels & cfg.screenshot_labels)
+
+
+_SCREENSHOT_MENTION_RE = re.compile(r"screenshot|скриншот", re.IGNORECASE)
+
+
+def mentions_screenshot(text: str) -> bool:
+    """True when `text` mentions screenshot or скриншот, any case (task-cli#166)."""
+    return bool(_SCREENSHOT_MENTION_RE.search(text or ""))
 
 
 def normalize_skip_gate(name: str) -> str:
