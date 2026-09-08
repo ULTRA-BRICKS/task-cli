@@ -638,7 +638,7 @@ def test_accept_reports_failure_when_proven_but_below_minimum(capsys, monkeypatc
 def test_skill_text_documents_gate_accept_and_the_refs_rule():
     from tasklib.install import SKILL_MD
 
-    for needle in ("task gate", "task accept", "task check <id> 1 2", "--post-merge-acceptance", "Refs", "Closes"):
+    for needle in ("task gate", "task accept", "task check <id> 1 2", "--post-merge-acceptance", "Refs", "Closes", "harness task"):
         assert needle in SKILL_MD, needle
     # the WHY, not just the rule: the reader must learn what closes tickets behind the gates,
     # and that a merge parks the ticket in In Review — only acceptance reaches Done

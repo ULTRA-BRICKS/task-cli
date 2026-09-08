@@ -104,8 +104,15 @@ GATE_LINKS_URL = "links-url"
 #   3. "diff for cross-file consistency"           — "Audit X diff for cross-file consistency"
 #   4. starts review/audit/adversarial AND ends in "diff" (the bare form, nothing after it) —
 #      "Review OMP lineage-first model detection diff"
-# None of the false-positive examples above end in a bare "diff", contain "uncommitted", "review
-# of", or the "cross-file consistency" phrase — so none of the four shapes fire on them.
+# Plus two uncommitted shapes that do NOT require a trailing "diff" (agents dropped it after
+# shape 1 started blocking, and still filed GitHub issues — rig-cli#409/#436/#454):
+#   5. title starts "Review (the )uncommitted"     — "Review uncommitted 0.36.0 version bump"
+#   6. "review of (the )current uncommitted"       — "Read-only adversarial ... review of the
+#      current uncommitted rig-cli diff"
+# Shape 5/6 do not fire on "Audit uncommitted transaction handling" or a product title like
+# "Add a review of uncommitted files to the status bar" (no leading Review-uncommitted, no
+# "review of current uncommitted"). None of the false-positive examples above end
+# in a bare "diff", contain "uncommitted", "review of", or the "cross-file consistency" phrase.
 #
 # Scope boundary: this catches the auto-generated TEMPLATE shape at the create/edit boundary — the
 # threat model is an agent's classifier reflexively filing "Review uncommitted X diff", not an
@@ -147,6 +154,16 @@ def _normalize_title_for_junk_check(title: str) -> str:
 
 # Non-capturing: the lead is never back-referenced, only used to anchor each alternative below.
 _JUNK_TITLE_LEAD = r"^(?:review|audit|adversarial)\b"
+# Shape 5/6: "Review uncommitted" with no trailing "diff" required. Compiled separately so
+# they can search (shape 6 is often prefixed: "Read-only adversarial cross-file review of
+# the current uncommitted …") without loosening the lead-anchored shapes 1–4. Shape 6
+# requires the process phrase "current uncommitted", not a bare "review of … uncommitted",
+# so a product title about reviewing uncommitted files still creates.
+_JUNK_REVIEW_UNCOMMITTED = re.compile(
+    r"(?:^review\s*[:\-–—,.]?\s*(?:the\s+)?uncommitted\b|"
+    r"\breview of (?:the\s+)?current\s+uncommitted\b)",
+    re.IGNORECASE,
+)
 _JUNK_REVIEW_TITLE = re.compile(
     _JUNK_TITLE_LEAD + r".*(?:"
     r"\buncommitted\b.*\bdiff\b"  # 1
@@ -594,11 +611,13 @@ def junk_title_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None
     :data:`_JUNK_REVIEW_TITLE` for why), unless a repo has explicitly disabled the CHECK itself
     via ``enforce.junk_title: false``. No PER-TICKET escape hatch — no ``--skip-junk-title``, no
     ``--force`` — that stays true regardless of ``cfg``; this is not a quality judgment a single
-    caller can waive, it is a structural fact about the title. A real review request belongs in a
-    PR comment or a review-cli run, never a standalone ticket phrased this way."""
+    caller can waive, it is a structural fact about the title. A real review request belongs in
+    ``harness task`` (or a PR comment / review-cli run), never a product GitHub/Linear
+    ticket phrased this way."""
     if not cfg.junk_title:
         return None
-    if _JUNK_REVIEW_TITLE.match(_normalize_title_for_junk_check(ticket.title)):
+    normalized = _normalize_title_for_junk_check(ticket.title)
+    if _JUNK_REVIEW_TITLE.match(normalized) or _JUNK_REVIEW_UNCOMMITTED.search(normalized):
         # Redact before it reaches the diagnostic (review finding): a title carrying a
         # credential-shaped value ("Review ghp_... diff") must not have that value echoed
         # verbatim into a message `_report_and_die` prints to stdout — the same posture
@@ -608,8 +627,8 @@ def junk_title_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None
         return Violation(
             GATE_JUNK_TITLE,
             f"title matches the auto-generated 'review this diff' shape: {redact(ticket.title)!r}",
-            hint="this ticket can never lead to a merge on its own — post review findings as a PR "
-            "comment or run `review diff`/`review quorum` directly instead of filing a ticket",
+            hint="process tickets belong in `harness task`, not the product GitHub/Linear tracker — "
+            "run `review diff`/`review quorum` or file the finding with `harness task` instead",
         )
     return None
 
