@@ -1780,6 +1780,21 @@ def test_web_start_parses():
     assert ns.action == "start"
 
 
+def test_web_run_load_tickets_without_label(monkeypatch, _inject_fake):
+    """web has no --label/--limit; cmd_web must still load tickets without AttributeError."""
+    ns = build_parser().parse_args(["web", "run"])
+    assert not hasattr(ns, "label")
+    assert not hasattr(ns, "limit")
+
+    def fake_run(port, load_tickets, **kw):
+        tickets = load_tickets()
+        assert isinstance(tickets, list)
+        return 0
+
+    monkeypatch.setattr("tasklib.web.run", fake_run)
+    assert main(["web", "run"]) == 0
+
+
 # ── read / change / status ──────────────────────────────────────────────────────────
 
 

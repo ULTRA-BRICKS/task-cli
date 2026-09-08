@@ -2585,6 +2585,11 @@ def cmd_web(args: argparse.Namespace) -> int:
     def load_tickets(*, include_all: bool = False):
         prev = bool(getattr(args, "all", False))
         args.all = prev or include_all
+        # web parser has no --label/--limit; _gantt_tickets still reads them like `list`.
+        if getattr(args, "label", None) is None:
+            setattr(args, "label", [])
+        if not hasattr(args, "limit"):
+            setattr(args, "limit", None)
         try:
             return _gantt_tickets(args, cfg, None)
         finally:
