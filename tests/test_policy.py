@@ -768,6 +768,13 @@ def test_junk_title_variants_all_blocked():
         "Audit installer retry diff for cross-file consistency",
         "Review OMP lineage-first model detection diff",
         "review the payments diff",  # case-insensitive
+        # Agents dropped the trailing "diff" after junk-title required it — still process junk.
+        "Review uncommitted 0.36.0 version bump",
+        "Review uncommitted raw-ticket guard test",
+        "Review the uncommitted pyproject.toml version bump from 0.37.0 to 0.38.0",
+        "Review: uncommitted 0.36.0 version bump",
+        "Review - uncommitted raw-ticket guard test",
+        "Read-only adversarial cross-file review of the current uncommitted rig-cli diff",
     ]
     for title in junk:
         assert junk_title_violation(Ticket(title=title), EnforceConfig()) is not None, title
@@ -792,6 +799,12 @@ def test_legitimate_review_shaped_titles_are_not_blocked():
         "Add code review checklist feature",
         "Fix login button diff-view alignment",
         "Review the payments module",  # no "diff" — real product ask
+        # "uncommitted" as a domain noun, not the review-uncommitted process template
+        "Audit uncommitted transaction handling",
+        "Add a review of uncommitted files to the status bar",
+        "Add a review of the current uncommitted files to the status bar",
+        "Support review of uncommitted transaction handling in the admin console",
+        "Add review of uncommitted document changes to the approval workflow",
     ]
     for title in legit:
         assert junk_title_violation(Ticket(title=title), EnforceConfig()) is None, title

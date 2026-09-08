@@ -5350,7 +5350,10 @@ def _classify_create(
         # through. Refuse loudly rather than silently persist a ticket that violates a rule with
         # no legitimate exception (task-cli#45 review finding: this is exactly the scenario the
         # non-skippable gate exists to prevent, and it must never be bypassed here either).
-        names = "; ".join(f"{v.gate}: {v.message}" for v in blocking)
+        names = "; ".join(
+            f"{v.gate}: {v.message}" + (f" ({v.hint})" if v.hint else "")
+            for v in blocking
+        )
         raise _UserError(
             f"cannot auto-create from this message — non-skippable gate(s) failed: {names}"
         )
