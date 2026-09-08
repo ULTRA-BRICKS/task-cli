@@ -3191,6 +3191,20 @@ def test_new_process_ticket_like_landing_263_does_not_create_github_issue(
     assert "harness task" in out
 
 
+def test_new_review_uncommitted_does_not_create_github_issue(capsys, _inject_fake):
+    """'Review uncommitted … diff' is the original junk-title template. task new must
+    not persist it to GitHub/Linear; process work belongs in harness task."""
+    argv = _create_argv(
+        **{"--title": "Review uncommitted agent-workflow documentation diff"}
+    )
+    argv[0] = "new"
+    rc = main(argv)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert _inject_fake.list() == []
+    assert "harness task" in out
+
+
 def test_change_not_touching_title_does_not_trigger_the_title_gate(_inject_fake):
     # a pre-existing tg#<id> in the title (created before this gate existed, or edited in the
     # web UI) must not block an UNRELATED edit that leaves the title alone.
