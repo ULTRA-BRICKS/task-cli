@@ -775,6 +775,7 @@ def test_junk_title_variants_all_blocked():
         "Review: uncommitted 0.36.0 version bump",
         "Review - uncommitted raw-ticket guard test",
         "Read-only adversarial cross-file review of the current uncommitted rig-cli diff",
+        "Review documentation diff for performance regressions",  # conloca/landing#263
     ]
     for title in junk:
         assert junk_title_violation(Ticket(title=title), EnforceConfig()) is not None, title
@@ -913,6 +914,9 @@ def test_junk_title_narrowed_shape_avoids_real_product_titles():
     legit = [
         "Audit diff-view authorization regression",
         "Review diff parser data-loss fix",
+        # Bare "diff for" is product-work phrasing, not the generated review template.
+        "Review diff for user-visible changes in the compare view",
+        "Audit diff for retained-message deletion behavior",
     ]
     for title in legit:
         assert junk_title_violation(Ticket(title=title), EnforceConfig()) is None, title
