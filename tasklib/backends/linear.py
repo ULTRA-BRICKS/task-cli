@@ -47,6 +47,7 @@ from . import AmbiguousBackendError, BackendError
 from .http import (
     AmbiguousHttpError,
     HttpError,
+    detect_content_type,
     https_host_matches,
     request_bytes,
     request_json,
@@ -487,7 +488,7 @@ class LinearBackend:
         # denied) from `getsize`/`open` would escape past that guard and crash a command whose
         # underlying create/update already succeeded. Wrap the whole local-file read window.
         try:
-            content_type = _detect_content_type(file_path)
+            content_type = detect_content_type(file_path)
             with open(file_path, "rb") as f:
                 body = f.read()
         except OSError as exc:
@@ -683,34 +684,6 @@ class LinearBackend:
         viewer = data.get("viewer")
         viewer_id = viewer.get("id") if isinstance(viewer, dict) else None
         return viewer_id if isinstance(viewer_id, str) and viewer_id else None
-
-
-_CONTENT_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".svg": "image/svg+xml",
-    ".pdf": "application/pdf",
-    ".txt": "text/plain",
-    ".log": "text/plain",
-}
-
-
-def _detect_content_type(file_path: str) -> str:
-    """The MIME type for a local file, by extension (falls back to
-    ``application/octet-stream``) — ``fileUpload`` requires it up front.
-
-    Deliberately does NOT also return a size via a separate ``os.path.getsize`` call (review
-    finding, TOCTOU): the caller reads the file's bytes anyway, and ``len(body)`` from that SAME
-    read is the authoritative size — a second, independent stat can observe a DIFFERENT size if
-    the file changes between the two syscalls, and Linear's signed PUT URL is scoped to an exact
-    ``x-goog-content-length-range`` from whatever size ``fileUpload`` was told, so a stale stat
-    would just fail the PUT with a range mismatch rather than silently upload wrong bytes.
-    """
-    ext = os.path.splitext(file_path)[1].lower()
-    return _CONTENT_TYPES.get(ext, "application/octet-stream")
 
 
 def _parse_upload_headers(raw) -> dict[str, str] | None:

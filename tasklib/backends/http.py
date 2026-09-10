@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
@@ -407,3 +408,34 @@ def request_bytes(
         raise HttpError(0, f"connection failed for {method} {url}: {exc.reason}") from exc
     except http.client.InvalidURL as exc:
         raise HttpError(0, f"invalid URL for {method} {url}: {exc}") from exc
+
+
+# MIME lookup shared by every backend's native-upload path (Linear's `fileUpload`, GitHub's
+# `user-attachments/assets`) — both require the content type up front, before the bytes are
+# sent. Kept here (not per-backend) so the two don't drift, review finding (this fix):
+# `linear.py` used to carry its own private copy as `_CONTENT_TYPES`/`_detect_content_type`.
+CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".log": "text/plain",
+}
+
+
+def detect_content_type(file_path: str) -> str:
+    """The MIME type for a local file, by extension (falls back to
+    ``application/octet-stream``) — both native-upload APIs (Linear's ``fileUpload``, GitHub's
+    ``user-attachments/assets``) require it up front.
+
+    Deliberately does NOT also return a size via a separate ``os.path.getsize`` call (review
+    finding, TOCTOU — originally found on Linear's private copy of this function, applies
+    identically here): the caller reads the file's bytes anyway, and ``len(body)`` from that
+    SAME read is the authoritative size.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    return CONTENT_TYPES.get(ext, "application/octet-stream")
