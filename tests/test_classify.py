@@ -8,6 +8,7 @@ from tasklib.classify import (
     Verdict,
     build_prompt,
     capability_head,
+    detect_multi_ask,
     parse_verdict,
     provider_available,
     resolve_chain,
@@ -453,3 +454,196 @@ def test_resolve_chain_no_capability_is_unchanged(monkeypatch):
     resolved = resolve_chain(list(DEFAULT_FALLBACKS), env)
     assert resolved is not None
     assert resolved.provider == "anthropic"
+
+
+# ── detect_multi_ask ─────────────────────────────────────────────────────────────────────────
+
+
+def test_single_topic_message_is_not_split():
+    msg = "Please fix the login bug on mobile Safari, users can't submit the form."
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_long_single_topic_paragraph_is_not_split():
+    # length alone is never a signal — a detailed paragraph about ONE thing stays one ask.
+    msg = (
+        "The pagination component drops the last row whenever the total count is exactly "
+        "divisible by the page size, and this also happens on the second page and every page "
+        "after it, and it seems to get worse the more pages there are, and I think it might be "
+        "an off-by-one in the slice bounds."
+    )
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_numbered_list_splits_into_items():
+    msg = "1. Fix the login bug\n2. Update the README\n3. Add a dark mode toggle"
+    items = detect_multi_ask(msg)
+    assert items == ["Fix the login bug", "Update the README", "Add a dark mode toggle"]
+
+
+def test_a_huge_list_declines_to_split_rather_than_explode():
+    # review finding (Medium): each split part costs its own classifier call and possible
+    # ticket creation — an unbounded split size is a real resource-exhaustion risk, not just a
+    # quality one. A message with hundreds of list-item lines must decline entirely rather than
+    # silently fire hundreds of classifier calls / ticket creations from one inbound message.
+    msg = "\n".join(f"- request number {i} needs triage" for i in range(1, 1001))
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_dash_bullet_list_splits_into_items():
+    msg = "- fix the login bug on mobile\n- also update the changelog"
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+    assert items[0] == "fix the login bug on mobile"
+    assert items[1] == "also update the changelog"
+
+
+def test_single_list_item_is_not_split():
+    # one bullet is not "a list of asks" — nothing to split against.
+    msg = "- just fix the login bug"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_preamble_before_the_first_bullet_declines_the_split():
+    # review finding (P1): an EARLIER version silently DISCARDED text before the first bullet
+    # ("Only enterprise plans:") — the shared constraint never reached ANY item. Now: decline
+    # to split at all rather than lose it.
+    msg = "Only enterprise plans:\n- add the flag\n- expose it in admin"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_nested_sub_bullet_is_not_its_own_top_level_ask():
+    # review finding (P1): an EARLIER version matched an INDENTED sub-bullet as its own
+    # independent ask. It must instead be swept into the containing (parent) item's text.
+    msg = "- fix the login bug\n  - it only happens on mobile Safari\n- update the changelog"
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+    assert "mobile Safari" in items[0]  # the nested detail stays attached to item 1
+    assert items[1] == "update the changelog"
+
+
+def test_trailing_shared_paragraph_after_the_last_bullet_declines_the_split():
+    # review finding (P1): an EARLIER version attached a shared closing constraint ONLY to the
+    # last item ("Both must preserve existing SSO behavior." applies to both bullets, not just
+    # the second). A blank-line-separated trailing paragraph in the last item's own block is
+    # exactly this shape — decline to split rather than misattribute it.
+    msg = "- add the flag\n- expose it in admin\n\nBoth must preserve existing SSO behavior."
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_trailing_shared_line_without_a_blank_line_also_declines_the_split():
+    # review finding (P2): the blank-line-only check above missed this shape — no blank line
+    # separates the shared closing constraint from the last bullet, but it is exactly as
+    # misattributable as the blank-line case.
+    msg = "- Rotate signing keys\n- Update client configuration\nBoth must use the new key identifier."
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_shared_line_sandwiched_between_two_bullets_also_declines_the_split():
+    # review finding (P2): an EARLIER version only checked the LAST item's block for an extra
+    # (flush, non-indented) line — a shared note sandwiched between a NON-last item and the next
+    # bullet was missed entirely, silently attaching "Both changes must preserve SSO." to only
+    # the first item.
+    msg = "- update client configuration\nBoth changes must preserve SSO.\n- rotate signing keys"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_semicolon_separated_asks_split():
+    msg = "fix the login bug on mobile Safari; update the onboarding email copy"
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+
+
+def test_semicolon_before_then_is_a_sequential_step_not_a_separate_ask():
+    # review finding: a semicolon alone doesn't distinguish "two independent requests" from
+    # "two ordered steps of one atomic task" — "then" is exactly that dependency signal.
+    msg = "Migrate tenant IDs by adding the tenant_id column; then backfill existing rows."
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_semicolon_before_russian_zatem_is_a_sequential_step_not_a_separate_ask():
+    msg = "добавь колонку tenant_id в таблицу; затем перенеси существующие записи"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_semicolon_inside_backtick_code_span_is_not_a_split_point():
+    # review finding: a semicolon inside inline code/a literal string belongs to THAT quoted
+    # content, not to the message's own structure — splitting on it produced two nonsensical
+    # fragments (a backtick-broken code span and dangling prose) for what is really one request.
+    msg = "Please preserve literal `alpha; beta gamma delta` in the generated output"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_semicolon_inside_double_quotes_is_not_a_split_point():
+    msg = 'Rename the field labeled "legacy; deprecated" to "archived" everywhere'
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_semicolon_outside_a_protected_span_still_splits():
+    # the protection is scoped to the quoted span itself — a REAL separator elsewhere in the
+    # same message must still work normally.
+    msg = 'rename the field labeled "legacy; deprecated"; also update the migration script'
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+
+
+def test_apostrophes_do_not_falsely_pair_up_and_hide_a_real_separator():
+    # review finding: an EARLIER version protected single-quoted spans too, and greedily paired
+    # up the FIRST two apostrophes in the message — "Don't ... user's" — hiding the real `;`
+    # separator between them. English contractions/possessives make single quotes too ambiguous
+    # to treat as quoting delimiters; only backticks/double-quotes are protected now.
+    msg = "Don't change the login flow; and also update the user's documentation"
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+
+
+def test_russian_a_esche_marker_splits():
+    msg = "почини баг с логином на мобильном сафари, а ещё обнови текст письма для онбординга"
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+
+
+def test_russian_takzhe_marker_splits():
+    msg = "почини баг с логином, также обнови документацию по установке"
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+
+
+def test_english_and_also_marker_splits():
+    msg = "fix the login bug on mobile Safari, and also update the onboarding email copy"
+    items = detect_multi_ask(msg)
+    assert len(items) == 2
+
+
+def test_bare_also_is_not_split():
+    # "also" alone commonly elaborates on the SAME ask rather than introducing a new one —
+    # deliberately excluded as a signal (see the module comment); only "and also" counts.
+    msg = "the bug happens on page one, and it also happens on page two"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_bare_and_conjunction_is_not_split():
+    # deliberate: "and"/"и" alone is the most common conjunction in ordinary prose and would
+    # misfire on nearly every multi-clause sentence — see the module comment for the reasoning.
+    msg = "fix the login bug and improve the error message shown to the user"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_bare_i_conjunction_is_not_split():
+    msg = "почини баг с логином и обнови текст ошибки для пользователя"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_trailing_short_fragment_after_semicolon_is_not_a_separate_ask():
+    msg = "fix the login bug on mobile Safari; thanks"
+    assert detect_multi_ask(msg) == [msg]
+
+
+def test_middle_short_fragment_declines_the_whole_split_not_just_that_fragment():
+    # review finding (P1): an EARLIER version dropped only the too-short fragment and returned
+    # the rest, so "add tests" here would silently VANISH — never classified, never ticketed —
+    # while the other two parts still split into separate tickets. The fix: when ANY fragment is
+    # too thin to trust as its own ask, decline to split at ALL (keep the whole message as one
+    # ask) rather than lose content.
+    msg = "fix login regression now; add tests; update API documentation"
+    assert detect_multi_ask(msg) == [msg]

@@ -15,13 +15,19 @@ They differ only in which screenshot kind is demanded; everything else is shared
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING, Sequence
 
-from .model import Criterion, Ticket
+from .model import Criterion, State, Ticket
 from .msgrefs import strip_quoted_blocks as _strip_quoted_blocks
 from .msgrefs import unquoted_msgrefs as _unquoted_msgrefs
 from .render import validate_format
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 # _strip_quoted_blocks (tasklib.msgrefs.strip_quoted_blocks) removes an appended tg#<id> quote
 # block before the `links`/`user-impact-quality` gates scan any text — that quote is machine-
@@ -62,6 +68,15 @@ GATE_MSGREF_TITLE = "msgref-title"
 # local tg-cli history yet unquoted; a reference to a message too old for local retention only
 # warns).
 GATE_MSGREF_QUOTE = "msgref-quote"
+# NOT a blocking content gate: `todo_shaped_warning` — the hint that a ticket reads as an
+# agent's own in-session process step ("review my uncommitted diff before I commit it") rather
+# than durable product work (see `tasklib.todo_hint`'s module docstring for the full rationale).
+# Deliberately advisory-only (routes through `PolicyResult.warnings`, never `violations`) — the
+# heuristic is necessarily coarse and a false positive must never block a legitimate ticket.
+# Still carries a real `--skip-todo-shaped "<reason>"` flag so a deliberate false positive is
+# silenced (and recorded) rather than nagging on every later command that re-scans the ticket.
+GATE_TODO_SHAPED = "todo-shaped"
+
 # The Links section must contain only real URLs. A bare, non-URL value (`Session: session:2`)
 # rendered as `- key: value` escaped the `links` gate entirely — that gate scans PROSE for bare
 # references, never the Links field itself — so junk masqueraded as a link (CTO report, tg#9179).
@@ -69,10 +84,113 @@ GATE_MSGREF_QUOTE = "msgref-quote"
 # author can't retroactively fix in one step.
 GATE_LINKS_URL = "links-url"
 
-# NOT a content gate `check()`/`Phase` ever evaluates — the create-time duplicate guard
-# (`cli._refuse_if_duplicate`) is a separate, session-scoped title-similarity check, not a
-# ticket-content rule. Named here anyway (rather than a bare string literal in cli.py) so the
-# `ticket.skips` key it records lives in the SAME namespace as every other gate name — a review
+# A title matching the auto-generated "review this diff" shape. An unchecked review pass or
+# inbound-message classifier files this EXACT template when it has no other actionable output:
+# the ticket can never lead to a merge (the review that files it runs read-only, often in a
+# worktree disconnected from the diff it names), so it just sits at status:todo forever and gets
+# refiled on the next pass over the same diff. A real, durable process step is never phrased this
+# way — this gate is a hard, non-skippable refuse ("'Review uncommitted' should guarantee no
+# ticket gets created"), not a warning, because there is no legitimate ticket the FULL template
+# below should ever match.
+#
+# Deliberately narrower than "starts with review/audit/adversarial and contains diff anywhere":
+# that shape over-blocks real product tickets whose title happens to mention a "diff" feature —
+# "Audit diff-view authorization regression", "Review diff parser data-loss fix" — because in
+# those, "diff" is an early NOUN/ADJECTIVE the title is ABOUT, not the trailing OBJECT of a
+# generated "review the diff" sentence. Every real generated example found fits one of four
+# specific shapes instead, so only those are matched:
+#   1. "uncommitted ... diff"                      — "Review uncommitted X diff"
+#   2. "review of ... diff"                        — "Adversarial cross-file review of X diff"
+#   3. "diff for cross-file consistency"           — "Audit X diff for cross-file consistency"
+#   4. starts review/audit/adversarial AND ends in "diff" (the bare form, nothing after it) —
+#      "Review OMP lineage-first model detection diff"
+# Plus two uncommitted shapes that do NOT require a trailing "diff" (agents dropped it after
+# shape 1 started blocking, and still filed GitHub issues — rig-cli#409/#436/#454):
+#   5. title starts "Review (the )uncommitted"     — "Review uncommitted 0.36.0 version bump"
+#   6. "review of (the )current uncommitted"       — "Read-only adversarial ... review of the
+#      current uncommitted rig-cli diff"
+# Shape 5/6 do not fire on "Audit uncommitted transaction handling" or a product title like
+# "Add a review of uncommitted files to the status bar" (no leading Review-uncommitted, no
+# "review of current uncommitted").
+#   7. "diff for performance"                      — "Review documentation diff for performance
+#      regressions" (conloca/landing#263). Kept as this phrase, not a bare "diff for", so a
+#      product title like "Review diff for user-visible changes in the compare view" still
+#      passes (junk-title is non-skippable).
+# None of the false-positive examples above end in a bare "diff", contain "uncommitted", "review
+# of", "diff for cross-file consistency", or "diff for performance" — so none of the seven
+# shapes fire on them.
+#
+# Scope boundary: this catches the auto-generated TEMPLATE shape at the create/edit boundary — the
+# threat model is an agent's classifier reflexively filing "Review uncommitted X diff", not an
+# adversary deliberately evading a security control. Accidental-encoding bypasses (trailing
+# punctuation, Unicode terminal characters, a stray zero-width space from a copy-paste) are in
+# scope and normalized away, because those change nothing a human would notice. Deliberate
+# evasion — homoglyphs ("Rеview" with a Cyrillic е), NFKC/fullwidth digit tricks, and similar — is
+# explicitly OUT OF SCOPE: an agent that wants to file junk under a different spelling always can,
+# and chasing every such variant turns a template-catcher into an unwinnable WAF. If a genuinely
+# adversarial actor becomes the real threat model here, that is a different gate.
+#
+# The title is whitespace-normalized (every run of whitespace, including a literal newline,
+# collapsed to one space) before matching: `--title` accepts an embedded newline from the CLI,
+# and `.` does not cross `\n` without `re.DOTALL` — a raw `"Review\nuncommitted policy diff"`
+# would otherwise slip past shape 1 unmatched.
+#
+# Trailing punctuation/markdown is then stripped too: shape 4's terminal matcher requires "diff"
+# to be the literal last word, so ordinary sentence punctuation or markdown wrapping — "Review the
+# payments diff.", "...diff!", "...`diff`" — would put a non-word character after "diff" and slip
+# past unmatched, even though it's still the same generated review-title shape. Match on `\w`
+# (Unicode word characters under Python 3's default str semantics), not an enumerated ASCII
+# punctuation class, so a Unicode terminal character — an ellipsis "…", a CJK full stop "。", a
+# typographic quote — is stripped the same way. Stripping is safe here because it only widens
+# which titles reach the phrase check below, never the phrase check itself — an unrelated title
+# stays unmatched regardless of trailing characters.
+_TRAILING_PUNCT_RE = re.compile(r"[^\w]+$")
+
+
+def _normalize_title_for_junk_check(title: str) -> str:
+    # Strip Unicode format characters (category "Cf": zero-width space, zero-width joiner, RTL/LTR
+    # marks, ...) BEFORE anything else: a zero-width space inserted between two letters of a
+    # required keyword ("di<ZWSP>ff") renders indistinguishably from the plain word but breaks
+    # `\bdiff\b`'s contiguous match, defeating the whole gate. These characters carry no visible
+    # width, so removing them can never change what a human reads.
+    no_format_chars = "".join(ch for ch in (title or "") if unicodedata.category(ch) != "Cf")
+    collapsed = re.sub(r"\s+", " ", no_format_chars).strip()
+    return _TRAILING_PUNCT_RE.sub("", collapsed)
+
+
+# Non-capturing: the lead is never back-referenced, only used to anchor each alternative below.
+_JUNK_TITLE_LEAD = r"^(?:review|audit|adversarial)\b"
+# Shape 5/6: "Review uncommitted" with no trailing "diff" required. Compiled separately so
+# they can search (shape 6 is often prefixed: "Read-only adversarial cross-file review of
+# the current uncommitted …") without loosening the lead-anchored shapes 1–4. Shape 6
+# requires the process phrase "current uncommitted", not a bare "review of … uncommitted",
+# so a product title about reviewing uncommitted files still creates.
+_JUNK_REVIEW_UNCOMMITTED = re.compile(
+    r"(?:^review\s*[:\-–—,.]?\s*(?:the\s+)?uncommitted\b|"
+    r"^(?:(?:read-only|adversarial|cross-file)\s+)*review of (?:the\s+)?current\s+uncommitted\b)",
+    re.IGNORECASE,
+)
+_JUNK_REVIEW_TITLE = re.compile(
+    _JUNK_TITLE_LEAD + r".*(?:"
+    r"\buncommitted\b.*\bdiff\b"  # 1
+    r"|\breview of\b.*\bdiff\b"  # 2
+    r"|\bdiff for cross-file consistency\b"  # 3
+    r"|\bdiff for performance\b"  # 7 — conloca/landing#263
+    r"|\bdiff\s*$"  # 4 — bare form, "diff" is the last word
+    r")",
+    re.IGNORECASE,
+)
+GATE_JUNK_TITLE = "junk-title"
+
+# NOT a content gate `check()`/`Phase` ever evaluates — like GATE_TODO_SHAPED, duplicate
+# detection needs I/O (candidate tickets fetched from the backend), which `check()` never does
+# by design. TWO mechanisms share this one gate name, both driven from `cli.py`:
+#   - `cli._refuse_if_duplicate` — a bespoke, session-scoped near-EXACT title-similarity hard
+#     block (unchanged by task-cli's duplicate-detection gate below; only `--force` overrides it).
+#   - `duplicate_violation`/`best_duplicate_match` below — the broader token/Jaccard-similarity
+#     net, reported through the standard `--skip-duplicate "<reason>"` escape.
+# Named here anyway (rather than a bare string literal in cli.py) so the `ticket.skips` key
+# either mechanism records lives in the SAME namespace as every other gate name — a review
 # finding: a magic string outside this module reads as "one more of these gates" without actually
 # being one.
 GATE_DUPLICATE = "duplicate"
@@ -97,7 +215,9 @@ DEFAULT_ACCEPTANCE_MIN = 2
 
 # Gates that NO recorded justification can waive — a hard refuse. A ticket must not be closed
 # with an unchecked criterion under any escape hatch; only disabling the gate in config removes it.
-NON_SKIPPABLE_GATES: frozenset[str] = frozenset({GATE_ACCEPTANCE_CHECKED, GATE_MSGREF_TITLE})
+NON_SKIPPABLE_GATES: frozenset[str] = frozenset(
+    {GATE_ACCEPTANCE_CHECKED, GATE_MSGREF_TITLE, GATE_JUNK_TITLE}
+)
 
 # NOT a gate: the recorded post-merge-acceptance opt-out (task-cli#115). A ticket whose
 # acceptance is inherently AFTER the merge (a release publish, a deploy the merge itself
@@ -123,6 +243,13 @@ ALL_GATES: tuple[str, ...] = (
     GATE_MSGREF_TITLE,
     GATE_MSGREF_QUOTE,
     GATE_READ_BEFORE_EDIT,
+    GATE_JUNK_TITLE,
+    # Listed here (mirroring GATE_READ_BEFORE_EDIT above) even though neither is evaluated
+    # inside `check()`'s own gate list the way the content gates are — both DO have a real
+    # `--skip-<gate>` flag wired in cli.py, so omitting either from "valid gates" would be the
+    # same latent trap the read-before-edit comment already warns about.
+    GATE_DUPLICATE,
+    GATE_TODO_SHAPED,
 )
 
 
@@ -175,6 +302,22 @@ class EnforceConfig:
     msgref_quote: bool = True  # refuse a body tg#<id> whose quote is missing yet resolvable (tg#9161)
     links_url: bool = True  # refuse a non-URL value in the Links section (tg#9179)
     read_before_edit: bool = True  # refuse `change --what` without a recent `read` (task-cli#119)
+    # Refuse the auto-generated "review this diff" title shape (task-cli#135). On by default and
+    # NOT per-ticket skippable (see GATE_JUNK_TITLE in NON_SKIPPABLE_GATES) — but, like every
+    # other gate here, a repo can turn the CHECK ITSELF off via `enforce.junk_title: false` if it
+    # genuinely has a legitimate ticket shaped this way; that is a repo-level policy call, not a
+    # per-ticket escape hatch a single caller can grant itself.
+    junk_title: bool = True
+    todo_shaped_hint: bool = True  # non-blocking "this looks like a process step" hint on create
+    # Governs BOTH duplicate-detection mechanisms in cli.py (the near-exact-title hard block
+    # `_refuse_if_duplicate` AND the broader token/Jaccard net `_enforce_similar_duplicate_or_die`
+    # / the classify-path fallback) — they share GATE_DUPLICATE, so one config key disables both
+    # (review finding: an earlier version invoked both unconditionally, with no way to turn
+    # duplicate detection off per repo, contradicting this file's own "every gate is disable-able
+    # via enforce:" contract). NOT consulted by `check()` itself — like GATE_DUPLICATE generally,
+    # duplicate detection needs I/O (candidate tickets) `check()` never does; cli.py reads this
+    # flag directly before calling either mechanism.
+    duplicate: bool = True
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "EnforceConfig":
@@ -225,6 +368,9 @@ class EnforceConfig:
             msgref_quote=_on("msgref_quote"),
             links_url=_on("links_url"),
             read_before_edit=_on("read_before_edit"),
+            junk_title=_on("junk_title"),
+            todo_shaped_hint=_on("todo_shaped_hint"),
+            duplicate=_on("duplicate"),
         )
 
 
@@ -288,6 +434,15 @@ def check(
     """
     raw: list[Violation] = []
     warnings: list[Violation] = []
+    if phase is Phase.CREATE:
+        # CREATE only (review finding, task-cli#135 round 2): running this in the generic
+        # DONE/close path too would make an already-existing junk ticket — created before this
+        # gate existed, exactly the backlog this gate's own audit found and closed by hand —
+        # permanently uncloseable. The documented contract ("checked on create and any --title
+        # edit") is enforced structurally here, not just in prose.
+        v = junk_title_violation(ticket, cfg)
+        if v is not None:
+            raw.append(v)
     raw.extend(_text_gates(ticket, cfg))
     # links + user-impact-quality are content rules enforced at BOTH create and close: a ticket
     # must not be CREATED carrying a bare reference / thin impact, and must not be CLOSED carrying
@@ -315,7 +470,20 @@ def check(
         if v is not None:
             raw.append(v)
     raw.extend(_formatting_gate(ticket, cfg))
-    return apply_skips(raw, ticket, warnings)
+    result = apply_skips(raw, ticket, warnings)
+    # todo-shaped: advisory-only, CREATE phase only (a ticket that's already been through create
+    # doesn't need re-nagging on every later `done`/`change` pass), and outside `apply_skips`'s
+    # normal violations/skipped split on purpose — this gate never contributes to `result.ok`,
+    # skipped or not; see GATE_TODO_SHAPED's module-level comment.
+    if phase is Phase.CREATE:
+        tv = todo_shaped_violation(ticket, cfg)
+        if tv is not None:
+            if gate_is_skipped(ticket, tv.gate):
+                if tv.gate not in result.skipped:
+                    result.skipped.append(tv.gate)
+            else:
+                result.warnings.append(tv)
+    return result
 
 
 def gate_is_skipped(ticket: Ticket, gate: str) -> bool:
@@ -445,6 +613,33 @@ def _scanned_text(ticket: Ticket) -> str:
     return _strip_quoted_blocks("\n".join(p for p in parts if p))
 
 
+def junk_title_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
+    """Refuse a title matching the auto-generated "review this diff" shape (see
+    :data:`_JUNK_REVIEW_TITLE` for why), unless a repo has explicitly disabled the CHECK itself
+    via ``enforce.junk_title: false``. No PER-TICKET escape hatch — no ``--skip-junk-title``, no
+    ``--force`` — that stays true regardless of ``cfg``; this is not a quality judgment a single
+    caller can waive, it is a structural fact about the title. A real review request belongs in
+    ``harness task`` (or a PR comment / review-cli run), never a product GitHub/Linear
+    ticket phrased this way."""
+    if not cfg.junk_title:
+        return None
+    normalized = _normalize_title_for_junk_check(ticket.title)
+    if _JUNK_REVIEW_TITLE.match(normalized) or _JUNK_REVIEW_UNCOMMITTED.search(normalized):
+        # Redact before it reaches the diagnostic (review finding): a title carrying a
+        # credential-shaped value ("Review ghp_... diff") must not have that value echoed
+        # verbatim into a message `_report_and_die` prints to stdout — the same posture
+        # `tasklib.logging.redact` already enforces for structured log fields.
+        from .logging import redact
+
+        return Violation(
+            GATE_JUNK_TITLE,
+            f"title matches the auto-generated 'review this diff' shape: {redact(ticket.title)!r}",
+            hint="process tickets belong in `harness task`, not the product GitHub/Linear tracker — "
+            "run `review diff`/`review quorum` or file the finding with `harness task` instead",
+        )
+    return None
+
+
 def links_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
     """Rule 1: every related entity named in the ticket must be a proper LINK, not a bare token.
 
@@ -454,16 +649,26 @@ def links_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
     """
     if not cfg.links:
         return None
+    from .links import linked_other_ids
     from .references import find_unlinked_references
 
-    refs = find_unlinked_references(_scanned_text(ticket))
+    # A bare reference that already has a structured `task link` entry pointing at it (its id
+    # sits in `ticket.links`, see `links.linked_other_ids`) is not a violation — the relation is
+    # already recorded in the `## Links` section, prose mentioning it again is not the "un-linked
+    # reference" this gate exists to catch (task-cli#154).
+    already_linked = linked_other_ids(ticket.links)
+    refs = [
+        r for r in find_unlinked_references(_scanned_text(ticket)) if r.text not in already_linked
+    ]
     if not refs:
         return None
     listed = "; ".join(f"{r.text} [{r.kind}]" for r in refs)
     return Violation(
         GATE_LINKS,
         f"related entities must be links, not bare references: {listed}",
-        hint="make each a markdown link [text](url) or paste a full URL; waive a false positive "
+        hint="write the link INSIDE the text field that names it (--what/--why/--impact/"
+        "--if-not-done/--acceptance): either a markdown link [text](https://…) or the bare "
+        "https://… URL — there is no --links flag; waive a false positive "
         'with --skip-links "<reason>" (works on new and on close; --force "<reason>" is a '
         "create/new-only shorthand)",
     )
@@ -594,10 +799,14 @@ def msgref_quote_reports(
     return deny, warn
 
 
-def _safe_display(s: str) -> str:
-    """Drop control/format characters so an untrusted link key/value can't inject a terminal
-    escape (ANSI colour, bidi override) into a diagnostic printed to the console or forwarded to
-    a Telegram notification. ``str.isprintable()`` is False for exactly those (Cc/Cf/Zl/Zp)."""
+def safe_display(s: str) -> str:
+    """Drop control/format characters so an untrusted value (a link key/value, a candidate
+    ticket's title) can't inject a terminal escape (ANSI colour, bidi override) into a
+    diagnostic printed to the console or forwarded to a Telegram notification.
+    ``str.isprintable()`` is False for exactly those (Cc/Cf/Zl/Zp). Public (no leading
+    underscore) because `cli.py` also sanitizes an untrusted candidate title with it — see
+    `duplicate_violation`'s, `cli._classify_create`'s, and the post-`task new` relatedness
+    nudge's call sites."""
     return "".join(ch for ch in s if ch.isprintable())
 
 
@@ -609,7 +818,7 @@ def _redact_link_display(s: str) -> str:
     repo's no-token-output posture rather than re-inventing redaction here (review finding)."""
     from .logging import redact
 
-    return _safe_display(redact(s))
+    return safe_display(redact(s))
 
 
 def _redact_link_value_display(key: str, value: str) -> str:
@@ -632,7 +841,7 @@ def _is_valid_link_key(key: str) -> bool:
     containing ``:`` reparses as ``{first: 'rest: value'}`` — the ticket passes the gate before
     persistence and FAILS after a backend round-trip (review finding). A key must therefore be
     non-empty, printable (no control/bidi injection), and free of ``:``."""
-    return bool(key.strip()) and _safe_display(key) == key and key == key.strip() and ":" not in key
+    return bool(key.strip()) and safe_display(key) == key and key == key.strip() and ":" not in key
 
 
 def is_http_url(value: str) -> bool:
@@ -732,6 +941,276 @@ def impact_quality_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | 
         hint="rewrite the impact in the user's terms (--impact on new, `task change --impact` on "
         'an existing ticket); waive with --skip-user-impact-quality "<reason>" (works on new and '
         'on close; --force "<reason>" is a create/new-only shorthand) if truly N/A',
+    )
+
+
+def todo_shaped_violation(ticket: Ticket, cfg: EnforceConfig) -> Violation | None:
+    """The non-blocking todo-vs-ticket hint (see GATE_TODO_SHAPED / `tasklib.todo_hint`).
+
+    Always returns a `Violation` shape (reused for both the warning and the "skipped, show it
+    in the audit" path in `check()`) — never itself decides blocking vs advisory; that split
+    lives in `check()`, the one place that knows a warning must never touch `PolicyResult.ok`.
+    """
+    if not cfg.todo_shaped_hint:
+        return None
+    from .todo_hint import assess_todo_shaped
+
+    problems = assess_todo_shaped(ticket.title, ticket.what)
+    if not problems:
+        return None
+    # The actionable guidance lives in `message`, not `hint`: `cli._report_and_die` prints
+    # `warnings` as `⚠ {gate}: {message}` only — `hint` is a `violations`-only field, never
+    # rendered for a warning (review finding). This IS the coordinator's required wording, so it
+    # must survive to the terminal.
+    return Violation(
+        GATE_TODO_SHAPED,
+        problems[0] + ". If this is genuinely a session-local process step, use your harness's "
+        "own TodoList tool (TodoWrite/TaskCreate) instead of task-cli.",
+        hint='silence this hint with --skip-todo-shaped "<reason>" if it is a false positive',
+    )
+
+
+# ── Duplicate detection (GATE_DUPLICATE) ────────────────────────────────────────────────────
+#
+# A companion ecosystem-wide audit found 13 confirmed duplicate tickets, all minted by `task
+# classify`'s auto-create path (`_classify_create` in cli.py). That path already dedups via
+# `_best_dedup_match` — a `difflib.SequenceMatcher` ratio on the derived TITLE ALONE — but that
+# catches only near-identical wording. Real duplicates are often worded differently for the
+# same underlying request ("Review OMP model-detection ordering diff" vs "Review OMP
+# lineage-first model detection diff"): same meaningful content, low SequenceMatcher ratio.
+#
+# `duplicate_violation`/`best_duplicate_match` add a second, complementary signal: TOKEN overlap
+# after stripping this codebase's own boilerplate vocabulary (every "review my diff" ticket
+# shares words like "review"/"diff"/"uncommitted", which would otherwise make nearly any two
+# tickets look similar — a false-positive cluster, not a real duplicate signal). The threshold
+# below (>=2 shared meaningful tokens AND Jaccard >=0.5) is the one specified by that audit's
+# findings, relayed as this ticket's brief — NOT independently re-run against the raw 13 here
+# (this implementer worked from a small sample of the resulting GitHub issue titles, not the
+# audit's own dataset). **Reviewer: please re-check this threshold, and the min-tokens-per-side
+# floor just below it (this implementer's own addition, added AFTER hitting a real false
+# positive in this repo's own test suite — see its comment), against the actual 13 before
+# merging** — a real duplicate with a thin title on both sides would silently fall through it.
+#
+# CONFIRMED, ACCEPTED false-positive class (adversarial review, not merely theoretical): two
+# genuinely DIFFERENT pieces of work that share dense domain vocabulary can clear this
+# threshold purely on shared nouns — "Encrypt API token storage" vs "API token storage
+# rotation" share {api, token, storage} (3 tokens, Jaccard 0.6) despite being distinct security
+# work (encryption-at-rest vs. key rotation); their only real differentiator ("encrypt" vs.
+# "rotation") is a minority of the tokens. Verified this is NOT fixable by retuning
+# DUPLICATE_MIN_SHARED_TOKENS/DUPLICATE_JACCARD_THRESHOLD alone: this false positive (Jaccard
+# 0.6) scores HIGHER than the real reworded-duplicate case this module's own tests pin ("Review
+# OMP model-detection ordering diff" vs "...lineage-first model detection diff", Jaccard 0.5) —
+# any threshold strict enough to exclude the former would also exclude the latter. Closing this
+# properly needs term-specificity weighting (TF-IDF-like: "storage"/"api"/"token" are generic
+# across many tickets, "encrypt"/"rotation" are the real signal) — out of scope for a token-set
+# Jaccard heuristic. Accepted as a bounded cost because the gate is SOFT and cheaply escaped
+# (`--skip-duplicate "<reason>"` / `--force`, one flag) — see test_policy.py's pinning test for
+# this exact pair. If the false-positive rate turns out to matter more than that in practice,
+# retuning needs the real 13-ticket audit dataset to validate against, not a guess from here.
+#
+# Deliberately kept SESSION-scoped (candidates come from the same `_session_dedup_candidates`
+# `_refuse_if_duplicate`/`_classify_create` already use) rather than widened to every open
+# ticket in the repo — `test_create_dedup_scoped_to_session_not_global` pins that scoping as an
+# intentional design choice (a same-title ticket from a DIFFERENT session must not block this
+# one), and the audit's report (as relayed) described the 13 as same-session clusters.
+
+# Words generic across nearly every review/process-step ticket this codebase's own tooling
+# generates — stripped before comparison so two UNRELATED tickets that both happen to be
+# "review ... diff" tickets don't score as similar just because they share that boilerplate.
+# Deliberately narrow and codebase-specific, not a general English stopword list.
+_DUPLICATE_BOILERPLATE_WORDS = frozenset(
+    {
+        "review", "reviewed", "reviewing", "uncommitted", "diff", "diffs", "cross", "file",
+        "consistency", "the", "a", "an", "for", "of", "and", "or", "to", "in", "on", "with",
+        "this", "that", "before", "committing", "commit", "shipping", "ship", "changes",
+        "change", "code", "adversarial",
+    }
+)
+
+# Split on ANY non-word boundary, including hyphens: "model-detection" -> "model", "detection",
+# so it intersects with a candidate that happens to write the same concept as two separate
+# words. Also why the boilerplate set above lists "cross"/"file" separately rather than
+# "cross-file" as one entry. `[^\W_]+` (NOT `[a-z0-9]+`, review finding P1) is Unicode-aware —
+# letters/digits in ANY script, underscore excluded — because task-cli's own classify intake is
+# explicitly documented to handle Russian messages (see classify.py's multi-ask module comment);
+# an ASCII-only pattern silently tokenized a Cyrillic title/body to ZERO tokens, so every
+# Russian reworded-duplicate check silently no-opped (`_DUPLICATE_MIN_TOKENS_PER_SIDE` would
+# never be met) with no error, warning, or test ever exercising that path.
+_DUPLICATE_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+# From the audit's brief (see module comment above — not independently re-verified here).
+DUPLICATE_MIN_SHARED_TOKENS = 2
+DUPLICATE_JACCARD_THRESHOLD = 0.5
+
+# A THIN title (after boilerplate stripping) makes Jaccard unreliable regardless of the
+# threshold above: a 2-token title sharing both tokens with an unrelated 2-token title scores a
+# perfect 0.5-1.0 Jaccard on pure coincidence ("Add a thing" vs "Add a second, unrelated
+# thing" — a real false positive this floor was added to fix, caught by this repo's own test
+# suite: test_list_label_filters_session_view and friends in tests/test_cli.py). This floor is
+# THIS implementer's own addition, not part of the audit's specified threshold, and has NOT been
+# checked against the real 13 duplicates — it is plausible a real duplicate with thin titles on
+# both sides (e.g. a 2-token title) would now fall through it. Flagging for reviewer follow-up
+# (see the module comment above) rather than silently shipping an unverified floor.
+_DUPLICATE_MIN_TOKENS_PER_SIDE = 3
+
+# The "extra cheap signal" (same session, minted within this window) is deliberately NOT a
+# separate, lower-bar trigger — an EARLIER version of this file relaxed the match threshold to
+# 1 shared token + Jaccard >=0.3 for a same-session-recent candidate, and an adversarial review
+# broke it immediately: two GENUINELY DIFFERENT requests in the same session five minutes apart
+# — "Postgres retry failures require driver upgrade" and "Upgrade driver for Postgres replica
+# failover" — share only common domain vocabulary ("postgres"/"driver"/"upgrade") at Jaccard
+# 0.375, comfortably below the PRIMARY threshold (0.5) yet enough to trip that relaxed one. Real
+# tickets on the same topic routinely share 2-3 domain words without being duplicates, so ANY
+# threshold low enough to catch the audit's 13 near-identical same-session tickets is also low
+# enough to catch unrelated same-session tickets that happen to share domain vocabulary — the
+# two failure modes are not separable by token overlap alone at this scale. So: same-session-
+# recency is now ONLY ever used to ANNOTATE a match that ALREADY cleared the primary threshold
+# (see `_same_session_recent` / `duplicate_violation`'s message) — it never lowers the bar.
+DUPLICATE_SESSION_WINDOW_MINUTES = 60
+
+
+def _duplicate_tokens(text: str) -> set[str]:
+    """Lowercase word-ish tokens, boilerplate stripped, single-character tokens dropped.
+
+    Generated ``tg#<id>`` quote blocks are stripped first: they are the same machine-appended
+    excerpt on every ticket that referenced that message, so leaving them in would let one
+    shared quote dominate the Jaccard sets of otherwise unrelated tickets.
+    """
+    text = _strip_quoted_blocks(text)
+    tokens = {t for t in _DUPLICATE_TOKEN_RE.findall(text.lower()) if len(t) > 1}
+    return tokens - _DUPLICATE_BOILERPLATE_WORDS
+
+
+def _parse_backend_timestamp(value: str) -> "datetime | None":
+    """Parse a backend `updated_at` (GitHub/Linear ISO8601, typically `...Z`) leniently.
+
+    Returns `None` on anything unparseable — the time-proximity signal is then simply unusable
+    for that candidate, never an error (this predicate must stay pure and never raise on real
+    backend data, which occasionally omits or malforms this field). Guards against a non-string
+    value too (review finding): a backend that ever passed a raw int/float through would crash
+    `.replace()` below, breaking this function's own "never raise" promise."""
+    from datetime import datetime
+
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _same_session_recent(candidate: Ticket, new_session: str | None, now: "datetime | None") -> bool:
+    """Whether `candidate` was filed in `new_session`, within `DUPLICATE_SESSION_WINDOW_MINUTES`
+    of `now`. Purely an ANNOTATION signal (see the module comment on `DUPLICATE_SESSION_WINDOW_
+    MINUTES` for why this is never allowed to lower the match threshold) — used only to add
+    corroborating context to an ALREADY-matched violation's message. `None` `new_session`/`now`
+    (the caller declined to supply session/time context) always returns `False`."""
+    if not new_session or now is None:
+        return False
+    if candidate.session_label() != new_session:
+        return False
+    ts = _parse_backend_timestamp(candidate.updated_at)
+    if ts is None:
+        return False
+    # A naive `ts` (no offset in the source string) can't be subtracted from an AWARE `now`
+    # (`datetime.now(timezone.utc)`, what every real caller passes) without TypeError.
+    # GitHub/Linear both emit an offset, so this is a defensive normalize for a malformed/legacy
+    # value, not the expected path — assume UTC rather than raise (must never crash `task new`).
+    if ts.tzinfo is None:
+        from datetime import timezone as _timezone
+
+        ts = ts.replace(tzinfo=_timezone.utc)
+    try:
+        delta = (now - ts).total_seconds()
+    except TypeError:
+        return False
+    return 0 <= delta <= DUPLICATE_SESSION_WINDOW_MINUTES * 60
+
+
+def best_duplicate_match(
+    new_title: str,
+    new_body: str,
+    candidates: Sequence[Ticket],
+    new_session: str | None = None,
+    now: "datetime | None" = None,
+) -> Ticket | None:
+    """The best token/Jaccard-similarity duplicate among `candidates`, or `None`.
+
+    `new_body` is typically `what` (the ticket's core description) — the same field the
+    candidates' own `what` is compared against. `new_session`/`now` are used ONLY to pick the
+    same-session-recent candidate as the tiebreak among several equally-scored matches (see
+    module comment: they never lower the match threshold itself). Closed/done candidates are
+    excluded (a duplicate of a CLOSED ticket isn't a duplicate — it's exactly the shape a
+    re-filed real bug should take)."""
+    new_tokens = _duplicate_tokens(f"{new_title}\n{new_body}")
+    if len(new_tokens) < _DUPLICATE_MIN_TOKENS_PER_SIDE:
+        return None  # too thin to judge similarity reliably (see the floor's module comment)
+    best: tuple[float, int, bool, Ticket] | None = None
+    for candidate in candidates:
+        if candidate.state in (State.DONE, State.CANCELLED):
+            continue
+        cand_tokens = _duplicate_tokens(f"{candidate.title}\n{candidate.what}")
+        if len(cand_tokens) < _DUPLICATE_MIN_TOKENS_PER_SIDE:
+            continue
+        shared = new_tokens & cand_tokens
+        union = new_tokens | cand_tokens
+        jaccard = len(shared) / len(union) if union else 0.0
+        matched = (
+            len(shared) >= DUPLICATE_MIN_SHARED_TOKENS
+            and jaccard >= DUPLICATE_JACCARD_THRESHOLD
+        )
+        if not matched:
+            continue
+        # Same-session-recency only breaks a TIE among candidates that already cleared the
+        # match threshold on their own (never a reason to match on its own — see module comment).
+        recent = _same_session_recent(candidate, new_session, now)
+        score = (jaccard, len(shared), recent)
+        if best is None or score > best[:3]:
+            best = (jaccard, len(shared), recent, candidate)
+    return best[3] if best else None
+
+
+def duplicate_violation(
+    new_title: str,
+    new_body: str,
+    candidates: Sequence[Ticket],
+    new_session: str | None = None,
+    now: "datetime | None" = None,
+) -> Violation | None:
+    """`best_duplicate_match`, turned into a `Violation` for the standard skip/report pipeline.
+
+    Distinct from the pre-existing near-exact-title hard block (`cli._refuse_if_duplicate`,
+    kept as-is): this is the broader, token-based net, reported as a normal skippable gate
+    rather than a bespoke early refusal.
+    """
+    match = best_duplicate_match(new_title, new_body, candidates, new_session=new_session, now=now)
+    if match is None:
+        return None
+    # Same-session-recency is corroborating CONTEXT in the message only — it never decided the
+    # match itself (see best_duplicate_match's module comment).
+    context = (
+        " (same session, filed recently)"
+        if _same_session_recent(match, new_session, now)
+        else ""
+    )
+    # No "--skip-duplicate"/"--force" in the hint here — `cli._report_and_die` already
+    # auto-appends `(or --skip-{gate} "<reason>")` to every non-hard violation's hint (see its
+    # own comment at the print site); repeating it here would double-print (task-cli#119 review
+    # finding, the same class this gate's own docstring precedent warns against).
+    #
+    # `match.title` is UNTRUSTED — it's a candidate ticket's title read back from the backend,
+    # which could carry a hand-crafted ANSI/bidi control sequence (review finding, P2: a title
+    # containing a terminal escape, printed verbatim into this diagnostic, could clear/spoof the
+    # console) or a token-shaped credential. Run the logging redactor (same as
+    # junk_title_violation / _redact_link_display) then safe_display so neither class of payload
+    # reaches stdout.
+    from .logging import redact
+
+    shown = safe_display(redact(match.title))
+    return Violation(
+        GATE_DUPLICATE,
+        f"a similar ticket may already exist{context}: {match.id}  {shown}",
+        hint=f"task read '{match.id}' to check — if this is genuinely separate work, create it anyway",
     )
 
 
@@ -874,6 +1353,9 @@ def normalize_skip_gate(name: str) -> str:
         "links-url": GATE_LINKS_URL,
         "link-url": GATE_LINKS_URL,
         "read-before-edit": GATE_READ_BEFORE_EDIT,
+        "duplicate": GATE_DUPLICATE,
+        "todo-shaped": GATE_TODO_SHAPED,
+        "todo": GATE_TODO_SHAPED,
     }
     if norm in aliases:
         return aliases[norm]

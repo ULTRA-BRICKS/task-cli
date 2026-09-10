@@ -20,6 +20,7 @@ from tasklib.gantt import (
     layout,
     render,
     status_for,
+    to_html,
     to_json,
 )
 from tasklib.model import State, Ticket
@@ -341,3 +342,48 @@ def test_fit_width_clamps_to_band():
     assert fit_width(20) == DEFAULT_WIDTH  # too narrow → fall back to default (scrolls)
     mid = fit_width(80)
     assert 20 <= mid <= DEFAULT_WIDTH
+
+
+# ── HTML+SVG (the browser chart, same geometry as the terminal render) ───────────────
+
+
+def test_to_html_contains_svg_bar_for_dated_ticket():
+    chart = layout([_t("#1", "dated one", due="2026-07-01")], TODAY, width=40)
+    page = to_html(chart, TODAY)
+    assert "Gantt" in page
+    assert "<svg" in page.lower()
+    assert "gantt-bar" in page
+    assert "dated one" in page
+    assert "<script" not in page.lower()
+
+
+def test_to_html_escapes_ticket_titles():
+    chart = layout([_t("#1", "<script>x</script>", due="2026-07-01")], TODAY, width=40)
+    page = to_html(chart, TODAY)
+    assert "<script>x</script>" not in page
+    assert "&lt;script&gt;" in page
+
+
+def test_to_html_lists_undated_and_survives_empty():
+    mixed = layout(
+        [_t("#1", "dated", due="2026-07-01"), _t("#2", "no due here")],
+        TODAY,
+        width=40,
+    )
+    page = to_html(mixed, TODAY)
+    assert "no due here" in page
+    assert "undated" in page.lower()
+    empty = to_html(layout([], TODAY, width=40), TODAY)
+    assert "<svg" in empty.lower()
+    assert "no tickets" in empty.lower()
+
+def test_to_html_truncates_long_title_to_gutter():
+    long = "x" * 80
+    chart = layout([_t("#1", long, due="2026-07-01")], TODAY, width=40)
+    page = to_html(chart, TODAY)
+    tooltip = f"<title>#1 {long}</title>"
+    assert tooltip in page
+    without_tooltip = page.replace(tooltip, "")
+    assert long not in without_tooltip
+    assert "…" in without_tooltip
+

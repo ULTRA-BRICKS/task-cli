@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 
 from ..model import Attachment, State, Ticket
 from ..render import parse, render
+from ..taskref import TaskRefError, linear_identifier
 from . import AmbiguousBackendError, BackendError
 from .http import (
     AmbiguousHttpError,
@@ -233,6 +234,8 @@ class LinearBackend:
             # section) still carries its due date; parse() lets the body's Due section override.
             due=str(node.get("dueDate") or "").strip(),
             updated_at=str(node.get("updatedAt") or ""),
+            created_at=str(node.get("createdAt") or ""),
+            closed_at=str(node.get("completedAt") or node.get("canceledAt") or ""),
             reporter=str((node.get("creator") or {}).get("id") or ""),
             # Unlike GitHub, Linear's normalized state IS derived straight from its native
             # workflow state (no separate managed label to lag behind it), so there is no
@@ -257,7 +260,7 @@ class LinearBackend:
         )
         return parse(node.get("description") or "", base)
 
-    _ISSUE_FIELDS_BASE = "id identifier url title description dueDate updatedAt state{type name} labels{nodes{name}} creator{id}"
+    _ISSUE_FIELDS_BASE = "id identifier url title description dueDate updatedAt createdAt completedAt canceledAt state{type name} labels{nodes{name}} creator{id}"
     # review finding: Linear's `attachments` connection defaults to a 50-item page — an issue
     # with 51+ attachments would silently lose everything past the first page. `first: 250` is
     # not exhaustive cursor-based pagination (a genuinely unbounded connection would still need
@@ -312,6 +315,10 @@ class LinearBackend:
         return self._node_to_ticket(res["issue"])
 
     def _issue_by_identifier(self, ticket_id: str) -> dict:
+        try:
+            ticket_id = linear_identifier(ticket_id, self.team_key)
+        except TaskRefError as exc:
+            raise BackendError(str(exc)) from exc
         data = self._gql(
             "query($id:String!){issue(id:$id){" + self._ISSUE_FIELDS + "}}",
             {"id": ticket_id},

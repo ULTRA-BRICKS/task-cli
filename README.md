@@ -44,8 +44,12 @@ task create                        # alias of `new` (same arguments, same gates)
 task list                          # THIS session's tickets (falls back to all when empty)
 task list --all                    # every known project's tickets, grouped by project
 task gantt        [--all] [--json] # read-only due-date timeline (Gantt) — see below
+task burn         [--all] [--json] [--since YYYY-MM-DD] [--until YYYY-MM-DD]  # remaining-over-time burn chart — see below
+task web start|stop|status|run [--port N]  # local HTML burn chart (default http://127.0.0.1:8765/burn)
 task read <id>     (alias: view)   # the full ticket — every section (works outside a repo)
 task find "<query>"                # search title+body (cross-project when outside a repo)
+task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of — writes a
+#   structured ## Links entry, mirrored on the other ticket (see "Linking tickets" below)
 task check <id> <n|text> --proof p # tick an acceptance criterion (needs a visual proof)
 task check <id> 1 2 3 --proof a --proof b --proof c  # several at once, one proof each (in order)
 task check <id> --all --proof p    # every criterion, one shared proof
@@ -57,6 +61,7 @@ task mark-shipped <id> --pr <url> [--commit <sha>]  # record a merged PR; NEVER 
 #   ticket (the `gh ship` post-merge hook — see agent-tools' ci/ship/ship.sh) — moves
 #   TODO/IN_PROGRESS to in-review, posts a durable comment, and prints what's still needed
 #   before a genuine `task done`.
+task attach <id> <path> [path...]  # add implementation screenshot(s) (Playwright/agent-browser capture, not screencapture)
 task done <id>    [--screenshot p] # close a ticket — runs the on-done gates (all criteria checked)
 task change <id>  [--due ...] [--done]  # update; --due sets/clears the due date; --done closes (gates)
 task status <id> [<new-state>]     # read or transition state (works outside a repo)
@@ -192,6 +197,43 @@ date** are listed in a clearly-marked `undated` section — never hidden. It is 
 no ticket is mutated. Output is paged like `list` in an interactive terminal (`--no-pager` /
 `NO_PAGER` opt out); `--json` is never paged.
 
+### Burn chart (`task burn`)
+
+`task burn` is a **read-only** remaining-over-time chart: it plots how many tickets are
+still open on each calendar day, using each ticket's created/closed timestamps from
+GitHub (`created_at` / `closed_at`) or Linear (`createdAt` / `completedAt` or
+`canceledAt`). A ticket closed on day D is gone on D. The ideal line is a straight
+drop from the first day's remaining count to zero on the last day.
+
+```
+task burn                      # this session's tickets (OPEN+CLOSED) as a burn chart
+task burn --all                # every known project's tickets
+task burn --json               # remaining / ideal series (window + per-day counts)
+task burn --html               # self-contained HTML+SVG on stdout (not paged)
+task burn --since 2026-06-01 --until 2026-06-30
+task burn --width 60           # override chart width (default: auto-fit the terminal)
+```
+
+Empty input prints a "no tickets" message and exits 0. Nothing is mutated.
+
+### Web (`task web start|stop|status|run`)
+
+`task web` serves the burn and gantt charts as local pages (stdlib `http.server`,
+127.0.0.1 only). Lifecycle matches the reminder daemon, but the pid-file identity
+includes `web` so the two cannot be confused.
+
+```
+task web run                   # foreground server on http://127.0.0.1:8765/
+task web start                 # detach (idempotent — already-running is a no-op)
+task web status                # running/stopped + pid + url
+task web stop                  # SIGTERM, then clear the pid-file
+task web run --port 9000       # override the listen port
+```
+
+Pages: `/` (both SVG charts), `/burn` and `/gantt` (HTML+SVG), `/burn.json` and
+`/gantt.json`. Append `?all=1` to chart every ticket, not just this session.
+Each HTML page has a nav between Both / Burn / Gantt. No CDN, no JavaScript.
+
 ### Example
 
 ```bash
@@ -223,7 +265,8 @@ On `create`, and again on `change`→`done`:
 4. **Related entities are links** — anything that names another entity (a tracker id like
    `HYP-789`, an issue/PR `#123`, a commit SHA, a repo/path slug) must be a proper **link**
    (markdown link / full URL), not a bare token. The scan is broad; `--force "<reason>"`
-   overrides a genuine false positive.
+   overrides a genuine false positive. An id already carrying a structured `task link` entry
+   (see "Linking tickets" below) is exempt — it won't ALSO be flagged when mentioned in prose.
 5. **Screenshots** — required at *creation* and at *done* for UI/visual tickets (label-gated,
    configurable). The on-done gate demands the **implementation** proof specifically — a
    creation mock does not let you close a UI ticket. That is why the gate runs twice.
@@ -238,7 +281,8 @@ On `change`→`done` (close) two more gates apply:
    <selector> --proof <path>` and that requires a screenshot/image. When a proof is genuinely
    impossible, `task check … --force "<reason>"` records the reason on the criterion (audited).
 
-Every gate except *every-criterion-checked* and *msgref-title* has an **escape hatch**:
+Every gate except *every-criterion-checked*, *msgref-title*, and *junk-title* has an **escape
+hatch**:
 `--skip-<gate> "<reason>"` (or `--force "<reason>"` on `create`/`new` for the links /
 user-impact-quality gates) writes the justification into the ticket's `Skipped gates` section
 (auditable, recorded forever). Gates are also disable-able per repo via `enforce:` in config.
@@ -256,8 +300,11 @@ user-impact-quality gates) writes the justification into the ticket's `Skipped g
 | screenshots | `--screenshot <path>` | `--skip-screenshots "<reason>"` |
 | formatting | (automatic — body is rendered) | `--skip-formatting "<reason>"` |
 | msgref-title | keep `--title` free of a `tg#<id>` reference (put it in `--what`/`--why`/etc. instead) | **none** (hard; disable in config only via `enforce.msgref_title: false`) |
+| junk-title (create, and any `--title` edit) | don't phrase a title as "Review uncommitted …", "Review/Audit/Adversarial [review of] ... diff", or "... diff for performance" — that shape is process work for `harness task`, never the product GitHub/Linear tracker; run `review diff`/`review quorum` or `harness task` instead | **none** (hard; disable the check itself only via `enforce.junk_title: false`) |
 | acceptance-checked (close) | `task check <id> <n> --proof <path>` for each | **none** (hard; disable in config only) |
 | read-before-edit (`change --what` only) | `task read <id>` (or `task view <id>`) THIS session, recently, before overwriting `--what` | `--skip-read-before-edit "<reason>"` — a *persisted* skip from an earlier command never silently waives a later, still-unread one |
+| duplicate (`create`/`new`, token/Jaccard) | give the title/what real, distinguishing content | `--skip-duplicate "<reason>"` (or `--force "<reason>"`) |
+| todo-shaped (`create`/`new`, non-blocking) | rewrite the title/what as a durable, reusable concern | `--skip-todo-shaped "<reason>"` — never blocks even unskipped, see below |
 
 The **read-before-edit** gate (task-cli#119) refuses `task change <id> --what "..."` unless this
 same working session has run `task read <id>` (or just created that ticket with `task new`/
@@ -287,6 +334,52 @@ for local retention, or `tg-cli` isn't installed here. Passing `--skip-msgref-qu
 waives the gate AND suppresses expansion for that command (so a false-positive `tg#N` isn't quoted
 at all). Both gates are disable-able per repo via `enforce.links_url: false` /
 `enforce.msgref_quote: false`.
+
+The **duplicate** gate (`create`/`new` only, `tasklib/policy.py`'s `duplicate_violation`/
+`best_duplicate_match`) is a second, broader net alongside the pre-existing near-exact-title
+block: it compares the new title/what against this session's already-open tickets by TOKEN
+overlap (after stripping this codebase's own boilerplate vocabulary — "review"/"diff"/
+"uncommitted"/…) and flags a match at ≥2 shared meaningful tokens AND Jaccard ≥0.5 — thresholds
+validated against a real ecosystem audit's 13 confirmed duplicates. It catches a REWORDED
+duplicate of the same request the exact-title check misses ("Review OMP model-detection
+ordering diff" vs "Review OMP lineage-first model detection diff"). `task classify`'s
+auto-create path (the hook a repeated inbound message actually goes through) also runs this
+matcher as a fallback when its own near-exact check finds nothing — but only as a WARNING
+("possible duplicate of #N ... creating a new ticket anyway"), never to fold the message into a
+comment: `classify` has no `--skip-duplicate` escape (its parser exposes only `--create`/
+`--update`) and is typically driven autonomously with no human in the loop, so a known false
+positive (see below) auto-folding into an unrelated ticket would be an invisible, unrecoverable
+mistake there. `task new`/`create`'s near-exact-title check still auto-folds on `classify` —
+only the broader token/Jaccard net is advisory-only on that path.
+
+The **todo-shaped** gate (`create`/`new` only, `tasklib/todo_hint.py`) is deliberately
+NON-BLOCKING: it never refuses a create, even unskipped — it prints a hint when the title/what
+reads like an agent's own in-session process step ("review my uncommitted diff before I commit
+it", "adversarial review of...") or names a review/diff-check step with an empty What section,
+suggesting the harness's own ephemeral TodoList tool (TodoWrite/TaskCreate) instead. Silence a
+false positive with `--skip-todo-shaped "<reason>"` (or `--force "<reason>"`) so it isn't
+re-printed on a later command that re-scans the ticket.
+
+### Linking tickets — `task link` + the post-create nudge
+
+```
+task link <id> blocks <other-id>         # <id> blocks <other-id>
+task link <id> blocked-by <other-id>     # <id> is blocked by <other-id>
+task link <id> relates-to <other-id>     # symmetric — no canonical direction
+task link <id> duplicate-of <other-id>   # <id> is a duplicate of <other-id> (the canonical one)
+```
+
+Writes a structured entry into `<id>`'s `## Links` section (e.g. `Blocks #149: <url>`).
+`blocks`/`blocked-by`/`relates-to` also write the mirrored entry on the OTHER ticket (`A blocks
+B` implies `B is blocked-by A`); `duplicate-of` is deliberately one-sided (marking something a
+duplicate of a popular ticket shouldn't spam that ticket's own Links section with every dupe
+that ever pointed at it). Re-running the same `task link` call is a no-op — it never adds a
+second entry for the same relation + ticket pair.
+
+After a successful `task new`/`create`, a cheap same-repo scan (title/label keyword overlap —
+no embeddings, no fuzzy matching) checks currently-open tickets for plausible relatives and
+prints a nudge with the exact `task link` command for each candidate. It only ever *suggests* —
+nothing is auto-linked, and a scan hiccup never fails the create.
 
 ### Checking criteria off — `task check`
 
@@ -477,6 +570,18 @@ change requests; that bias never applies to a genuine `actionable` signal, which
 recognized via the model's explicit `VERDICT: actionable` sentinel. `task classify "<text>"
 --create` is the entry point the `tg-cli` inbound hook calls.
 
+**Multi-ask detection** (`tasklib/classify.py`'s `detect_multi_ask`) splits a message that
+structurally bundles several distinct asks — a numbered/bulleted list, or clauses joined by an
+explicit enumeration marker (English "and also", or the Russian equivalents of "and also
+also"/"also"/"in addition" — see `_ENUMERATION_SEP_RE` in `classify.py` for the exact patterns
+this repo's English-only-docs rule keeps out of here — or a semicolon) — into separate items
+BEFORE classification, printing "N distinct asks detected" and running the rest of `classify`
+once per item (so `--create` files one ticket per ask instead of one vague ticket for all of
+them). An ordinary single-topic message, however long, is never split — a bare English "and"
+(or its Russian equivalent) is deliberately NOT a signal (see the module docstring for why).
+Only applies to `--create`; `--update <ID>` names one explicit target for the whole raw message
+and is left unsplit.
+
 ## Config — `rig.yaml` `task:` block (per-repo) + `task.yaml` + global
 
 The per-repo tracker backend is selected from the repo's committed **`rig.yaml`** — the single
@@ -523,6 +628,11 @@ enforce:
   links_url: required                # the ## Links section holds http(s):// URLs only
   msgref_quote: required             # a body tg#<id> must carry its auto-attached quote
   read_before_edit: true             # `change --what` needs a recent `read` this session first
+  todo_shaped_hint: true             # non-blocking "this looks like a process step, not a
+                                      # durable ticket" hint on create (--skip-todo-shaped to
+                                      # silence a false positive)
+  duplicate: true                    # governs BOTH duplicate-detection mechanisms on create
+                                      # (near-exact-title hard block + the token/Jaccard net)
   screenshots:
     on_create: { required_if_label: [ui, visual] }
     on_done:   { required_if_label: [ui, visual] }

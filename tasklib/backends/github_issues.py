@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from ..model import State, Ticket
 from ..render import parse, render
+from ..taskref import TaskRefError, github_issue_number
 from . import AmbiguousBackendError, BackendError
 from .http import AmbiguousHttpError, HttpError, request_json
 
@@ -128,6 +129,8 @@ class GitHubIssuesBackend:
             id=f"#{row.get('number')}",
             url=row.get("html_url", ""),
             updated_at=row.get("updated_at", "") or "",
+            created_at=row.get("created_at", "") or "",
+            closed_at=row.get("closed_at", "") or "",
             reporter=reporter,
             # the issue's own open/closed truth, independent of the (possibly stale)
             # status:<state> label `_derive_state` prioritizes — see Ticket.provider_closed.
@@ -296,9 +299,13 @@ class GitHubIssuesBackend:
 
 
 def _issue_number(ticket_id: str) -> str:
-    # removeprefix, NOT lstrip("#") — lstrip strips ALL leading '#' (e.g. "##1" -> "1"),
-    # mangling an id; removeprefix drops exactly one leading marker.
-    return ticket_id.removeprefix("#").strip()
+    # Fail closed before HTTP: invented/typo codes must not reach /issues/<slug>.
+    # github_issue_number still uses removeprefix (not lstrip("#")) so "##1" is
+    # rejected rather than mangled to "1".
+    try:
+        return github_issue_number(ticket_id)
+    except TaskRefError as exc:
+        raise BackendError(str(exc)) from exc
 
 
 def _derive_state(row: dict, labels: list[str]) -> State:

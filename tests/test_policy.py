@@ -221,6 +221,28 @@ def test_linked_reference_passes():
     assert check_create(_good_ticket(what="blocked by [HYP-789](https://linear/HYP-789)"), EnforceConfig()).ok
 
 
+def test_structurally_linked_reference_is_not_double_flagged():
+    # task-cli#154: a bare reference whose id already has a `task link`-written structured entry
+    # in ticket.links must not ALSO trip the bare-reference gate when it's mentioned in prose.
+    t = _good_ticket(
+        what="blocked by #2 until it lands",
+        links={"Blocked by #2": "https://fake/2"},
+    )
+    assert check_create(t, EnforceConfig()).ok
+
+
+def test_a_different_bare_reference_is_still_flagged_alongside_a_linked_one():
+    # the exemption is per-id, not a blanket "any Links entry silences the gate" pass
+    t = _good_ticket(
+        what="blocked by #2 until it lands, also see HYP-789",
+        links={"Blocked by #2": "https://fake/2"},
+    )
+    res = check_create(t, EnforceConfig())
+    assert not res.ok
+    v = next(v for v in res.violations if v.gate == "links")
+    assert "HYP-789" in v.message and "#2" not in v.message
+
+
 def test_clean_linked_ticket_closes_after_gate_expansion():
     # the close gates now include links + impact-quality; a close-ready ticket with a PROPERLY
     # linked reference and a good impact must still close cleanly (no over-blocking of valid closes).
@@ -712,11 +734,483 @@ def test_normalize_skip_gate_accepts_new_gates():
 
 
 def test_normalize_skip_gate_accepts_read_before_edit():
-    # task-cli#119 review finding: unlike GATE_DUPLICATE (no real --skip- flag),
-    # read-before-edit DOES have one (--skip-read-before-edit), so it belongs in ALL_GATES /
-    # normalize_skip_gate's aliases like every other skippable gate.
+    # task-cli#119 review finding: a gate with a real --skip- flag (read-before-edit DOES have
+    # one, --skip-read-before-edit) belongs in ALL_GATES / normalize_skip_gate's aliases like
+    # every other skippable gate — the same reasoning now covers GATE_DUPLICATE/GATE_TODO_SHAPED
+    # below, both of which gained their own real --skip- flags alongside this ticket's gates.
     from tasklib.policy import GATE_READ_BEFORE_EDIT
 
     assert normalize_skip_gate("read-before-edit") == GATE_READ_BEFORE_EDIT
     assert normalize_skip_gate("read_before_edit") == GATE_READ_BEFORE_EDIT
     assert GATE_READ_BEFORE_EDIT in ALL_GATES
+
+
+# ── junk-title gate: the auto-generated "review this diff" shape (2026-09-07) ──────────────────
+#
+# An ecosystem-wide audit found this exact template is what an unchecked review pass or inbound
+# classifier files when it has no other actionable output — the ticket can never lead to a merge,
+# so it just sits at status:todo and gets refiled. Hard, non-skippable refuse: Alex's own framing
+# was "'Review uncommitted' should guarantee no ticket gets created".
+
+
+def test_junk_review_title_is_blocked_at_create():
+    rc = check_create(_good_ticket(title="Review uncommitted agent-workflow documentation diff"), EnforceConfig())
+    assert not rc.ok
+    assert any(v.gate == "junk-title" for v in rc.violations)
+
+
+def test_junk_title_variants_all_blocked():
+    from tasklib.policy import junk_title_violation
+
+    junk = [
+        "Review uncommitted agent-workflow documentation diff",
+        "Adversarial cross-file review of ticket intake gates diff",
+        "Audit installer retry diff for cross-file consistency",
+        "Review OMP lineage-first model detection diff",
+        "review the payments diff",  # case-insensitive
+        # Agents dropped the trailing "diff" after junk-title required it — still process junk.
+        "Review uncommitted 0.36.0 version bump",
+        "Review uncommitted raw-ticket guard test",
+        "Review the uncommitted pyproject.toml version bump from 0.37.0 to 0.38.0",
+        "Review: uncommitted 0.36.0 version bump",
+        "Review - uncommitted raw-ticket guard test",
+        "Read-only adversarial cross-file review of the current uncommitted rig-cli diff",
+        "Review documentation diff for performance regressions",  # conloca/landing#263
+    ]
+    for title in junk:
+        assert junk_title_violation(Ticket(title=title), EnforceConfig()) is not None, title
+
+
+def test_junk_title_gate_has_no_escape_hatch():
+    """Non-skippable: recording a skip for it must not waive the violation."""
+    ticket = _good_ticket(
+        title="Review uncommitted agent-workflow documentation diff",
+        skips={"junk-title": "trying to bypass it"},
+    )
+    rc = check_create(ticket, EnforceConfig())
+    assert not rc.ok
+    assert any(v.gate == "junk-title" for v in rc.violations)
+    assert "junk-title" not in rc.skipped
+
+
+def test_legitimate_review_shaped_titles_are_not_blocked():
+    from tasklib.policy import junk_title_violation
+
+    legit = [
+        "Add code review checklist feature",
+        "Fix login button diff-view alignment",
+        "Review the payments module",  # no "diff" — real product ask
+        # "uncommitted" as a domain noun, not the review-uncommitted process template
+        "Audit uncommitted transaction handling",
+        "Add a review of uncommitted files to the status bar",
+        "Add a review of the current uncommitted files to the status bar",
+        "Support review of uncommitted transaction handling in the admin console",
+        "Add review of uncommitted document changes to the approval workflow",
+    ]
+    for title in legit:
+        assert junk_title_violation(Ticket(title=title), EnforceConfig()) is None, title
+
+
+def test_junk_title_gate_is_configurable_off():
+    """Repo-level `enforce.junk_title: false` disables the CHECK — distinct from the per-ticket
+    --skip escape hatch, which does not exist for this gate."""
+    ticket = _good_ticket(title="Review uncommitted agent-workflow documentation diff")
+    cfg_off = EnforceConfig(junk_title=False)
+    rc = check_create(ticket, cfg_off)
+    assert rc.ok
+
+
+def test_junk_title_gate_config_from_dict():
+    from tasklib.policy import EnforceConfig as EC
+
+    assert EC.from_dict({"junk_title": False}).junk_title is False
+    assert EC.from_dict({}).junk_title is True
+    assert EC.from_dict(None).junk_title is True
+
+
+def test_junk_title_no_length_cap_bypass():
+    """A classifier padding the gap between the leading word and 'diff' must not slip through —
+    an earlier version capped the gap at 80 chars."""
+    from tasklib.policy import junk_title_violation
+
+    padded = "Review uncommitted " + "x" * 200 + " diff"
+    assert junk_title_violation(Ticket(title=padded), EnforceConfig()) is not None
+
+
+def test_junk_title_gate_applies_to_title_only_edit():
+    """`task change --title` on an already-clean ticket must not be able to persist a junk title
+    (a title-edit path that only ran msgref_title_violation, not junk_title, would miss this)."""
+    from tasklib.policy import check
+
+    ticket = _good_ticket(title="A clean, legitimate title")
+    ticket.title = "Review uncommitted policy diff"
+    rc = check(ticket, EnforceConfig(), Phase.CREATE)
+    assert not rc.ok
+    assert any(v.gate == "junk-title" for v in rc.violations)
+
+
+def test_junk_title_trailing_punctuation_is_still_caught():
+    """shape 4 requires "diff" to be the literal last word, so ordinary
+    sentence punctuation or markdown wrapping after it let the same generated shape slip past
+    unmatched."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review the payments diff."), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments diff!"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments diff?"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments `diff`"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Audit security diff..."), EnforceConfig()) is not None
+
+
+def test_junk_title_zero_width_characters_are_still_caught():
+    """A zero-width space (U+200B) inserted inside a required keyword
+    renders indistinguishably from plain text but breaks `\\bdiff\\b`'s contiguous match. Strip
+    Unicode format characters (category Cf) before matching, not just visible whitespace."""
+    from tasklib.policy import junk_title_violation
+
+    zwsp = "​"
+    zwj = "‍"
+    assert junk_title_violation(Ticket(title=f"Review uncommitted policy di{zwsp}ff"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title=f"Re{zwj}view uncommitted policy diff"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title=f"Review the payments di{zwsp}ff{zwsp}."), EnforceConfig()) is not None
+
+
+def test_junk_title_unicode_trailing_punctuation_is_still_caught():
+    """An earlier fix enumerated ASCII punctuation only, so a Unicode
+    terminal character (ellipsis, CJK full stop, typographic quotes) reached the same unmatched
+    state. Match on non-word characters generally instead of an ASCII allowlist."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review the payments diff…"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments diff。"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Review the payments “diff”"), EnforceConfig()) is not None
+
+
+def test_junk_title_trailing_punctuation_does_not_widen_legitimate_titles():
+    """The punctuation strip must not turn an unrelated title into a false positive — it only
+    changes whether "diff" reads as the last word, not the phrase check itself."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review the changelog."), EnforceConfig()) is None
+    assert junk_title_violation(Ticket(title="Audit diff-view authorization regression."), EnforceConfig()) is None
+    assert junk_title_violation(Ticket(title="Review diff parser data-loss fix."), EnforceConfig()) is None
+
+
+def test_junk_title_multiline_is_still_caught():
+    """A newline embedded in --title must not let the shape slip past the word-gap scan
+    ("Review\\nuncommitted policy diff" bypassed the un-normalized match)."""
+    from tasklib.policy import junk_title_violation
+
+    assert junk_title_violation(Ticket(title="Review\nuncommitted policy diff"), EnforceConfig()) is not None
+    assert junk_title_violation(Ticket(title="Audit\nsecurity diff"), EnforceConfig()) is not None
+
+
+def test_junk_title_narrowed_shape_avoids_real_product_titles():
+    """An earlier, broader shape ('starts with review/audit and contains diff anywhere')
+    shape over-blocked real tickets ABOUT a diff-related feature. Only the four specific
+    generated-template shapes should match."""
+    from tasklib.policy import junk_title_violation
+
+    legit = [
+        "Audit diff-view authorization regression",
+        "Review diff parser data-loss fix",
+        # Bare "diff for" is product-work phrasing, not the generated review template.
+        "Review diff for user-visible changes in the compare view",
+        "Audit diff for retained-message deletion behavior",
+    ]
+    for title in legit:
+        assert junk_title_violation(Ticket(title=title), EnforceConfig()) is None, title
+
+
+def test_junk_title_gate_does_not_block_closing_a_pre_existing_junk_ticket():
+    """Running the gate in the generic DONE path too would make an
+    already-existing junk ticket (created before this gate existed — exactly the backlog this
+    gate's own audit found and closed by hand) permanently uncloseable. CREATE-only."""
+    ticket = _good_ticket(
+        title="Review uncommitted agent-workflow documentation diff",
+        acceptance=_checked_criteria(),
+    )
+    rc = check_done(ticket, EnforceConfig())
+    assert not any(v.gate == "junk-title" for v in rc.violations)
+
+
+def test_junk_title_violation_redacts_a_credential_shaped_title():
+    """A title carrying a token must not be echoed verbatim into the
+    violation message, which _report_and_die prints to stdout."""
+    from tasklib.policy import junk_title_violation
+
+    v = junk_title_violation(Ticket(title="Review ghp_abcdefghijklmnopqrstuvwxyz012345 diff"), EnforceConfig())
+    assert v is not None
+    assert "ghp_abcdefghijklmnopqrstuvwxyz012345" not in v.message
+
+
+def test_junk_title_violation_redacts_a_fine_grained_pat_title():
+    """An earlier version of tasklib.logging's redactor did not recognize the
+    ``github_pat_...`` fine-grained PAT format, so it reached stdout verbatim through this
+    gate's refusal message even though classic ``ghp_`` tokens were already scrubbed."""
+    from tasklib.policy import junk_title_violation
+
+    secret = "github_pat_11AAaaBBbbCCccDDddEEeeFFffGGggHHhhIIiiJJ"
+    v = junk_title_violation(Ticket(title=f"Review {secret} diff"), EnforceConfig())
+    assert v is not None
+    assert secret not in v.message
+    assert "<redacted>" in v.message
+# ── todo-shaped hint (non-blocking) ──────────────────────────────────────────────────────────
+
+
+def test_todo_shaped_title_warns_but_does_not_block_create():
+    t = _good_ticket(title="Review my current changes before I commit", what="")
+    res = check_create(t, EnforceConfig())
+    assert res.ok  # never blocks
+    assert any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_todo_shaped_hint_is_silenced_by_skip_and_recorded_as_skipped():
+    t = _good_ticket(
+        title="Review my current changes before I commit",
+        what="",
+        skips={"todo-shaped": "deliberately tracking this review round as a real ticket"},
+    )
+    res = check_create(t, EnforceConfig())
+    assert res.ok
+    assert "todo-shaped" in res.skipped
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_todo_shaped_hint_disabled_by_config():
+    t = _good_ticket(title="Review my current changes before I commit it", what="")
+    res = check_create(t, EnforceConfig(todo_shaped_hint=False))
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_todo_shaped_hint_does_not_fire_on_done_phase():
+    # a ticket that already passed create shouldn't be re-nagged on every later `done`/`change`.
+    t = _good_ticket(
+        title="Review my current changes before I commit",
+        what="",
+        acceptance=_checked_criteria(),
+    )
+    res = check_done(t, EnforceConfig())
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+def test_ordinary_ticket_has_no_todo_shaped_warning():
+    res = check_create(_good_ticket(), EnforceConfig())
+    assert not any(w.gate == "todo-shaped" for w in res.warnings)
+
+
+# ── duplicate detection (token/Jaccard, GATE_DUPLICATE) ─────────────────────────────────────
+
+
+def _candidate(id_: str, title: str, what: str = "", session: str = "session:11", updated_at: str = "") -> Ticket:
+    return Ticket(id=id_, title=title, what=what, labels=[session], updated_at=updated_at)
+
+
+def test_duplicate_violation_catches_reworded_near_duplicate():
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Review OMP model-detection ordering diff")
+    v = duplicate_violation("Review OMP lineage-first model detection diff", "", [existing])
+    assert v is not None
+    assert v.gate == "duplicate"
+    assert "#1" in v.message
+
+
+def test_duplicate_violation_sanitizes_a_hostile_candidate_title():
+    # review finding (P2): a candidate ticket's title is UNTRUSTED (read back from the backend)
+    # and was being interpolated verbatim into this diagnostic — a hand-crafted title carrying
+    # a bidi override (or an ANSI escape) could spoof/corrupt the terminal. Must be stripped. A
+    # RIGHT-TO-LEFT OVERRIDE (not alnum) is used here rather than an ANSI CSI sequence so the
+    # injected characters don't also perturb the token/Jaccard match itself (a CSI's digits are
+    # tokenizable and would change which candidate matches — orthogonal to what this test checks).
+    from tasklib.policy import duplicate_violation
+
+    hostile_title = "Review OMP model-detection ordering diff ‮"
+    existing = _candidate("#1", hostile_title)
+    v = duplicate_violation("Review OMP lineage-first model detection diff", "", [existing])
+    assert v is not None
+    assert "‮" not in v.message
+
+
+def test_duplicate_violation_redacts_a_credential_shaped_title():
+    """A matching backend title carrying a token must not be echoed to stdout."""
+    from tasklib.policy import duplicate_violation
+
+    secret = "ghp_" + "abcdefghijklmnopqrstuvwxyz012345"
+    existing = _candidate("#1", f"Fix checkout cart inventory pricing pipeline {secret}")
+    v = duplicate_violation("Fix checkout cart inventory pricing pipeline", "", [existing])
+    assert v is not None
+    assert secret not in v.message
+    assert "<redacted>" in v.message
+
+
+def test_duplicate_violation_ignores_shared_generated_quote_blocks():
+    """Two unrelated tickets that both quote the same tg# message must not match on that quote."""
+    from tasklib.policy import duplicate_violation
+
+    quote = (
+        "> **tg#99** — Alex, 2026-09-01: checkout cart inventory pricing discount coupon "
+        "shipping warehouse fulfillment pipeline regression\n"
+        "<!-- tasklib:msgref-quote:99 -->"
+    )
+    existing = _candidate(
+        "#1",
+        "Add dark mode toggle to settings",
+        what="users want a dark theme\n\n" + quote,
+    )
+    v = duplicate_violation(
+        "Fix login bug on mobile Safari",
+        "users cannot log in\n\n" + quote,
+        [existing],
+    )
+    assert v is None
+
+
+def test_duplicate_violation_catches_reworded_cyrillic_duplicate():
+    # review finding (P1): an EARLIER version tokenized with `[a-z0-9]+` — ASCII-only — so a
+    # Cyrillic title/body always tokenized to ZERO tokens (`_DUPLICATE_MIN_TOKENS_PER_SIDE`
+    # never met) and every Russian reworded-duplicate check silently no-opped, contradicting
+    # task-cli's own documented support for Russian inbound messages (classify.py).
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Обновить конфигурацию хука Codex для моста")
+    v = duplicate_violation("Обновить хук моста Codex конфигурацию", "", [existing])
+    assert v is not None
+    assert v.gate == "duplicate"
+
+
+def test_duplicate_violation_ignores_unrelated_ticket():
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Add dark mode toggle to settings", "users want a dark theme")
+    v = duplicate_violation("Fix login bug on mobile Safari", "users cannot log in", [existing])
+    assert v is None
+
+
+def test_duplicate_violation_ignores_closed_candidate():
+    from tasklib.model import State
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Review OMP model-detection ordering diff")
+    existing.state = State.DONE
+    v = duplicate_violation("Review OMP lineage-first model detection diff", "", [existing])
+    assert v is None
+
+
+def test_duplicate_violation_boilerplate_alone_is_not_enough():
+    # two DIFFERENT review-diff tickets share only boilerplate words ("review"/"diff"/
+    # "uncommitted") — that must not, on its own, read as a duplicate.
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Review uncommitted worktree GC diff")
+    v = duplicate_violation("Review uncommitted README ecosystem diff", "", [existing])
+    assert v is None
+
+
+def test_duplicate_violation_known_false_positive_shared_domain_vocabulary():
+    # ADVERSARIAL REVIEW FINDING, CONFIRMED AND ACCEPTED (see the module comment on
+    # DUPLICATE_MIN_SHARED_TOKENS/DUPLICATE_JACCARD_THRESHOLD for the full analysis): two
+    # genuinely DIFFERENT security tasks — encrypting API token storage vs. rotating it — share
+    # enough domain vocabulary to clear the primary threshold (Jaccard 0.6). This is a REAL,
+    # KNOWN limitation of token-overlap Jaccard on short titles, not a regression to "fix" by
+    # retuning the threshold (that would break the genuine reworded-duplicate case pinned by
+    # test_duplicate_violation_catches_reworded_near_duplicate, which scores LOWER at 0.5).
+    # Pinned here so the behavior is INTENTIONAL and visible, not silently drifting; the cost is
+    # bounded because the gate is soft and one `--skip-duplicate "<reason>"` clears it.
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate("#1", "Encrypt API token storage")
+    v = duplicate_violation("API token storage rotation", "", [existing])
+    assert v is not None  # a known, accepted false positive — see the module comment
+
+
+# The reworded-OMP-diff pair used elsewhere in this file already clears the PRIMARY threshold
+# (3 shared tokens / Jaccard 0.5) on its own — reused below so these tests isolate the
+# session-recency ANNOTATION (never a separate lower-bar trigger; see the module comment on
+# `DUPLICATE_SESSION_WINDOW_MINUTES` for the false positive that caused this redesign).
+_OMP_EXISTING_TITLE = "Review OMP model-detection ordering diff"
+_OMP_NEW_TITLE = "Review OMP lineage-first model detection diff"
+
+
+def test_duplicate_violation_annotates_same_session_recent_match():
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:x", updated_at="2026-09-05T19:02:47Z"
+    )
+    now = datetime(2026, 9, 5, 19, 10, 0, tzinfo=timezone.utc)
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None
+    assert "same session, filed recently" in v.message
+
+
+def test_duplicate_violation_does_not_annotate_a_different_session_match():
+    # the match still fires (it clears the primary threshold on its own) — only the ANNOTATION
+    # is session-scoped.
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:other", updated_at="2026-09-05T19:02:47Z"
+    )
+    now = datetime(2026, 9, 5, 19, 10, 0, tzinfo=timezone.utc)
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None
+    assert "same session" not in v.message
+
+
+def test_duplicate_violation_does_not_annotate_outside_the_time_window():
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:x", updated_at="2026-09-05T19:02:47Z"
+    )
+    now = datetime(2026, 9, 5, 21, 30, 0, tzinfo=timezone.utc)  # >60min later
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None  # still a duplicate — just not annotated as "recent"
+    assert "same session" not in v.message
+
+
+def test_duplicate_violation_naive_candidate_timestamp_does_not_crash():
+    # a timezone-NAIVE `updated_at` (no offset in the source string — a malformed/legacy value;
+    # real GitHub/Linear always emit one) must not TypeError against the AWARE `now` every real
+    # caller passes (`datetime.now(timezone.utc)`) — it degrades to "not recent", never raises.
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3", _OMP_EXISTING_TITLE, session="session:x", updated_at="2026-09-05T19:02:47"
+    )
+    now = datetime(2026, 9, 5, 19, 10, 0, tzinfo=timezone.utc)
+    v = duplicate_violation(_OMP_NEW_TITLE, "", [existing], new_session="session:x", now=now)
+    assert v is not None
+    assert "same session, filed recently" in v.message  # naive timestamp treated as UTC
+
+
+def test_duplicate_violation_weak_overlap_no_longer_matches_via_session_recency():
+    # review finding (P1): an EARLIER version of this gate relaxed the threshold for a
+    # same-session-recent candidate to 1 shared token / Jaccard >=0.3, and this exact pair —
+    # genuinely DIFFERENT requests sharing only common domain vocabulary — matched at Jaccard
+    # 0.375 despite being unrelated. The relaxed path is gone; same-session-recency is
+    # annotation-only now (see best_duplicate_match's module comment), so this must be None.
+    from datetime import datetime, timezone
+
+    from tasklib.policy import duplicate_violation
+
+    existing = _candidate(
+        "#3",
+        "Postgres retry failures require driver upgrade",
+        session="session:x",
+        updated_at="2026-09-05T19:02:47Z",
+    )
+    now = datetime(2026, 9, 5, 19, 7, 0, tzinfo=timezone.utc)  # 5 minutes later
+    v = duplicate_violation(
+        "Upgrade driver for Postgres replica failover", "", [existing], new_session="session:x", now=now
+    )
+    assert v is None

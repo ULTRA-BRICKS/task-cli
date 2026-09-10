@@ -56,6 +56,8 @@ class FakeBackend:
         stored.url = f"https://fake/{tid.lstrip('#')}"
         stored.labels = list(ticket.labels)
         stored.state = ticket.state
+        stored.created_at = ticket.created_at
+        stored.closed_at = ticket.closed_at
         self._store[tid] = stored
         return stored
 
@@ -72,6 +74,8 @@ class FakeBackend:
         stored.url = f"https://fake/{ticket.id.lstrip('#')}"
         stored.labels = list(ticket.labels)
         stored.state = ticket.state
+        stored.created_at = ticket.created_at
+        stored.closed_at = ticket.closed_at
         self._store[ticket.id] = stored
         return stored
 
