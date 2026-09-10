@@ -59,6 +59,28 @@ def test_attach_adds_implementation_screenshot(tmp_path, capsys, fake):
     assert ticket.state is not State.DONE
 
 
+def test_attach_persists_the_durable_ref_backend_attach_returns(tmp_path, fake):
+    # tg#16794/review-cli#484: cmd_attach used to discard backend.attach()'s return value and
+    # always store the RAW path in the ticket's Screenshot.ref — so even a backend that DOES
+    # durably upload (a real GitHubIssuesBackend/LinearBackend in native mode) would still leave
+    # the local path embedded in the persisted ticket body. Simulate a real durable upload by
+    # having attach() return something DIFFERENT from its input, and prove the persisted
+    # screenshot ref is the durable value, not the raw path.
+    shot = tmp_path / "after.png"
+    shot.write_bytes(b"png")
+    main(_create_argv())
+
+    def durable_attach(ticket_id, file_path):
+        fake.attachments.append((ticket_id, file_path))
+        return "https://github.com/user-attachments/assets/durable-123"
+
+    fake.attach = durable_attach
+    rc = main(["attach", "#1", str(shot)])
+    assert rc == 0
+    impl = [s for s in fake.get("#1").screenshots if s.kind == "implementation"]
+    assert [s.ref for s in impl] == ["https://github.com/user-attachments/assets/durable-123"]
+
+
 def test_attach_multiple_paths(tmp_path, fake):
     a = tmp_path / "a.png"
     b = tmp_path / "b.png"
@@ -72,6 +94,33 @@ def test_attach_multiple_paths(tmp_path, fake):
     assert [s.ref for s in impl] == [str(a), str(b)]
     assert ("#1", str(a)) in fake.attachments
     assert ("#1", str(b)) in fake.attachments
+
+
+def test_attach_duplicate_path_keeps_both_distinct_durable_refs(tmp_path, fake):
+    # review finding (PR #184): the SAME path passed twice (e.g. task attach #1 shot.png
+    # shot.png) uploads twice -- a native backend genuinely re-uploads and returns a DISTINCT
+    # durable url per call. A dict keyed by the raw path previously collapsed both entries onto
+    # whichever call finished last, silently dropping the first upload's url. Both persisted
+    # Screenshot refs must reflect their OWN call's distinct result.
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"png")
+    main(_create_argv())
+
+    calls = {"n": 0}
+
+    def durable_attach(ticket_id, file_path):
+        calls["n"] += 1
+        fake.attachments.append((ticket_id, file_path))
+        return f"https://github.com/user-attachments/assets/durable-{calls['n']}"
+
+    fake.attach = durable_attach
+    rc = main(["attach", "#1", str(shot), str(shot)])
+    assert rc == 0
+    impl = [s.ref for s in fake.get("#1").screenshots if s.kind == "implementation"]
+    assert impl == [
+        "https://github.com/user-attachments/assets/durable-1",
+        "https://github.com/user-attachments/assets/durable-2",
+    ]
 
 
 def test_attach_unknown_ticket_exits_2(capsys, fake):

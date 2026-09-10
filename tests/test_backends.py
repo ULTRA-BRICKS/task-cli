@@ -8,7 +8,12 @@ from __future__ import annotations
 import pytest
 
 from tasklib.backends import AmbiguousBackendError, BackendError, EXIT_AMBIGUOUS
-from tasklib.backends.github_issues import GitHubIssuesBackend, _api_root, _parse_remote
+from tasklib.backends.github_issues import (
+    GitHubIssuesBackend,
+    _api_root,
+    _parse_remote,
+    _uploads_api_root,
+)
 from tasklib.backends.http import AmbiguousHttpError
 from tasklib.model import State, Ticket
 
@@ -185,15 +190,228 @@ def test_github_search_post_filters_by_state(monkeypatch):
     ]  # only the in-progress one survives the post-filter
 
 
-def test_github_attach_posts_reference_comment(monkeypatch):
+# ── github.attach — attachment_mode (link/native) and the real user-attachments/assets upload ─
+
+
+def test_github_attach_hosted_url_registers_without_upload(monkeypatch):
+    # An already-hosted URL is always registered as-is via a markdown-image comment — no upload
+    # attempt, no attachment_mode branching — mirrors LinearBackend's identical contract.
     from tasklib.backends.github_issues import GitHubIssuesBackend
 
-    be = GitHubIssuesBackend(owner="o", repo="r", token="t")
+    for mode in ("native", "link"):
+        be = GitHubIssuesBackend(owner="o", repo="r", token="t", attachment_mode=mode)
+        calls = []
+        monkeypatch.setattr(be, "_call", lambda url, **kw: calls.append((url, kw)) or {})
+        upload_calls = []
+        monkeypatch.setattr(
+            "tasklib.backends.github_issues.request_bytes",
+            lambda *a, **kw: upload_calls.append((a, kw)),
+        )
+        ref = be.attach("#7", "https://github.com/user-attachments/assets/existing")
+        assert ref == "https://github.com/user-attachments/assets/existing"
+        assert upload_calls == []  # nothing to upload
+        comment_calls = [kw for url, kw in calls if "/7/comments" in url]
+        assert len(comment_calls) == 1
+        assert comment_calls[0]["payload"]["body"] == (
+            "screenshot: ![existing](https://github.com/user-attachments/assets/existing)"
+        )
+
+
+def test_github_attach_link_mode_local_path_raises_backend_error(tmp_path):
+    # link mode has nothing to link a bare local path to — raise BackendError naming the mode
+    # (the caller, cli._attach_screenshots, already swallows this as best-effort).
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", attachment_mode="link")
+    with pytest.raises(BackendError, match="attachment_mode=link"):
+        be.attach("#7", str(tmp_path / "shot.png"))
+
+
+def test_github_from_config_default_attachment_mode_is_native():
+    # review finding (missing test): mirrors the Linear equivalent — the main behavioral change
+    # this feature introduces (a real upload replacing the old echo-the-local-path no-op) must
+    # apply by default with zero explicit config.
+    from pathlib import Path
+
+    from tasklib.config import DEFAULTS, LoadedConfig
+
+    data = {**DEFAULTS, "github": {**DEFAULTS["github"], "repo": "o/r"}}
+    cfg = LoadedConfig(data=data, repo_root=Path("."))
+    be = GitHubIssuesBackend.from_config(cfg, env={"GITHUB_TOKEN": "t"})
+    assert be.attachment_mode == "native"
+
+
+def test_github_attach_native_mode_uploads_and_registers(monkeypatch, tmp_path):
+    # The real native path: POST the bytes to uploads.github.com/user-attachments/assets (the
+    # exact request shape the github.com web UI's own uploader uses), then register the
+    # returned permanent asset url via a markdown-image comment.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n fake bytes")
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", attachment_mode="native")
     calls = []
-    monkeypatch.setattr(be, "_call", lambda url, **kw: calls.append((url, kw)) or {})
-    ref = be.attach("#7", "shot.png")
-    assert ref == "shot.png"
-    assert any("/7/comments" in url for url, _ in calls)
+
+    def fake_call(url, **kw):
+        calls.append((url, kw))
+        if url.endswith("/repos/o/r"):
+            return {"id": 12345}
+        return {}
+
+    monkeypatch.setattr(be, "_call", fake_call)
+
+    upload_calls = []
+
+    def fake_request_bytes(
+        url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False
+    ):
+        upload_calls.append((url, method, dict(headers or {}), data, same_host_redirects_only))
+        return b'{"url": "https://github.com/user-attachments/assets/abc-123"}'
+
+    monkeypatch.setattr("tasklib.backends.github_issues.request_bytes", fake_request_bytes)
+
+    result = be.attach("#7", str(png))
+
+    assert result == "https://github.com/user-attachments/assets/abc-123"
+    assert len(upload_calls) == 1
+    url, method, headers, data, redirects_guarded = upload_calls[0]
+    assert url.startswith("https://uploads.github.com/user-attachments/assets?")
+    assert "name=shot.png" in url
+    assert "content_type=image%2Fpng" in url
+    assert "repository_id=12345" in url
+    assert method == "POST"
+    assert headers["Authorization"] == "Bearer t"
+    # the real MIME rides the content_type QUERY PARAM above, not this header — see the
+    # module docstring/_upload_and_attach's own comment on why.
+    assert headers["Content-Type"] == "application/octet-stream"
+    assert data == png.read_bytes()
+    assert redirects_guarded is True
+    comment_calls = [kw for cu, kw in calls if "/7/comments" in cu]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["payload"]["body"] == (
+        "screenshot: ![shot.png](https://github.com/user-attachments/assets/abc-123)"
+    )
+
+
+def test_github_attach_native_mode_upload_http_error_raises_backend_error(monkeypatch, tmp_path):
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+    from tasklib.backends.http import HttpError
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"x")
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", attachment_mode="native")
+    monkeypatch.setattr(be, "_call", lambda url, **kw: {"id": 1})
+    monkeypatch.setattr(
+        "tasklib.backends.github_issues.request_bytes",
+        lambda *a, **kw: (_ for _ in ()).throw(HttpError(403, "HTTP 403", "forbidden")),
+    )
+    with pytest.raises(BackendError, match="upload"):
+        be.attach("#7", str(png))
+
+
+def test_github_attach_native_mode_upload_ambiguous_failure_raises_ambiguous_backend_error(
+    monkeypatch, tmp_path
+):
+    # the connection-dropped-mid-read case (status already landed, bytes may have uploaded
+    # server-side with nothing pointing at them since the comment never posted) must surface as
+    # AmbiguousBackendError, not the generic BackendError every other failure funnels into —
+    # the same distinction _call's own ambiguous-read handling makes.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"x")
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", attachment_mode="native")
+    monkeypatch.setattr(be, "_call", lambda url, **kw: {"id": 1})
+    monkeypatch.setattr(
+        "tasklib.backends.github_issues.request_bytes",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AmbiguousHttpError("status 201 was already returned")
+        ),
+    )
+    with pytest.raises(AmbiguousBackendError, match="upload"):
+        be.attach("#7", str(png))
+
+
+@pytest.mark.parametrize(
+    "response_body",
+    [b"not json", b"{}", b'{"url": ""}', b'{"url": 42}'],
+    ids=["not-json", "missing-url-key", "empty-url", "non-string-url"],
+)
+def test_github_attach_native_mode_malformed_upload_response_raises_backend_error(
+    monkeypatch, tmp_path, response_body
+):
+    # review finding (same class as Linear's fileUpload validation): a 201 response with no
+    # usable `url` must raise cleanly, not a bare KeyError/TypeError escaping past
+    # cli._attach_screenshots' BackendError-only best-effort catch.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"x")
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", attachment_mode="native")
+    monkeypatch.setattr(be, "_call", lambda url, **kw: {"id": 1})
+    monkeypatch.setattr(
+        "tasklib.backends.github_issues.request_bytes", lambda *a, **kw: response_body
+    )
+    with pytest.raises(BackendError):
+        be.attach("#7", str(png))
+
+
+def test_github_repository_id_is_cached_across_attach_calls(monkeypatch, tmp_path):
+    # the repository_id lookup (/repos/{owner}/{repo}) only needs to happen once per backend
+    # instance — every attach() call in native mode needs it, but it never changes.
+    from tasklib.backends.github_issues import GitHubIssuesBackend
+
+    png1 = tmp_path / "a.png"
+    png2 = tmp_path / "b.png"
+    png1.write_bytes(b"a")
+    png2.write_bytes(b"b")
+
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", attachment_mode="native")
+    repo_id_calls = {"n": 0}
+
+    def fake_call(url, **kw):
+        if url.endswith("/repos/o/r"):
+            repo_id_calls["n"] += 1
+            return {"id": 999}
+        return {}
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    monkeypatch.setattr(
+        "tasklib.backends.github_issues.request_bytes",
+        lambda *a, **kw: b'{"url": "https://github.com/user-attachments/assets/x"}',
+    )
+
+    be.attach("#7", str(png1))
+    be.attach("#7", str(png2))
+
+    assert repo_id_calls["n"] == 1
+
+
+def test_uploads_api_root_defaults_to_public_github(monkeypatch):
+    monkeypatch.delenv("GITHUB_UPLOADS_URL", raising=False)
+    assert _uploads_api_root() == "https://uploads.github.com"
+
+
+def test_uploads_api_root_honors_loopback_http_mock(monkeypatch):
+    # A hermetic mock server on loopback may be http; the trailing slash is normalized.
+    monkeypatch.setenv("GITHUB_UPLOADS_URL", "http://127.0.0.1:8771/")
+    assert _uploads_api_root() == "http://127.0.0.1:8771"
+
+
+def test_uploads_api_root_rejects_cleartext_nonloopback(monkeypatch):
+    # Security: the bearer token rides every request, so a non-loopback http host is refused —
+    # an ambient GITHUB_UPLOADS_URL must not be able to exfiltrate the token over cleartext.
+    monkeypatch.setenv("GITHUB_UPLOADS_URL", "http://uploads.internal")
+    with pytest.raises(BackendError):
+        _uploads_api_root()
+
+
+def test_uploads_api_root_rejects_bracket_malformed_override_cleanly(monkeypatch):
+    # mirrors test_api_root_rejects_bracket_malformed_override_cleanly for the sibling resolver.
+    monkeypatch.setenv("GITHUB_UPLOADS_URL", "https://[bad/assets")
+    with pytest.raises(BackendError, match="not a valid url"):
+        _uploads_api_root()
 
 
 def test_github_row_to_ticket_maps_updated_at(monkeypatch):

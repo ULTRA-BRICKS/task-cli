@@ -392,6 +392,8 @@ def test_attachment_mode_default_is_native(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     cfg = load(tmp_path)
     assert cfg.linear_attachment_mode == "native"
+    # tg#16794/review-cli#484: the knob is now backend-agnostic — GitHub gets the same default.
+    assert cfg.github_attachment_mode == "native"
 
 
 def test_task_yaml_sets_attachment_mode_link(tmp_path, monkeypatch):
@@ -414,6 +416,17 @@ def test_invalid_attachment_mode_rejected(tmp_path, monkeypatch):
         load(tmp_path)
 
 
+def test_invalid_github_attachment_mode_rejected(tmp_path, monkeypatch):
+    # symmetric with the linear.attachment_mode case above — tg#16794/review-cli#484 extended
+    # the same validation to github.attachment_mode.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ngithub:\n  attachment_mode: carrier-pigeon\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="github.attachment_mode"):
+        load(tmp_path)
+
+
 def test_malformed_attachment_mode_value_clean_error(tmp_path, monkeypatch):
     # a dict/list value (malformed YAML) must fail-closed with ConfigError, not a raw TypeError
     # from the `in` membership check — mirrors test_rig_yaml_malformed_backend_value_clean_error.
@@ -433,6 +446,29 @@ def test_rig_yaml_task_attachment_mode_flat_alias(tmp_path, monkeypatch):
     )
     cfg = load(tmp_path)
     assert cfg.linear_attachment_mode == "link"
+    # tg#16794/review-cli#484: the flat shorthand fans out onto BOTH backends' sections, since
+    # whichever backend is actually active reads its own — proves the fan-out, not just Linear.
+    assert cfg.github_attachment_mode == "link"
+
+
+def test_rig_yaml_flat_attachment_mode_defers_to_nested_backend_override(tmp_path, monkeypatch):
+    # review finding (PR #184): the flat alias fans `attachment_mode` onto BOTH backend
+    # sections, so it must NOT collide with an explicit NESTED override for one specific
+    # backend — "native by default, link specifically for github" is a deliberate per-backend
+    # narrowing, not a contradiction, and must load exactly as it did before the fan-out ever
+    # touched github (when this same block only ever set linear.attachment_mode).
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "rig.yaml").write_text(
+        "task:\n"
+        "  backend: linear\n"
+        "  team: HYP\n"
+        "  attachment_mode: native\n"
+        "  github: { attachment_mode: link }\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)  # must not raise ConfigError
+    assert cfg.linear_attachment_mode == "native"  # unaffected — no nested linear override
+    assert cfg.github_attachment_mode == "link"  # the explicit nested override wins
 
 
 def test_rig_yaml_task_attachment_mode_nested_passthrough(tmp_path, monkeypatch):
@@ -638,6 +674,19 @@ def test_env_attachment_mode_override_beats_repo_task_yaml(tmp_path, monkeypatch
     monkeypatch.setenv("TASK_CLI_ATTACHMENT_MODE", "native")
     cfg = load(tmp_path)
     assert cfg.linear_attachment_mode == "native"
+    assert any("TASK_CLI_ATTACHMENT_MODE" in layer for layer in cfg.layers)
+
+
+def test_env_attachment_mode_override_affects_github_too(tmp_path, monkeypatch):
+    # tg#16794/review-cli#484: the one env var must override whichever backend is actually
+    # active — proves the override also sets github.attachment_mode, not just linear's.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\ngithub:\n  attachment_mode: link\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("TASK_CLI_ATTACHMENT_MODE", "native")
+    cfg = load(tmp_path)
+    assert cfg.github_attachment_mode == "native"
     assert any("TASK_CLI_ATTACHMENT_MODE" in layer for layer in cfg.layers)
 
 

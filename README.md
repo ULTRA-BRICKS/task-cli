@@ -610,8 +610,8 @@ The full native shape (also accepted as `task.yaml`, or nested under `rig.yaml` 
 ```yaml
 version: 1
 backend: github-issues            # or: linear
-github:   { repo: auto, default_labels: [agent] }   # repo: auto = origin owner/name
-linear:   { team: HYP, project: "", attachment_mode: native }  # attachment_mode: native|link
+github:   { repo: auto, default_labels: [agent], attachment_mode: native }  # repo: auto = origin owner/name
+linear:   { team: HYP, project: "", attachment_mode: native }  # attachment_mode: native|link — same knob, both backends
 trusted_attachment_hosts: []      # extra hosts `task read --save-attachments` may auto-fetch
                                    # from beyond the tracker's own asset domain (e.g. your own
                                    # GitHub Pages host) — fetched WITHOUT the tracker's auth
@@ -682,15 +682,19 @@ When `classify.capability` is set, the model manifest is located by probing a fe
 `agent-tools` checkout paths; set `$TASK_MODELS_MANIFEST` to an explicit `models.yaml` to make the
 choice deterministic on a machine with more than one checkout (it always wins over the heuristics).
 
-**Per-machine override — `$TASK_CLI_ATTACHMENT_MODE`** (tg#11652): a repo can pin
-`linear.attachment_mode` for everyone (e.g. hyperide pins `link`, HYP-1248 — raw pasted
-`uploads.linear.app` URLs 401 for a non-browser viewer). Set `TASK_CLI_ATTACHMENT_MODE=native`
-(or `link`) in your own shell/machine to override that pin locally without touching the
-committed `task.yaml`/`rig.yaml` — it is the single highest-precedence layer in the cascade,
-above even an explicit `--config P` (deliberate: it's a per-machine convenience override, meant
-to win over anything file-based), and is still validated (an unrecognized value fails closed,
-same as the file-based setting). If a `task` invocation's `attachment_mode` looks wrong and
-`--config` doesn't explain it, check `echo $TASK_CLI_ATTACHMENT_MODE`.
+**Per-machine override — `$TASK_CLI_ATTACHMENT_MODE`** (tg#11652; extended from Linear-only to
+BOTH backends by tg#16794/review-cli#484): a repo can pin `linear.attachment_mode` and/or
+`github.attachment_mode` for everyone (e.g. hyperide pins Linear's to `link`, HYP-1248 — raw
+pasted `uploads.linear.app` URLs 401 for a non-browser viewer). Set
+`TASK_CLI_ATTACHMENT_MODE=native` (or `link`) in your own shell/machine to override BOTH pins
+locally without touching the committed `task.yaml`/`rig.yaml` — it is the single
+highest-precedence layer in the cascade, above even an explicit `--config P` (deliberate: it's a
+per-machine convenience override, meant to win over anything file-based), and is still validated
+(an unrecognized value fails closed, same as the file-based setting). If a `task` invocation's
+`attachment_mode` looks wrong and `--config` doesn't explain it, check
+`echo $TASK_CLI_ATTACHMENT_MODE`. GitHub's `native` mode uploads through an undocumented
+endpoint (see `backends/github_issues.py`'s module docstring); set `attachment_mode: link` for
+that backend if you'd rather not depend on it.
 
 ## Architecture
 
