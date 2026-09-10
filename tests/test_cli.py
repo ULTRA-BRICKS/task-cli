@@ -3174,6 +3174,37 @@ def test_create_review_uncommitted_without_diff_does_not_persist_an_issue(capsys
     assert "harness task" in out
 
 
+def test_new_process_ticket_like_landing_263_does_not_create_github_issue(
+    capsys, _inject_fake
+):
+    """conloca/landing#263: agents filed 'Review documentation diff for performance
+    regressions' into a product GitHub tracker via `task new`. Process tickets belong
+    in `harness task`; the product backend must not persist an issue."""
+    argv = _create_argv(
+        **{"--title": "Review documentation diff for performance regressions"}
+    )
+    argv[0] = "new"
+    rc = main(argv)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert _inject_fake.list() == []
+    assert "harness task" in out
+
+
+def test_new_review_uncommitted_does_not_create_github_issue(capsys, _inject_fake):
+    """'Review uncommitted … diff' is the original junk-title template. task new must
+    not persist it to GitHub/Linear; process work belongs in harness task."""
+    argv = _create_argv(
+        **{"--title": "Review uncommitted agent-workflow documentation diff"}
+    )
+    argv[0] = "new"
+    rc = main(argv)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert _inject_fake.list() == []
+    assert "harness task" in out
+
+
 def test_change_not_touching_title_does_not_trigger_the_title_gate(_inject_fake):
     # a pre-existing tg#<id> in the title (created before this gate existed, or edited in the
     # web UI) must not block an UNRELATED edit that leaves the title alone.

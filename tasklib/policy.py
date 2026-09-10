@@ -111,8 +111,14 @@ GATE_LINKS_URL = "links-url"
 #      current uncommitted rig-cli diff"
 # Shape 5/6 do not fire on "Audit uncommitted transaction handling" or a product title like
 # "Add a review of uncommitted files to the status bar" (no leading Review-uncommitted, no
-# "review of current uncommitted"). None of the false-positive examples above end
-# in a bare "diff", contain "uncommitted", "review of", or the "cross-file consistency" phrase.
+# "review of current uncommitted").
+#   7. "diff for performance"                      — "Review documentation diff for performance
+#      regressions" (conloca/landing#263). Kept as this phrase, not a bare "diff for", so a
+#      product title like "Review diff for user-visible changes in the compare view" still
+#      passes (junk-title is non-skippable).
+# None of the false-positive examples above end in a bare "diff", contain "uncommitted", "review
+# of", "diff for cross-file consistency", or "diff for performance" — so none of the seven
+# shapes fire on them.
 #
 # Scope boundary: this catches the auto-generated TEMPLATE shape at the create/edit boundary — the
 # threat model is an agent's classifier reflexively filing "Review uncommitted X diff", not an
@@ -169,6 +175,7 @@ _JUNK_REVIEW_TITLE = re.compile(
     r"\buncommitted\b.*\bdiff\b"  # 1
     r"|\breview of\b.*\bdiff\b"  # 2
     r"|\bdiff for cross-file consistency\b"  # 3
+    r"|\bdiff for performance\b"  # 7 — conloca/landing#263
     r"|\bdiff\s*$"  # 4 — bare form, "diff" is the last word
     r")",
     re.IGNORECASE,

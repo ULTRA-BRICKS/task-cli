@@ -300,7 +300,7 @@ user-impact-quality gates) writes the justification into the ticket's `Skipped g
 | screenshots | `--screenshot <path>` | `--skip-screenshots "<reason>"` |
 | formatting | (automatic — body is rendered) | `--skip-formatting "<reason>"` |
 | msgref-title | keep `--title` free of a `tg#<id>` reference (put it in `--what`/`--why`/etc. instead) | **none** (hard; disable in config only via `enforce.msgref_title: false`) |
-| junk-title (create, and any `--title` edit) | don't phrase a title as "Review uncommitted …" or "Review/Audit/Adversarial [review of] ... diff" — process work belongs in `harness task`, not the product GitHub/Linear tracker; run `review diff`/`review quorum` or `harness task` instead | **none** (hard; disable the check itself only via `enforce.junk_title: false`) |
+| junk-title (create, and any `--title` edit) | don't phrase a title as "Review uncommitted …", "Review/Audit/Adversarial [review of] ... diff", or "... diff for performance" — that shape is process work for `harness task`, never the product GitHub/Linear tracker; run `review diff`/`review quorum` or `harness task` instead | **none** (hard; disable the check itself only via `enforce.junk_title: false`) |
 | acceptance-checked (close) | `task check <id> <n> --proof <path>` for each | **none** (hard; disable in config only) |
 | read-before-edit (`change --what` only) | `task read <id>` (or `task view <id>`) THIS session, recently, before overwriting `--what` | `--skip-read-before-edit "<reason>"` — a *persisted* skip from an earlier command never silently waives a later, still-unread one |
 | duplicate (`create`/`new`, token/Jaccard) | give the title/what real, distinguishing content | `--skip-duplicate "<reason>"` (or `--force "<reason>"`) |
