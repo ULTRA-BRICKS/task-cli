@@ -87,7 +87,7 @@ def test_screenshot_mention_without_attach_blocks_create():
 
 
 def test_cyrillic_screenshot_mention_without_attach_blocks_create():
-    t = _good_ticket(what="см. скриншот сломанного диалога")
+    t = _good_ticket(what="\u0441\u043c. \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u0441\u043b\u043e\u043c\u0430\u043d\u043d\u043e\u0433\u043e \u0434\u0438\u0430\u043b\u043e\u0433\u0430")
     res = check_create(t, EnforceConfig())
     assert any(v.gate == "screenshots" for v in res.violations)
 

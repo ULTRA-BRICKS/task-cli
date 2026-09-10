@@ -546,8 +546,9 @@ def _text_gates(ticket: Ticket, cfg: EnforceConfig) -> list[Violation]:
 
 def _screenshot_gate(ticket: Ticket, cfg: EnforceConfig, phase: Phase) -> list[Violation]:
     """Screenshot proof: label-gated (ui/visual) on create AND done, plus a create-time
-    mention gate — prose that says screenshot/скриншот with no image attached is refused
-    (task-cli#166, same hole tg-cli#337 closed for outbound Telegram)."""
+    mention gate — prose that mentions a screenshot in English or its Russian equivalent
+    with no image attached is refused (task-cli#166, same hole tg-cli#337 closed for
+    outbound Telegram)."""
     if phase is Phase.CREATE and cfg.screenshots_on_create:
         if ticket.screenshots:
             return []
@@ -1313,11 +1314,11 @@ def _ticket_needs_screenshots(ticket: Ticket, cfg: EnforceConfig) -> bool:
     return bool(ticket_labels & cfg.screenshot_labels)
 
 
-_SCREENSHOT_MENTION_RE = re.compile(r"screenshot|скриншот", re.IGNORECASE)
+_SCREENSHOT_MENTION_RE = re.compile(r"screenshot|\u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442", re.IGNORECASE)
 
 
 def mentions_screenshot(text: str) -> bool:
-    """True when `text` mentions screenshot or скриншот, any case (task-cli#166)."""
+    """True when `text` mentions screenshot in English or its Russian equivalent (matched via Unicode code points), any case (task-cli#166)."""
     return bool(_SCREENSHOT_MENTION_RE.search(text or ""))
 
 
