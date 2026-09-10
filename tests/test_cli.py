@@ -900,6 +900,25 @@ def test_done_with_implementation_screenshot_closes_and_attaches(_inject_fake):
     assert ("#1", "after.png") in _inject_fake.attachments
 
 
+def test_done_persists_the_durable_ref_backend_attach_returns(_inject_fake):
+    # tg#16794/review-cli#484 (review finding, PR #184): `task done --screenshot` is a primary
+    # close-with-proof path and had the identical discard-the-durable-ref bug cmd_change/
+    # cmd_attach were fixed for -- attach must run BEFORE backend.update() so the swapped
+    # `.ref` reaches the persisted body, exactly like the sibling paths.
+    main(_create_argv() + ["--label", "ui", "--screenshot", "creation.png"])
+    _ready_to_close(_inject_fake)
+
+    def durable_attach(ticket_id, file_path):
+        _inject_fake.attachments.append((ticket_id, file_path))
+        return "https://github.com/user-attachments/assets/durable-789"
+
+    _inject_fake.attach = durable_attach
+    rc = main(["done", "#1", "--screenshot", "after.png"])
+    assert rc == 0
+    impl = [s for s in _inject_fake.get("#1").screenshots if s.kind == "implementation"]
+    assert [s.ref for s in impl] == ["https://github.com/user-attachments/assets/durable-789"]
+
+
 def test_done_persists_skip_justification(_inject_fake):
     # `done --skip-screenshots` records the waiver in the body, not lost to a re-fetch.
     main(_create_argv() + ["--label", "ui", "--skip-screenshots", "no proof at create"])

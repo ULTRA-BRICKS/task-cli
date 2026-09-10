@@ -3475,14 +3475,18 @@ def cmd_attach(args: argparse.Namespace) -> int:
                 "the screenshot"
             )
 
-    attached: list[str] = []
-    durable_refs: dict[str, str] = {}
+    # review finding (PR #184): a dict keyed by the raw path collapses two IDENTICAL args.path
+    # entries (e.g. `task attach #1 shot.png shot.png`) onto whichever upload finished last —
+    # each call to backend.attach() still genuinely uploads/returns its own distinct durable url
+    # in native mode, so a dict silently drops the first upload's url (an orphaned asset) and
+    # persists the SAME (second) url for both Screenshot entries. Pair each attach with its own
+    # durable ref POSITIONALLY instead, so duplicate paths keep their own distinct results.
+    attached: list[tuple[str, str]] = []
     fail: BackendError | None = None
     ambiguous: AmbiguousBackendError | None = None
     for path in args.path:
         try:
-            durable_refs[path] = backend.attach(ticket.id, path)
-            attached.append(path)
+            attached.append((path, backend.attach(ticket.id, path)))
         except AmbiguousBackendError as exc:
             ambiguous = exc
             break
@@ -3494,7 +3498,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     # — otherwise the ticket body's Screenshots section embeds a local path no other viewer can
     # ever resolve (mirrors _attach_screenshots' identical fix for change/done/create).
     new_shots = [
-        Screenshot(ref=durable_refs[path], kind="implementation") for path in attached
+        Screenshot(ref=durable_ref, kind="implementation") for _path, durable_ref in attached
     ]
     updated = ticket
     if new_shots:
@@ -3619,9 +3623,14 @@ def cmd_done(args: argparse.Namespace) -> int:
     _enforce_or_die(ticket, cfg, Phase.DONE)
     ticket.state = State.DONE
 
+    # tg#16794/review-cli#484 (review finding, PR #184): attach BEFORE persisting, same as
+    # cmd_change — `task done --screenshot` is a primary close-with-proof path, and attaching
+    # AFTER update() (the old order) means the `.ref` swap to the durable url never reaches the
+    # persisted body, leaving the closing ticket's own implementation proof broken for exactly
+    # the reason this fix exists. Uses `ticket.id` (an existing ticket's id is stable).
+    _attach_screenshots(backend, ticket.id, new_shots)
     try:
         updated = backend.update(ticket)
-        _attach_screenshots(backend, updated.id, new_shots)
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
 

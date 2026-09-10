@@ -403,7 +403,10 @@ class GitHubIssuesBackend:
         import urllib.parse
 
         repository_id = self._repository_id()
-        filename = os.path.basename(file_path)
+        # `or "attachment"` fallback (review finding, PR #184): matches attach()'s hosted-URL
+        # branch, so an edge-case empty basename gets a non-empty name=/alt-text consistently
+        # instead of an empty query param and empty markdown alt-text.
+        filename = os.path.basename(file_path) or "attachment"
         query = urllib.parse.urlencode(
             {"name": filename, "content_type": content_type, "repository_id": repository_id}
         )
