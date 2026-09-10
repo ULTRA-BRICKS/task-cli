@@ -111,9 +111,7 @@ are keyed by it). Tunables live in a `daemon:` config block (see Configuration).
 writing the ticket to Done. But a ticket can *reach* Done a different way entirely: Linear's own
 GitHub-PR-link automation, and GitHub's native "Closes #123" issue auto-close, write the closed
 state straight to the backend the instant a linked PR merges — task-cli is never invoked, so
-none of its gates ever run. This is exactly how ticket HYP-1347 was closed in August 2026, with
-all 4 acceptance criteria still unchecked and no screenshot attached — nobody ran `task done`,
-Linear's own PR-merge automation closed it.
+none of its gates ever run. 
 
 `task audit` is the backstop: it re-runs the same close gates against tickets that are already
 sitting in Done, after the fact.
