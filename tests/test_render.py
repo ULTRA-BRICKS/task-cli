@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from tasklib.model import Criterion, Screenshot, Ticket
 from tasklib.render import SECTIONS, parse, render, split_sections, validate_format
 
@@ -82,6 +84,17 @@ def test_round_trip_preserves_fields():
     assert parsed.acceptance == original.acceptance
     assert parsed.links["PR"] == original.links["PR"]
     assert [s.ref for s in parsed.screenshots] == ["before.png"]
+
+
+def test_round_trip_preserves_embedded_markdown_heading_in_what():
+    # task-cli#181: split_sections treats ANY line matching `^##\s+` as a new section
+    # boundary — a `--what` value that itself contains a line starting with `## ` (e.g. a
+    # pasted spec excerpt) was silently truncated at that line on the next parse, losing
+    # everything after it. render()/parse() must escape/unescape it so it round-trips intact.
+    t = _full_ticket()
+    t = replace(t, what="Intro text.\n\n## Embedded heading\n\nMore text after.")
+    parsed = parse(render(t))
+    assert parsed.what == t.what
 
 
 def test_parse_keeps_non_body_fields_from_base():

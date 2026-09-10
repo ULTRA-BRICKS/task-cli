@@ -37,10 +37,10 @@ _DUE_MARKER = "Due"
 def render(ticket: Ticket) -> str:
     """Serialize a ``Ticket`` to the canonical markdown body."""
     out: list[str] = []
-    out.append(f"## What\n{ticket.what.strip()}")
-    out.append(f"## Why (motivation)\n{ticket.why.strip()}")
-    out.append(f"## User impact\n{ticket.user_impact.strip()}")
-    out.append(f"## Cost of inaction\n{ticket.cost_of_inaction.strip()}")
+    out.append(f"## What\n{_escape_embedded_headings(ticket.what.strip())}")
+    out.append(f"## Why (motivation)\n{_escape_embedded_headings(ticket.why.strip())}")
+    out.append(f"## User impact\n{_escape_embedded_headings(ticket.user_impact.strip())}")
+    out.append(f"## Cost of inaction\n{_escape_embedded_headings(ticket.cost_of_inaction.strip())}")
 
     acc = "\n".join(_render_criterion(c) for c in ticket.acceptance) if ticket.acceptance else "- [ ] (none specified)"
     out.append(f"## Acceptance criteria\n{acc}")
@@ -93,6 +93,29 @@ def _render_links(ticket: Ticket) -> str:
 
 _HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
+# task-cli#181: split_sections (below) treats ANY line matching `^##\s+` as a NEW section
+# boundary — correct for the ticket's OWN canonical headings, but round-tripping raw
+# user-authored free text through the same body meant a `--what`/`--why`/`--impact`/
+# `--if-not-done` value that itself contained a line starting with `#`x1-6 + whitespace (e.g.
+# a pasted spec excerpt) got silently truncated at that line on the next parse — everything
+# after it was misread as belonging to a brand new section and dropped. Escaping a line-leading
+# heading-shaped run before it's embedded (Markdown's own backslash-escape convention) makes it
+# inert prose to split_sections; unescaping on the way back out restores the original text.
+_EMBEDDED_HEADING_RE = re.compile(r"^(#{1,6}\s)", re.MULTILINE)
+_ESCAPED_HEADING_RE = re.compile(r"^\\(#{1,6}\s)", re.MULTILINE)
+
+
+def _escape_embedded_headings(text: str) -> str:
+    """Escape a line-leading `#`x1-6 run in free-text ``text`` so it survives a round-trip
+    through :func:`split_sections` as prose, not a new section boundary."""
+    return _EMBEDDED_HEADING_RE.sub(r"\\\1", text)
+
+
+def _unescape_embedded_headings(text: str) -> str:
+    """Undo :func:`_escape_embedded_headings` after a field's content is pulled back out of
+    a parsed body."""
+    return _ESCAPED_HEADING_RE.sub(r"\1", text)
+
 
 def split_sections(body: str) -> dict[str, str]:
     """Split a markdown body into ``{heading: content}``. Tolerant of extra whitespace.
@@ -131,10 +154,10 @@ def parse(body: str, ticket: Ticket | None = None) -> Ticket:
 
     return replace(
         base,
-        what=sec.get("What", "").strip(),
-        why=sec.get("Why (motivation)", "").strip(),
-        user_impact=sec.get("User impact", "").strip(),
-        cost_of_inaction=sec.get("Cost of inaction", "").strip(),
+        what=_unescape_embedded_headings(sec.get("What", "").strip()),
+        why=_unescape_embedded_headings(sec.get("Why (motivation)", "").strip()),
+        user_impact=_unescape_embedded_headings(sec.get("User impact", "").strip()),
+        cost_of_inaction=_unescape_embedded_headings(sec.get("Cost of inaction", "").strip()),
         acceptance=acceptance,
         screenshots=screenshots,
         links=links or base.links,
