@@ -1524,13 +1524,19 @@ def _as_bool_cfg(value, *, default: bool) -> bool:
 
 
 def _attach_screenshots(backend, ticket_id: str, screenshots) -> None:
-    """Push each screenshot to the backend's attachment endpoint (durable proof).
+    """Push each screenshot to the backend's attachment endpoint (durable proof), and swap each
+    screenshot's ``.ref`` to the DURABLE ref ``backend.attach()`` returns (tg#16794/
+    review-cli#484 — a raw local path left in ``.ref`` renders as a permanently broken markdown
+    image in ``render.py``'s Screenshots section to every consumer but the machine that captured
+    it; GitHub's ``attach()`` used to echo the local path back unchanged, so this discard-the-
+    return-value bug was invisible until that backend actually started returning something
+    durable). Mutating in place means any caller that extended ``ticket.screenshots`` with these
+    SAME objects BEFORE its own persisting ``backend.update()``/``create()`` call gets the swap
+    reflected in the persisted body for free — see ``cmd_change``, which now attaches before its
+    ``update()`` for exactly this reason.
 
-    The body already embeds the local ref via render(); ``attach()`` is the durable channel
-    (GitHub: a reference comment; Linear: an issue attachment). Best-effort: an attach failure
-    must not undo a successful create/update, so a backend error is swallowed (the ref still
-    lives in the body). Exercises the ``TicketBackend.attach`` contract rather than leaving it
-    a dangling method.
+    Best-effort per screenshot, as before: an attach failure leaves ``.ref`` untouched (the raw
+    local ref still lives in the body, just not durably attached).
 
     Catches ``AmbiguousBackendError`` too, not just ``BackendError`` (review finding): the
     ticket/comment this attaches to already exists by the time this runs, so an ambiguous attach
@@ -1544,7 +1550,7 @@ def _attach_screenshots(backend, ticket_id: str, screenshots) -> None:
 
     for shot in screenshots:
         try:
-            backend.attach(ticket_id, shot.ref)
+            shot.ref = backend.attach(ticket_id, shot.ref)
         except (BackendError, AmbiguousBackendError):
             continue
 
@@ -1686,6 +1692,10 @@ def cmd_create(args: argparse.Namespace) -> int:
     # `created` is set (not None) whenever ambiguous_exit is None — attach is best-effort and
     # runs AFTER, in its own scope, so an attach hiccup (even an ambiguous one — see
     # _attach_screenshots) can never suppress the fact that the ticket itself was created.
+    # Unlike cmd_change/cmd_attach (which now attach BEFORE persisting, so the durable ref lands
+    # in the same write — see _attach_screenshots's docstring), this MUST run after: there is no
+    # ticket id to attach to before creation. Structural, not an oversight — the body still
+    # embeds the raw local ref from render() until whatever NEXT edits/reads this ticket.
     _attach_screenshots(backend, created.id, screenshots)
 
     from .session import record
@@ -3393,9 +3403,12 @@ def cmd_change(args: argparse.Namespace) -> int:
         _enforce_or_die(ticket, cfg, Phase.DONE)
         ticket.state = State.DONE
 
+    # tg#16794/review-cli#484: attach (and swap `.ref` to the durable url) BEFORE persisting,
+    # so render() embeds a working permanent link instead of the raw local path — mirrors
+    # cmd_attach and cmd_check's _ProofAttacher. Uses `ticket.id` (an edit's id is stable).
+    _attach_screenshots(backend, ticket.id, new_shots)
     try:
         updated = backend.update(ticket)
-        _attach_screenshots(backend, updated.id, new_shots)
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
 
@@ -3463,11 +3476,12 @@ def cmd_attach(args: argparse.Namespace) -> int:
             )
 
     attached: list[str] = []
+    durable_refs: dict[str, str] = {}
     fail: BackendError | None = None
     ambiguous: AmbiguousBackendError | None = None
     for path in args.path:
         try:
-            backend.attach(ticket.id, path)
+            durable_refs[path] = backend.attach(ticket.id, path)
             attached.append(path)
         except AmbiguousBackendError as exc:
             ambiguous = exc
@@ -3476,7 +3490,12 @@ def cmd_attach(args: argparse.Namespace) -> int:
             fail = exc
             break
 
-    new_shots = [Screenshot(ref=path, kind="implementation") for path in attached]
+    # tg#16794/review-cli#484: use the DURABLE ref backend.attach() returned, not the raw path
+    # — otherwise the ticket body's Screenshots section embeds a local path no other viewer can
+    # ever resolve (mirrors _attach_screenshots' identical fix for change/done/create).
+    new_shots = [
+        Screenshot(ref=durable_refs[path], kind="implementation") for path in attached
+    ]
     updated = ticket
     if new_shots:
         ticket.screenshots.extend(new_shots)

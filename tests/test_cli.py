@@ -2124,6 +2124,27 @@ def test_change_close_allowed_with_implementation_screenshot(capsys, _inject_fak
     assert rc == 0
 
 
+def test_change_persists_the_durable_ref_backend_attach_returns(capsys, _inject_fake):
+    # tg#16794/review-cli#484: cmd_change used to attach AFTER backend.update() and discard the
+    # return value — so even a backend that durably uploads (a real GitHubIssuesBackend/
+    # LinearBackend) still left the RAW local path embedded in the persisted ticket body.
+    # Simulate a real durable upload (attach() returns something DIFFERENT from its input) and
+    # prove the PERSISTED screenshot ref is the durable value, not the raw path.
+    main(_create_argv() + ["--label", "ui", "--screenshot", "creation.png"])
+    _ready_to_close(_inject_fake)
+    capsys.readouterr()
+
+    def durable_attach(ticket_id, file_path):
+        _inject_fake.attachments.append((ticket_id, file_path))
+        return "https://github.com/user-attachments/assets/durable-456"
+
+    _inject_fake.attach = durable_attach
+    rc = main(["change", "#1", "--screenshot", "after.png", "--done"])
+    assert rc == 0
+    impl = [s for s in _inject_fake.get("#1").screenshots if s.kind == "implementation"]
+    assert [s.ref for s in impl] == ["https://github.com/user-attachments/assets/durable-456"]
+
+
 def test_change_close_recorded_waiver_persists(capsys, _inject_fake):
     # a recorded screenshots waiver is an auditable decision and legitimately carries through.
     main(

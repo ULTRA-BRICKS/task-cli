@@ -59,6 +59,28 @@ def test_attach_adds_implementation_screenshot(tmp_path, capsys, fake):
     assert ticket.state is not State.DONE
 
 
+def test_attach_persists_the_durable_ref_backend_attach_returns(tmp_path, fake):
+    # tg#16794/review-cli#484: cmd_attach used to discard backend.attach()'s return value and
+    # always store the RAW path in the ticket's Screenshot.ref — so even a backend that DOES
+    # durably upload (a real GitHubIssuesBackend/LinearBackend in native mode) would still leave
+    # the local path embedded in the persisted ticket body. Simulate a real durable upload by
+    # having attach() return something DIFFERENT from its input, and prove the persisted
+    # screenshot ref is the durable value, not the raw path.
+    shot = tmp_path / "after.png"
+    shot.write_bytes(b"png")
+    main(_create_argv())
+
+    def durable_attach(ticket_id, file_path):
+        fake.attachments.append((ticket_id, file_path))
+        return "https://github.com/user-attachments/assets/durable-123"
+
+    fake.attach = durable_attach
+    rc = main(["attach", "#1", str(shot)])
+    assert rc == 0
+    impl = [s for s in fake.get("#1").screenshots if s.kind == "implementation"]
+    assert [s.ref for s in impl] == ["https://github.com/user-attachments/assets/durable-123"]
+
+
 def test_attach_multiple_paths(tmp_path, fake):
     a = tmp_path / "a.png"
     b = tmp_path / "b.png"
