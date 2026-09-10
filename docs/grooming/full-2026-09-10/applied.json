@@ -1,0 +1,1467 @@
+{
+  "repository": "alex-mextner/task-cli",
+  "plan_ref": "94a1825f2f9e611031dd6b74eb1de2d8b3130c56",
+  "plan_sha256": "28615ff1fc02a6adce071d0d49ce5a24118a0a36c515b87732aab7b014552028",
+  "started_at": "2026-09-10T13:34:38.002263+00:00",
+  "mode": "apply",
+  "events": [
+    {
+      "number": 185,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/185"
+    },
+    {
+      "number": 186,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    {
+      "number": 187,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/187"
+    },
+    {
+      "number": 188,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    {
+      "number": 189,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/189"
+    },
+    {
+      "number": 190,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    {
+      "number": 191,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/191"
+    },
+    {
+      "number": 192,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/192"
+    },
+    {
+      "number": 193,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/193"
+    },
+    {
+      "number": 194,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/task-cli/issues/194"
+    },
+    {
+      "number": 169,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "c26ab3ce8f8da56e70facfe5e1796263f770a34aa5887dcdd3b4c91eea5611f0",
+      "url": "https://github.com/alex-mextner/task-cli/issues/169"
+    },
+    {
+      "number": 1,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "aa59eb2c5c31f76247a22111ad15baad17b7212fd7128e74455ec7e8214c2f2b",
+      "url": "https://github.com/alex-mextner/task-cli/issues/1"
+    },
+    {
+      "number": 2,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "34ea82f2141b15964395032ab0945fe316a91868e40d903c64b9fa3684433b95",
+      "url": "https://github.com/alex-mextner/task-cli/issues/2"
+    },
+    {
+      "number": 3,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "62d0edf3ef23a0c4d595a91094b8ea3c0bfad7044522d2ac4508b1b24ead55d6",
+      "url": "https://github.com/alex-mextner/task-cli/issues/3"
+    },
+    {
+      "number": 4,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5e18b210413665ac8eb1d7f5c957693acb4ecb09acbcb233032acb48be252bb9",
+      "url": "https://github.com/alex-mextner/task-cli/issues/4"
+    },
+    {
+      "number": 8,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "c1cc6a7a408dcb45ba1f426bae0c0bf2a5c5834f0282c90982e52c8732c60ce8",
+      "url": "https://github.com/alex-mextner/task-cli/issues/8"
+    },
+    {
+      "number": 9,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0b304265417c145d872f44ed1bf171d518f13fb77de40aa5f66eee0ee12cdb42",
+      "url": "https://github.com/alex-mextner/task-cli/issues/9"
+    },
+    {
+      "number": 10,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "ec6c08aafc8e76976c2d8bc4e88ff602c55fd43ade8332fa12877b717ca0459f",
+      "url": "https://github.com/alex-mextner/task-cli/issues/10"
+    },
+    {
+      "number": 12,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "cb9d300e9d9141ba14fe3050ec22a1ce3f06ca8d240521a890699681a4bf10b7",
+      "url": "https://github.com/alex-mextner/task-cli/issues/12"
+    },
+    {
+      "number": 13,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "54eab5e1d8c2b1f0a1fc753c11e0faa00c0c34cf5ac15fb261e35818c3ce1332",
+      "url": "https://github.com/alex-mextner/task-cli/issues/13"
+    },
+    {
+      "number": 15,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4b9fe1b19d300cab7342f6562ef20d73f5586e7c1421ae5107ed159da0d904d1",
+      "url": "https://github.com/alex-mextner/task-cli/issues/15"
+    },
+    {
+      "number": 16,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f065afcee2a1c33692ff6914ef053786781ca9b01a00d3f04ab9274a81074f2f",
+      "url": "https://github.com/alex-mextner/task-cli/issues/16"
+    },
+    {
+      "number": 19,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0fffe8cf861fd6988c855e7ab89b3d405c1c90e054252d90936dd444b2fd33f1",
+      "url": "https://github.com/alex-mextner/task-cli/issues/19"
+    },
+    {
+      "number": 20,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "6875b4b0569332a07afdd6b5ce09e7deb6bfe4007a2a72b26826a20c6be1141c",
+      "url": "https://github.com/alex-mextner/task-cli/issues/20"
+    },
+    {
+      "number": 22,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4eb074b057021021e8e8d5f694deb47fb2373f94acebd7c6be48d97ade64149e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/22"
+    },
+    {
+      "number": 24,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "efea940643b3d785140744b3b2f00ab7e7f55496855479af39cece2d0d4b5b52",
+      "url": "https://github.com/alex-mextner/task-cli/issues/24"
+    },
+    {
+      "number": 25,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0639d1a30dace6e5c464ac45d811f262e26223f22e8e3ce8c43b637941f0f3b6",
+      "url": "https://github.com/alex-mextner/task-cli/issues/25"
+    },
+    {
+      "number": 27,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "9628edd6fb390cd244065ce341154cc3686c7b5159537a74e7da2feae18792db",
+      "url": "https://github.com/alex-mextner/task-cli/issues/27"
+    },
+    {
+      "number": 29,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "d8166f561853a49b2247b3b6c9ffe87be4d135e7f62c9afac0a91ace715f4bb7",
+      "url": "https://github.com/alex-mextner/task-cli/issues/29"
+    },
+    {
+      "number": 32,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "9eaa20280f67aca944dc81e6a093e77b993a6a68713d8b88aca7c739dbe2d257",
+      "url": "https://github.com/alex-mextner/task-cli/issues/32"
+    },
+    {
+      "number": 36,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "ce26a2752a11e6371c788bfbf5035963ccee9874916fcdcc89425b51c396c31c",
+      "url": "https://github.com/alex-mextner/task-cli/issues/36"
+    },
+    {
+      "number": 38,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "a7c4c6fa1fa354957d91477d2f98632f6be7027c0232ce3a498e3c94e53e8dc1",
+      "url": "https://github.com/alex-mextner/task-cli/issues/38"
+    },
+    {
+      "number": 42,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "39a8d188df46dc3b69ff781c4e4502ce317c002bf196c2919b7f19d66819f697",
+      "url": "https://github.com/alex-mextner/task-cli/issues/42"
+    },
+    {
+      "number": 43,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "dabccbedf880147692c2fc8822bf7faf5bdab129de99c9a9f0ddb8b052886f29",
+      "url": "https://github.com/alex-mextner/task-cli/issues/43"
+    },
+    {
+      "number": 45,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "da079edc8fb9f94859fa9b23115fa30da587e2a6357786447d1b4b595886923e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/45"
+    },
+    {
+      "number": 47,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "add8e8a83c3d96f5a0d9f91b672d2e6aecdc23ec42754ada0b149f28b2b2d114",
+      "url": "https://github.com/alex-mextner/task-cli/issues/47"
+    },
+    {
+      "number": 50,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "a9a700b7b83352990913ee36b1080568d1239946140d17e7331ab7d11f862056",
+      "url": "https://github.com/alex-mextner/task-cli/issues/50"
+    },
+    {
+      "number": 52,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "2844a1980446b56e54e4164f38e9116841bdf031ce0ab66462ebf17fdaf8542b",
+      "url": "https://github.com/alex-mextner/task-cli/issues/52"
+    },
+    {
+      "number": 54,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "778b414c620c81cf26ad61c996052f27498ba60c36109a5b00a791b4c96b7dc0",
+      "url": "https://github.com/alex-mextner/task-cli/issues/54"
+    },
+    {
+      "number": 57,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "3ed5dfac09b702e8aeec76509896234605c7b84ffbfd137fbe7292e4cac81eb8",
+      "url": "https://github.com/alex-mextner/task-cli/issues/57"
+    },
+    {
+      "number": 59,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "2108d10ab55cae9386561e000a7b8e83e32e4a13777afbf6c2cfb61529278abe",
+      "url": "https://github.com/alex-mextner/task-cli/issues/59"
+    },
+    {
+      "number": 60,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "7a05b9c37209766a11d2f7d5a7d016fca4a5e75fff06e538baccf0def684b4d1",
+      "url": "https://github.com/alex-mextner/task-cli/issues/60"
+    },
+    {
+      "number": 61,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f996e78ada5b553821a96cab3288cd33c91ff6a96351a9669ae5f23a3ffc7960",
+      "url": "https://github.com/alex-mextner/task-cli/issues/61"
+    },
+    {
+      "number": 62,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "64da3d4df728b073d34e55b6607fa157bb13f2fe011777168baca97314add479",
+      "url": "https://github.com/alex-mextner/task-cli/issues/62"
+    },
+    {
+      "number": 63,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "ddd48f41ba00caf7fa1b3b25ff9cedb835de0b78355fd4c6aa3a1c3e765ecc13",
+      "url": "https://github.com/alex-mextner/task-cli/issues/63"
+    },
+    {
+      "number": 64,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "8d79283e73b0e8e4ea78309a65e2f891962f7eb9d499f73ebcb6077b09096209",
+      "url": "https://github.com/alex-mextner/task-cli/issues/64"
+    },
+    {
+      "number": 65,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "38f35c60833831c789716fb7fac8387185574bf4b641eda812ae54ede8196bfd",
+      "url": "https://github.com/alex-mextner/task-cli/issues/65"
+    },
+    {
+      "number": 66,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4a4acb7f59705842c58df01f183d3ed3998c8392123c3f622eb52c0a376a53ab",
+      "url": "https://github.com/alex-mextner/task-cli/issues/66"
+    },
+    {
+      "number": 67,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "a8ee71c0e5fbd5f7acf87dc48b719f0533561d09f2037371c3bdb1766f7dcc78",
+      "url": "https://github.com/alex-mextner/task-cli/issues/67"
+    },
+    {
+      "number": 68,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "e8a2132560e9bf27554afca67781ffae51114116475963878d8e459d679c9c3e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/68"
+    },
+    {
+      "number": 69,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "a2d670fc73409e4b0b2abf4c2b9f0ce1ebf3012bf828bf35f0082372c9b04067",
+      "url": "https://github.com/alex-mextner/task-cli/issues/69"
+    },
+    {
+      "number": 70,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "6878575c7046f030ceb4469744fb0264bb1c36cbbead509a31835c6f4c7dae87",
+      "url": "https://github.com/alex-mextner/task-cli/issues/70"
+    },
+    {
+      "number": 73,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "ebd5a7168fd42caca2c0564f4cc1661047cdde20e62ea218df4d66b5bb38cfd9",
+      "url": "https://github.com/alex-mextner/task-cli/issues/73"
+    },
+    {
+      "number": 74,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "93559e60e27d6004b52816015dfe1da48a14bbeb51eb068f836378abf35b7039",
+      "url": "https://github.com/alex-mextner/task-cli/issues/74"
+    },
+    {
+      "number": 75,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "cc08b5b475d98b188efa1fa9537afda491b3dc2e166109b0d07a378efdd6a0b7",
+      "url": "https://github.com/alex-mextner/task-cli/issues/75"
+    },
+    {
+      "number": 76,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4ffe09bff926d20a72af7b8fb7734852fff0a2b163c8c459107fd073e0c77e69",
+      "url": "https://github.com/alex-mextner/task-cli/issues/76"
+    },
+    {
+      "number": 77,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "75f11fc0b38046fcc900a55cd57b751fced1601c577a3d0fb4dae168952d5e40",
+      "url": "https://github.com/alex-mextner/task-cli/issues/77"
+    },
+    {
+      "number": 78,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "014f9f0d17d4ba946a12950baf75c3850f03959436c775698e185914965cb548",
+      "url": "https://github.com/alex-mextner/task-cli/issues/78"
+    },
+    {
+      "number": 79,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0a6c80b030f889699205914c476b1069e59b151c67c838c3995f6e39a76962a7",
+      "url": "https://github.com/alex-mextner/task-cli/issues/79"
+    },
+    {
+      "number": 80,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "ceefa9ae54750d68a853aee63494246401f82b4df2a6bbf598e0c431217ce37d",
+      "url": "https://github.com/alex-mextner/task-cli/issues/80"
+    },
+    {
+      "number": 81,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "e59de9dd8b26cda3e8821db0f8ac68bc05403208b99acd113f4d243f5f7dd71f",
+      "url": "https://github.com/alex-mextner/task-cli/issues/81"
+    },
+    {
+      "number": 82,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "42611fe9f3391471f59697cf33e8ce7bf343d3eeb6fed78f34286e42842e6228",
+      "url": "https://github.com/alex-mextner/task-cli/issues/82"
+    },
+    {
+      "number": 83,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0aa342a5426249dd5abaa5f6bab3f42246a0008f9096731ce58e58e516374b4f",
+      "url": "https://github.com/alex-mextner/task-cli/issues/83"
+    },
+    {
+      "number": 85,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "6f715a31cf30e2d1400a280854cbebffde064a1fdf5f02f2d5aff221c81d8f42",
+      "url": "https://github.com/alex-mextner/task-cli/issues/85"
+    },
+    {
+      "number": 86,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "8e94bb5f2551a5c43e80805db6ea0d1302b3b3e436bc3aeb5ef11ca2f2344230",
+      "url": "https://github.com/alex-mextner/task-cli/issues/86"
+    },
+    {
+      "number": 87,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4862ffeddea2fcf38c0b749000b4983501ef995ce3b61cbcd59aea38b9e13de6",
+      "url": "https://github.com/alex-mextner/task-cli/issues/87"
+    },
+    {
+      "number": 88,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "50563aea5f70d92f3ca54a879028e1400fc59cec78712d19c07a7fa40eb99c4a",
+      "url": "https://github.com/alex-mextner/task-cli/issues/88"
+    },
+    {
+      "number": 91,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "27d11933f70ab4b70551464e09a1018e48a87b23e6b4ee603ac14d2ef077b315",
+      "url": "https://github.com/alex-mextner/task-cli/issues/91"
+    },
+    {
+      "number": 92,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5188b99714bc94cc5539f60565029ba16767923512829d5c43f23be547663ac3",
+      "url": "https://github.com/alex-mextner/task-cli/issues/92"
+    },
+    {
+      "number": 93,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "89788a64468da01de1c6cd40f45b08869284e8bb459155ccaab593525b8eb1b6",
+      "url": "https://github.com/alex-mextner/task-cli/issues/93"
+    },
+    {
+      "number": 97,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "c5940735c6858ce85553767bceb3bf2211d6fcc055787eae40e7f5b069214677",
+      "url": "https://github.com/alex-mextner/task-cli/issues/97"
+    },
+    {
+      "number": 98,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0403c96453c1c225d14ab3751f38749e917700e99cf1a3383fb61698d01473c2",
+      "url": "https://github.com/alex-mextner/task-cli/issues/98"
+    },
+    {
+      "number": 99,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "9cad444d29dba9dded901483cfb8d8aa4e232123456d0958874dee8062882b38",
+      "url": "https://github.com/alex-mextner/task-cli/issues/99"
+    },
+    {
+      "number": 100,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "a7e6eaa1411713a55219f4b49dec76bcf0c24e96c3e670186318677a28447265",
+      "url": "https://github.com/alex-mextner/task-cli/issues/100"
+    },
+    {
+      "number": 102,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f2a4ceb5796abd9b78ffb8e1cce6215ef2aeb90792641dc40e6f5ccfa807ee19",
+      "url": "https://github.com/alex-mextner/task-cli/issues/102"
+    },
+    {
+      "number": 104,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "49f0418e44fdfcd4aa370bc3f41b510cb52b22b78646ca5ad7cc22a36e6d6551",
+      "url": "https://github.com/alex-mextner/task-cli/issues/104"
+    },
+    {
+      "number": 105,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "6d66ef02dce8c876b7da7c282a21024fdbc91203ab69fd97fbb1acc7f1d47310",
+      "url": "https://github.com/alex-mextner/task-cli/issues/105"
+    },
+    {
+      "number": 106,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "71710d31ae67d3f8fbe4c43d93d0a5f807a0ce7647dcdd74381e456f72d0c139",
+      "url": "https://github.com/alex-mextner/task-cli/issues/106"
+    },
+    {
+      "number": 108,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "75548282e5dbea9d4ae181a82b424569658508e457869d5905dd24f7a9c3b12d",
+      "url": "https://github.com/alex-mextner/task-cli/issues/108"
+    },
+    {
+      "number": 110,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "22b56037231a6245d0006d5e9a5e3f4aa2a94a7fe7fb79b775afdac22fe65cf3",
+      "url": "https://github.com/alex-mextner/task-cli/issues/110"
+    },
+    {
+      "number": 111,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5e6dd4413366f7cf0c9a2ba2dd8bf405217f143c2bf7e5161de2affc7d80665b",
+      "url": "https://github.com/alex-mextner/task-cli/issues/111"
+    },
+    {
+      "number": 112,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "1e0cb9facb65861b0701fc09f81c5dab6c25d5f7bf7f9ce7640737b20474e19a",
+      "url": "https://github.com/alex-mextner/task-cli/issues/112"
+    },
+    {
+      "number": 114,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "588d1a97549825ba2032f33369642ad00d9412e14e8900fb54662b195dc5fe92",
+      "url": "https://github.com/alex-mextner/task-cli/issues/114"
+    },
+    {
+      "number": 115,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "b1b4ea4e0461fb9e78afd6db2b95b76e9f937876b4ea34d0bc03094fd4e9e3fe",
+      "url": "https://github.com/alex-mextner/task-cli/issues/115"
+    },
+    {
+      "number": 116,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "d2deb807616c0bba42bc528e3ee057a2e059a9c2e5b773887473f3c5bbfe718a",
+      "url": "https://github.com/alex-mextner/task-cli/issues/116"
+    },
+    {
+      "number": 117,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "2e61b4098473a175c784e28de5c3d79387ed20a1c6e1d04443521dd6820b919b",
+      "url": "https://github.com/alex-mextner/task-cli/issues/117"
+    },
+    {
+      "number": 119,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "1ceff52f0a314852d1f13613570b43a1f86de488acbd879d7a2905a360cfd9c6",
+      "url": "https://github.com/alex-mextner/task-cli/issues/119"
+    },
+    {
+      "number": 120,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5e0d532dae709c6e4c19f0bf0450470efb90dec2e9ff45800163b6e1e1fb591e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/120"
+    },
+    {
+      "number": 122,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "6e34bb531a95f6cc8d69e3da9ad861004550ae33ff5c971d598f8f3b922b1a39",
+      "url": "https://github.com/alex-mextner/task-cli/issues/122"
+    },
+    {
+      "number": 123,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f6114367491b2f274d516430111ec08d47affdd25b9bd385fef5cac41a3f8369",
+      "url": "https://github.com/alex-mextner/task-cli/issues/123"
+    },
+    {
+      "number": 124,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "511fc94a382f594ab5575285db8c766b29c3982e6cd604c1cc5e020d1202a3f5",
+      "url": "https://github.com/alex-mextner/task-cli/issues/124"
+    },
+    {
+      "number": 125,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f107dc030d8732c344ecf567920df97bf5cc86bdb5ae76300d0d8c79539ae6ac",
+      "url": "https://github.com/alex-mextner/task-cli/issues/125"
+    },
+    {
+      "number": 126,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "39751cf5c7f43eca4edf61c184bd1b47e56aa07a41fa90f7bed26120ea51886c",
+      "url": "https://github.com/alex-mextner/task-cli/issues/126"
+    },
+    {
+      "number": 127,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "cdc67519e02bcfeb5b2fc62a6e6cd9b8b4ff1a16c51258243b03ed4568c80b25",
+      "url": "https://github.com/alex-mextner/task-cli/issues/127"
+    },
+    {
+      "number": 128,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "1256377d548d4588d2e4472cc2e72708dfef41542120a6b9bae806ebcb12e1c4",
+      "url": "https://github.com/alex-mextner/task-cli/issues/128"
+    },
+    {
+      "number": 130,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "33f415effbd995cace9d2053b8e9198d5d380b10664b1ee4c9381de503aeddfd",
+      "url": "https://github.com/alex-mextner/task-cli/issues/130"
+    },
+    {
+      "number": 131,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "5634332addc6ff6ab7ead41c7cbec90d7550ba08f9a6ae4759f0e63c55838397",
+      "url": "https://github.com/alex-mextner/task-cli/issues/131"
+    },
+    {
+      "number": 132,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "2793a06d81b9ed5021c347559fb113fc5bd734ffbb5d0fa029722a53eeab816f",
+      "url": "https://github.com/alex-mextner/task-cli/issues/132"
+    },
+    {
+      "number": 133,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0624d7b620de1a0afc51f777b16bb7a29c700470405d831ce5d7b042671cc2fd",
+      "url": "https://github.com/alex-mextner/task-cli/issues/133"
+    },
+    {
+      "number": 134,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4682d41dea072b94640126ed28f8163929940dd9edabf4b85426ab53a7f594d8",
+      "url": "https://github.com/alex-mextner/task-cli/issues/134"
+    },
+    {
+      "number": 137,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "2c52f0fbd7d015575607b715dab99e398943644a4b69811b108a96e61bb2f332",
+      "url": "https://github.com/alex-mextner/task-cli/issues/137"
+    },
+    {
+      "number": 138,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "1d15f0b481512c0b2227565f12d1a8aeea097e61a4b7ad4a73b66b8392781dfc",
+      "url": "https://github.com/alex-mextner/task-cli/issues/138"
+    },
+    {
+      "number": 139,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "e45e4fba6a24a95bf96d839933869fe20c76e8d8b65ffe644352e522b1f52183",
+      "url": "https://github.com/alex-mextner/task-cli/issues/139"
+    },
+    {
+      "number": 140,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "fc58df9978e01a684513071bcb4240cec48b2fb4915695b633054e2c670ae353",
+      "url": "https://github.com/alex-mextner/task-cli/issues/140"
+    },
+    {
+      "number": 141,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "fb9f79e9879b18a94b6c0a84f9aaf10c5a6f91929fb8057a9acdf2c05f51cfc7",
+      "url": "https://github.com/alex-mextner/task-cli/issues/141"
+    },
+    {
+      "number": 143,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "2856e270627e2a7cdf75c47eb8f3c95c8d542fa6093943f147b4c70d5c8f27de",
+      "url": "https://github.com/alex-mextner/task-cli/issues/143"
+    },
+    {
+      "number": 144,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "79ca04024a1f7955247ce6652a8722a4859b2820cc6a65e14357ec442908c244",
+      "url": "https://github.com/alex-mextner/task-cli/issues/144"
+    },
+    {
+      "number": 145,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "20021839063dbe1d9686e811ec3537d293bea51e1f05d2468b461bac1c36cb2a",
+      "url": "https://github.com/alex-mextner/task-cli/issues/145"
+    },
+    {
+      "number": 146,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "89fc153904177dde6cd548e9b60b39b92acfee07ae348ca133a214dff9161210",
+      "url": "https://github.com/alex-mextner/task-cli/issues/146"
+    },
+    {
+      "number": 147,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "1fbe157da260a964afc5492b60c3581125177105cc97dff2e41ec92450787e32",
+      "url": "https://github.com/alex-mextner/task-cli/issues/147"
+    },
+    {
+      "number": 148,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "106d2569ebc1433f5213d13a91db774e5cb8d3233c745000f677406be166a475",
+      "url": "https://github.com/alex-mextner/task-cli/issues/148"
+    },
+    {
+      "number": 149,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "7f3f7bc56558c2b7b770a9549a4d888d3e908ca326d6319c2f40d630812783b8",
+      "url": "https://github.com/alex-mextner/task-cli/issues/149"
+    },
+    {
+      "number": 150,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "074985dc55064be8fe7e49a04fc335a6b07266171e5653b404f5858a49c97e23",
+      "url": "https://github.com/alex-mextner/task-cli/issues/150"
+    },
+    {
+      "number": 151,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "95cd6565af1c5c7e1e82889f36e0d85ae31a45e03520201e2d1841136f2a9f7e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/151"
+    },
+    {
+      "number": 152,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "839bef020c725cbcd878c2c2e49ffaed32cd4124f6a159c61f606a5ef3e45a9a",
+      "url": "https://github.com/alex-mextner/task-cli/issues/152"
+    },
+    {
+      "number": 153,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "d8f3d2e1768eb161fc6568f37a581298a5b9e6a0b99714053854ebfe9cdc6d12",
+      "url": "https://github.com/alex-mextner/task-cli/issues/153"
+    },
+    {
+      "number": 154,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "83e2a61a327c9041f93e38d5f06dd54d54c1ee26c930e91fac1f4622b96720ed",
+      "url": "https://github.com/alex-mextner/task-cli/issues/154"
+    },
+    {
+      "number": 155,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "3154fb86cbb171e434f043315b34d60e1b05589da24ec4d4c831d4e28878e073",
+      "url": "https://github.com/alex-mextner/task-cli/issues/155"
+    },
+    {
+      "number": 156,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "f15be13aefaca7275ebeb1e79669d282fc0b4dd8a3d4c6bd2b8a8c762461770e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/156"
+    },
+    {
+      "number": 157,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "3c93ac0bb8ac8014ae5db86a63afa3a76aaeb80f008557620c013ebf1585b75e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/157"
+    },
+    {
+      "number": 158,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "7ce41533001dcf822e25eafe552d2574cd854f7072bd0715aa04cc837fbb6749",
+      "url": "https://github.com/alex-mextner/task-cli/issues/158"
+    },
+    {
+      "number": 160,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "57e6bd28ef2a404924a236da00a4d371390fbffa8731049fce76075e6dd84472",
+      "url": "https://github.com/alex-mextner/task-cli/issues/160"
+    },
+    {
+      "number": 162,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0d6d588b57c8f05f4c48dcc51699d795c169e79eb38ffc60e2f6446c3a59d468",
+      "url": "https://github.com/alex-mextner/task-cli/issues/162"
+    },
+    {
+      "number": 165,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "ae2b5be1de0bdabfe4579d15dc0807833801caef15a6fdfa01a64bdb2e080cde",
+      "url": "https://github.com/alex-mextner/task-cli/issues/165"
+    },
+    {
+      "number": 166,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "56d58ee6a62a541fed3038c3b82f1432b1c5f80ec243a62cb96c517b4cbbb05e",
+      "url": "https://github.com/alex-mextner/task-cli/issues/166"
+    },
+    {
+      "number": 167,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "e1340010cec8ef1293d5d3152b1e6354d7c2db17fa531913d643d461c8bc89b9",
+      "url": "https://github.com/alex-mextner/task-cli/issues/167"
+    },
+    {
+      "number": 168,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "adff096cc46c4e88bc4f9917f4af2ba366b0d0a3ae0f4bc1895ff24c12b90a23",
+      "url": "https://github.com/alex-mextner/task-cli/issues/168"
+    },
+    {
+      "number": 170,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "fe78f8e1700c0fb4fdd3eedeb75ef85f210795105ed309256cd99868885df418",
+      "url": "https://github.com/alex-mextner/task-cli/issues/170"
+    },
+    {
+      "number": 172,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "4a058b9759671d4599b2524af1b83d5cd31246bafecbf154514f6c80fd6e1672",
+      "url": "https://github.com/alex-mextner/task-cli/issues/172"
+    },
+    {
+      "number": 173,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "a0f60a2e10aad15b5e3607633662e68a29ee155db30bfe6788c902aa44275357",
+      "url": "https://github.com/alex-mextner/task-cli/issues/173"
+    },
+    {
+      "number": 174,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "490abb5046f698657c87101f6c8cc4372138df884ce55f4340180572556ceb4a",
+      "url": "https://github.com/alex-mextner/task-cli/issues/174"
+    },
+    {
+      "number": 175,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "0830235327f234f395b7ce8d456b65901cf856fcbcdcdc0f9aca1f5b75fbf71a",
+      "url": "https://github.com/alex-mextner/task-cli/issues/175"
+    },
+    {
+      "number": 178,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "eee99eeda1a11a6eda91cd03ee6fafdd9223f12343c2a331409774408248fc41",
+      "url": "https://github.com/alex-mextner/task-cli/issues/178"
+    },
+    {
+      "number": 181,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "276af16d47421a79dc934134d9b3b47581a12a543ea344161e6d15ac566adc16",
+      "url": "https://github.com/alex-mextner/task-cli/issues/181"
+    },
+    {
+      "number": 183,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "105b48dde8813fd7028a4ad4f8ef4ac61b2a1073d80876e400c7bcc1ba1fe7b9",
+      "url": "https://github.com/alex-mextner/task-cli/issues/183"
+    },
+    {
+      "number": 170,
+      "result": "consolidated-with-preserved-evidence",
+      "canonical": "task-cli#169",
+      "state_reason": "not_planned"
+    },
+    {
+      "number": 172,
+      "result": "consolidated-with-preserved-evidence",
+      "canonical": "task-cli#169",
+      "state_reason": "not_planned"
+    },
+    {
+      "number": 173,
+      "result": "consolidated-with-preserved-evidence",
+      "canonical": "task-cli#169",
+      "state_reason": "not_planned"
+    }
+  ],
+  "parents": {
+    "1": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "2": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "3": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/187",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/187"
+    },
+    "4": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "8": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "9": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/189",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/189"
+    },
+    "10": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "12": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "13": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "15": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/189",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/189"
+    },
+    "16": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "19": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "20": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "22": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "24": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "25": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "27": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "29": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "32": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "36": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "38": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "42": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "43": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/187",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/187"
+    },
+    "45": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "47": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "50": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "52": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "54": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "57": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "59": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "60": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "61": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "62": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "63": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "64": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "65": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "66": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "67": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "68": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/187",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/187"
+    },
+    "69": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/189",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/189"
+    },
+    "70": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "73": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "74": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "75": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "76": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "77": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "78": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "79": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/191",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/191"
+    },
+    "80": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "81": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "82": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "83": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "85": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/192",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/192"
+    },
+    "86": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "87": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "88": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "91": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "92": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "93": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "97": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "98": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "99": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/191",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/191"
+    },
+    "100": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "102": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "104": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "105": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "106": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "108": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "110": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "111": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/193",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/193"
+    },
+    "112": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/193",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/193"
+    },
+    "114": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "115": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "116": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "117": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "119": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "120": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "122": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "123": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "124": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "125": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "126": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "127": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "128": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/191",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/191"
+    },
+    "130": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "131": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "132": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "133": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "134": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "137": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "138": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "139": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "140": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "141": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/192",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/192"
+    },
+    "143": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/194",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/194"
+    },
+    "144": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "145": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "146": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "147": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "148": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "149": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/192",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/192"
+    },
+    "150": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "151": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "152": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "153": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/189",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/189"
+    },
+    "154": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "155": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "156": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "157": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "158": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "160": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "162": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "165": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "166": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "167": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "168": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "169": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "170": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "172": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "173": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "174": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    },
+    "175": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/188",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/188"
+    },
+    "178": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/194",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/194"
+    },
+    "181": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/190",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/190"
+    },
+    "183": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/task-cli/issues/186",
+      "verified_parent": "https://github.com/alex-mextner/task-cli/issues/186"
+    }
+  },
+  "newly_discovered": [],
+  "counts": {
+    "parent-created": 10,
+    "body-updated-readback-verified": 125,
+    "consolidated-with-preserved-evidence": 3
+  },
+  "api_reads": 139,
+  "api_writes": 277,
+  "root": "https://github.com/alex-mextner/task-cli/issues/185",
+  "finished_at": "2026-09-10T13:45:49.544793+00:00",
+  "planned_issues": 125,
+  "processed_bodies": 125,
+  "native_parents_verified": 125
+}
