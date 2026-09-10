@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "source_version": 4,
+  "context": {
+    "repository": "ultrabricks/task-cli",
+    "repository_id": 1270088634,
+    "source_ref": "f707ee2b2f643a4621121187df442554aa968244",
+    "snapshot_run": "34541300125",
+    "mutations": "body only",
+    "manual_exclusions": []
+  },
+  "mode": "apply",
+  "started_at": "2026-09-10T23:37:57.655207+00:00",
+  "events": [
+    {
+      "key": "task-cli#192",
+      "number": 192,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "384f2d03edaa27c80ad1c022916b4e5c5e3b55cf5bdd842c57ae489f602cd5ac"
+    },
+    {
+      "key": "task-cli#149",
+      "number": 149,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "7f3f7bc56558c2b7b770a9549a4d888d3e908ca326d6319c2f40d630812783b8"
+    },
+    {
+      "key": "task-cli#85",
+      "number": 85,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "6f715a31cf30e2d1400a280854cbebffde064a1fdf5f02f2d5aff221c81d8f42"
+    },
+    {
+      "key": "task-cli#194",
+      "number": 194,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "3b80bd5a48345cecc2c3c920573b3110f57d1becd0c374e608cbef04db77ad8c"
+    },
+    {
+      "key": "task-cli#193",
+      "number": 193,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "322ffd97fbc8853ef341d4b28192b3cf138682222f600ed1ad0cea19e58aae2d"
+    },
+    {
+      "key": "task-cli#191",
+      "number": 191,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "246dab281509349aafac4b5086a320f86ea01f06e1c0afbbec678ff7b93734d9"
+    },
+    {
+      "key": "task-cli#190",
+      "number": 190,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "86718649fb1dd1168428c4520859ca09df2dddf6672abb7c32b81ad888d129ab"
+    },
+    {
+      "key": "task-cli#189",
+      "number": 189,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "79595179ebf96e0a8cba081c5a85afbb3892cc03d517516249e99aa4e7c79616"
+    },
+    {
+      "key": "task-cli#188",
+      "number": 188,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "f48b488fd577717d90961a356fa5fdfc36c397fba36ffe935958914b7418dea4"
+    },
+    {
+      "key": "task-cli#187",
+      "number": 187,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "0a710812cd7eca906e130d2a75d8169b82b997e69aac46ab8595fbe1800f95fe"
+    },
+    {
+      "key": "task-cli#186",
+      "number": 186,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "aa0591914d3ed734613f1128125092e1016298433db206717534e4e843f31057"
+    },
+    {
+      "key": "task-cli#185",
+      "number": 185,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "7d725bc5564d56563e4579d34c11a863495fa1260a2a650393d1f833e4c49ea2"
+    },
+    {
+      "key": "task-cli#178",
+      "number": 178,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "eee99eeda1a11a6eda91cd03ee6fafdd9223f12343c2a331409774408248fc41"
+    },
+    {
+      "key": "task-cli#175",
+      "number": 175,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "0830235327f234f395b7ce8d456b65901cf856fcbcdcdc0f9aca1f5b75fbf71a"
+    },
+    {
+      "key": "task-cli#174",
+      "number": 174,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "490abb5046f698657c87101f6c8cc4372138df884ce55f4340180572556ceb4a"
+    },
+    {
+      "key": "task-cli#169",
+      "number": 169,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "c26ab3ce8f8da56e70facfe5e1796263f770a34aa5887dcdd3b4c91eea5611f0"
+    },
+    {
+      "key": "task-cli#162",
+      "number": 162,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "0d6d588b57c8f05f4c48dcc51699d795c169e79eb38ffc60e2f6446c3a59d468"
+    },
+    {
+      "key": "task-cli#158",
+      "number": 158,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "7ce41533001dcf822e25eafe552d2574cd854f7072bd0715aa04cc837fbb6749"
+    },
+    {
+      "key": "task-cli#157",
+      "number": 157,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "3c93ac0bb8ac8014ae5db86a63afa3a76aaeb80f008557620c013ebf1585b75e"
+    },
+    {
+      "key": "task-cli#156",
+      "number": 156,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "f15be13aefaca7275ebeb1e79669d282fc0b4dd8a3d4c6bd2b8a8c762461770e"
+    },
+    {
+      "key": "task-cli#153",
+      "number": 153,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "d8f3d2e1768eb161fc6568f37a581298a5b9e6a0b99714053854ebfe9cdc6d12"
+    },
+    {
+      "key": "task-cli#152",
+      "number": 152,
+      "result": "delivery-uncertain",
+      "observed_before_sha256": "839bef020c725cbcd878c2c2e49ffaed32cd4124f6a159c61f606a5ef3e45a9a"
+    }
+  ],
+  "writes": 21,
+  "complete": false,
+  "fatal": "delivery-uncertain",
+  "product_acceptance": false,
+  "counts": {
+    "patch-received-awaiting-readback": 21,
+    "delivery-uncertain": 1
+  },
+  "pending_write": {
+    "key": "task-cli#152",
+    "intended_sha256": "7027484cb75dbcbd459c85e1821a151b88587037304c6019550fc651b628a169"
+  },
+  "readback_error": "HTTPError",
+  "planned": 135,
+  "remaining_or_conflicted": 135,
+  "finished_at": "2026-09-10T23:41:02.164515+00:00"
+}
