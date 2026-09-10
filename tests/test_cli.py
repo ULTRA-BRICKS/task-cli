@@ -67,6 +67,8 @@ def test_no_command_prints_help(capsys):
         ["find", "query"],
         ["change", "#1", "--title", "x"],
         ["link", "#1", "blocks", "#2"],
+        ["attach", "#1", "shot.png"],
+        ["attach", "#1", "a.png", "b.png"],
         ["status", "#1"],
         ["status", "#1", "done"],
         ["classify", "some text"],
@@ -2100,6 +2102,7 @@ def test_create_calls_attach_for_screenshots(_inject_fake):
     assert ("#1", "mock.png") in _inject_fake.attachments
 
 
+
 def test_change_close_refuses_ui_without_implementation_screenshot(
     capsys, _inject_fake
 ):
@@ -3155,6 +3158,51 @@ def test_create_junk_title_refusal_redacts_a_fine_grained_pat(capsys, _inject_fa
     assert rc == 2
     assert secret not in out
     assert "<redacted>" in out
+
+
+def test_create_review_uncommitted_without_diff_does_not_persist_an_issue(capsys, _inject_fake):
+    # Agents dropped the trailing "diff" after junk-title required it, so "Review uncommitted
+    # 0.36.0 version bump" still reached GitHub. Process work belongs in harness task, not the
+    # product tracker — refuse and persist nothing.
+    argv = _create_argv(**{"--title": "Review uncommitted 0.36.0 version bump"})
+    argv[0] = "new"
+    rc = main(argv)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert _inject_fake.list() == []
+    assert "junk-title" in out
+    assert "harness task" in out
+
+
+def test_new_process_ticket_like_landing_263_does_not_create_github_issue(
+    capsys, _inject_fake
+):
+    """conloca/landing#263: agents filed 'Review documentation diff for performance
+    regressions' into a product GitHub tracker via `task new`. Process tickets belong
+    in `harness task`; the product backend must not persist an issue."""
+    argv = _create_argv(
+        **{"--title": "Review documentation diff for performance regressions"}
+    )
+    argv[0] = "new"
+    rc = main(argv)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert _inject_fake.list() == []
+    assert "harness task" in out
+
+
+def test_new_review_uncommitted_does_not_create_github_issue(capsys, _inject_fake):
+    """'Review uncommitted … diff' is the original junk-title template. task new must
+    not persist it to GitHub/Linear; process work belongs in harness task."""
+    argv = _create_argv(
+        **{"--title": "Review uncommitted agent-workflow documentation diff"}
+    )
+    argv[0] = "new"
+    rc = main(argv)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert _inject_fake.list() == []
+    assert "harness task" in out
 
 
 def test_change_not_touching_title_does_not_trigger_the_title_gate(_inject_fake):
@@ -4453,6 +4501,25 @@ def test_classify_create_refuses_rather_than_silently_bypass_a_non_skippable_gat
     out = capsys.readouterr().out
     assert rc == 2
     assert "msgref-title" in out
+    assert _inject_fake.list() == []
+
+
+def test_classify_create_refuses_review_uncommitted_without_diff(capsys, monkeypatch, _inject_fake):
+    # classify --create is the inbound-hook path that minted most of the junk titles. A
+    # "Review uncommitted …" message without a trailing "diff" must refuse the same way as
+    # `task new`, not auto-skip junk-title and persist a product-tracker issue.
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    rc = main(["classify", "Review uncommitted 0.36.0 version bump", "--create"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "junk-title" in out
+    assert "harness task" in out
     assert _inject_fake.list() == []
 
 

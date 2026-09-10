@@ -61,6 +61,7 @@ task mark-shipped <id> --pr <url> [--commit <sha>]  # record a merged PR; NEVER 
 #   ticket (the `gh ship` post-merge hook — see agent-tools' ci/ship/ship.sh) — moves
 #   TODO/IN_PROGRESS to in-review, posts a durable comment, and prints what's still needed
 #   before a genuine `task done`.
+task attach <id> <path> [path...]  # add implementation screenshot(s) (Playwright/agent-browser capture, not screencapture)
 task done <id>    [--screenshot p] # close a ticket — runs the on-done gates (all criteria checked)
 task change <id>  [--due ...] [--done]  # update; --due sets/clears the due date; --done closes (gates)
 task status <id> [<new-state>]     # read or transition state (works outside a repo)
@@ -217,20 +218,21 @@ Empty input prints a "no tickets" message and exits 0. Nothing is mutated.
 
 ### Web (`task web start|stop|status|run`)
 
-`task web` serves the same burn chart as a local page (stdlib `http.server`,
+`task web` serves the burn and gantt charts as local pages (stdlib `http.server`,
 127.0.0.1 only). Lifecycle matches the reminder daemon, but the pid-file identity
 includes `web` so the two cannot be confused.
 
 ```
-task web run                   # foreground server on http://127.0.0.1:8765/burn
+task web run                   # foreground server on http://127.0.0.1:8765/
 task web start                 # detach (idempotent — already-running is a no-op)
 task web status                # running/stopped + pid + url
 task web stop                  # SIGTERM, then clear the pid-file
 task web run --port 9000       # override the listen port
 ```
 
-Pages: `/` and `/burn` (HTML), `/burn.json` (JSON), `/gantt` (existing gantt render
-in `<pre>`). Append `?all=1` to chart every ticket, not just this session.
+Pages: `/` (both SVG charts), `/burn` and `/gantt` (HTML+SVG), `/burn.json` and
+`/gantt.json`. Append `?all=1` to chart every ticket, not just this session.
+Each HTML page has a nav between Both / Burn / Gantt. No CDN, no JavaScript.
 
 ### Example
 
@@ -300,7 +302,7 @@ user-impact-quality gates) writes the justification into the ticket's `Skipped g
 | screenshots | `--screenshot <path>` | `--skip-screenshots "<reason>"` |
 | formatting | (automatic — body is rendered) | `--skip-formatting "<reason>"` |
 | msgref-title | keep `--title` free of a `tg#<id>` reference (put it in `--what`/`--why`/etc. instead) | **none** (hard; disable in config only via `enforce.msgref_title: false`) |
-| junk-title (create, and any `--title` edit) | don't phrase a title as "Review/Audit/Adversarial [review of] ... diff" — that shape can never lead to a merge on its own; post review findings as a PR comment or run `review diff`/`review quorum` directly instead | **none** (hard; disable the check itself only via `enforce.junk_title: false`) |
+| junk-title (create, and any `--title` edit) | don't phrase a title as "Review uncommitted …", "Review/Audit/Adversarial [review of] ... diff", or "... diff for performance" — that shape is process work for `harness task`, never the product GitHub/Linear tracker; run `review diff`/`review quorum` or `harness task` instead | **none** (hard; disable the check itself only via `enforce.junk_title: false`) |
 | acceptance-checked (close) | `task check <id> <n> --proof <path>` for each | **none** (hard; disable in config only) |
 | read-before-edit (`change --what` only) | `task read <id>` (or `task view <id>`) THIS session, recently, before overwriting `--what` | `--skip-read-before-edit "<reason>"` — a *persisted* skip from an earlier command never silently waives a later, still-unread one |
 | duplicate (`create`/`new`, token/Jaccard) | give the title/what real, distinguishing content | `--skip-duplicate "<reason>"` (or `--force "<reason>"`) |

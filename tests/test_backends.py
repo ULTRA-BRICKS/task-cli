@@ -583,9 +583,8 @@ def test_issue_number_removeprefix_not_lstrip():
     from tasklib.backends.github_issues import _issue_number
 
     assert _issue_number("#1") == "1"
-    assert (
-        _issue_number("##1") == "#1"
-    )  # removeprefix drops exactly one '#', not all of them
+    with pytest.raises(BackendError):
+        _issue_number("##1")
 
 
 def test_linear_label_ids_creates_missing_labels(monkeypatch):

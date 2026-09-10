@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 
 from ..model import Attachment, State, Ticket
 from ..render import parse, render
+from ..taskref import TaskRefError, linear_identifier
 from . import AmbiguousBackendError, BackendError
 from .http import (
     AmbiguousHttpError,
@@ -314,6 +315,10 @@ class LinearBackend:
         return self._node_to_ticket(res["issue"])
 
     def _issue_by_identifier(self, ticket_id: str) -> dict:
+        try:
+            ticket_id = linear_identifier(ticket_id, self.team_key)
+        except TaskRefError as exc:
+            raise BackendError(str(exc)) from exc
         data = self._gql(
             "query($id:String!){issue(id:$id){" + self._ISSUE_FIELDS + "}}",
             {"id": ticket_id},

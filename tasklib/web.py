@@ -1,7 +1,8 @@
 """Local HTTP server for the burn (and gantt) charts — stdlib ``http.server`` only.
 
-WHAT this is: a tiny foreground/detached web UI for ``task burn``. It serves the same
-tickets ``cmd_burn`` would chart as HTML/JSON, plus a cheap ``/gantt`` ``<pre>`` view.
+WHAT this is: a tiny foreground/detached web UI for ``task burn`` and ``task gantt``.
+It serves the same tickets those commands would chart as HTML/JSON. ``/`` shows both
+SVG charts; ``/burn`` and ``/gantt`` are the individual pages.
 
 HOW it is reached at runtime: ``task web start|stop|status|run``. ``run`` is the
 foreground server; ``start`` detaches it. The CLI never imports this module until the
@@ -61,6 +62,53 @@ def _identity() -> str:
     return sig
 
 
+def _nav(query: str = "") -> str:
+    """Chart-page nav. ``query`` is the raw query string (no ``?``); preserved so ``?all=1`` survives."""
+    q = f"?{query}" if query else ""
+    return (
+        '<nav class="charts">'
+        f'<a href="/{q}">Both</a> · '
+        f'<a href="/burn{q}">Burn</a> · '
+        f'<a href="/gantt{q}">Gantt</a>'
+        "</nav>\n"
+    )
+
+_PAGE_STYLE = """
+body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 1.5rem; color: #111; background: #fff; }
+h1 { font-size: 1.25rem; }
+h2 { font-size: 1rem; color: #555; }
+nav.charts { margin-bottom: 1rem; }
+nav.charts a { color: #111; }
+svg { max-width: 100%; height: auto; }
+.remaining { fill: none; stroke: #111; stroke-width: 2; }
+.ideal { fill: none; stroke: #888; stroke-width: 1.5; stroke-dasharray: 4 3; }
+.axis { stroke: #ccc; }
+.today { stroke: #888; stroke-dasharray: 3 3; }
+.gantt-label, .gantt-due { font-size: 12px; fill: #111; }
+.gantt-empty { font-size: 12px; fill: #666; }
+ul { padding-left: 1.2rem; }
+section { margin-bottom: 2.5rem; }
+"""
+
+
+def _page(title: str, body: str, *, query: str = "") -> str:
+    """Wrap inner chart markup in the shared document chrome (nav + styles)."""
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        f"<title>{html.escape(title)}</title>\n"
+        f"<style>{_PAGE_STYLE}</style>\n"
+        "</head>\n"
+        "<body>\n"
+        f"{_nav(query)}"
+        f"{body}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
 def handle(path: str, tickets: list, today: date) -> tuple[int, str, str]:
     """Route ``path`` to HTML/JSON without binding a port.
 
@@ -68,23 +116,26 @@ def handle(path: str, tickets: list, today: date) -> tuple[int, str, str]:
     """
     parsed = urlparse(path)
     route = parsed.path.rstrip("/") or "/"
-    if route in ("/", "/burn"):
-        chart = _burn.layout(tickets, today)
-        return 200, "text/html; charset=utf-8", _burn.to_html(chart)
+    query = parsed.query
+    if route == "/":
+        burn_inner = _burn.chart_markup(_burn.layout(tickets, today))
+        gantt_inner = _gantt.chart_markup(_gantt.layout(tickets, today), today)
+        body = f"<section>{burn_inner}</section>\n<section>{gantt_inner}</section>"
+        return 200, "text/html; charset=utf-8", _page("Task charts", body, query=query)
+    if route == "/burn":
+        inner = _burn.chart_markup(_burn.layout(tickets, today))
+        return 200, "text/html; charset=utf-8", _page("Burn chart", inner, query=query)
+    if route == "/gantt":
+        inner = _gantt.chart_markup(_gantt.layout(tickets, today), today)
+        return 200, "text/html; charset=utf-8", _page("Gantt", inner, query=query)
     if route == "/burn.json":
         chart = _burn.layout(tickets, today)
         body = json.dumps(_burn.to_json(chart), ensure_ascii=False, indent=2)
         return 200, "application/json; charset=utf-8", body
-    if route == "/gantt":
+    if route == "/gantt.json":
         chart = _gantt.layout(tickets, today)
-        text = _gantt.render(chart, color=lambda _c, s: s, today=today)
-        page = (
-            "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
-            "<title>Gantt</title></head><body><h1>Gantt</h1><pre>"
-            + html.escape(text)
-            + "</pre></body></html>"
-        )
-        return 200, "text/html; charset=utf-8", page
+        body = json.dumps(_gantt.to_json(chart, today), ensure_ascii=False, indent=2)
+        return 200, "application/json; charset=utf-8", body
     return 404, "text/plain; charset=utf-8", "not found\n"
 
 
@@ -249,7 +300,7 @@ def stop(coordinate: str, *, env: dict[str, str] | None = None, timeout_s: float
 
 
 def url_for(port: int) -> str:
-    return f"http://127.0.0.1:{port}/burn"
+    return f"http://127.0.0.1:{port}/"
 
 
 def pid_status_for(coordinate: str, *, env: dict[str, str] | None = None) -> tuple[str, int | None]:

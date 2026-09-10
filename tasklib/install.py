@@ -51,7 +51,7 @@ description: >-
   `task link <id> <relation> <other-id>` (blocks/blocked-by/relates-to/duplicate-of — record a
   relationship between two tickets; `task new` nudges you toward this when it spots a
   plausibly related open ticket), `task check <id> ... --proof`, `task accept <id>`,
-  `task gate <id>` (the pre-merge verdict), `task done <id>`, `task status <id> [<state>]`,
+  `task attach <id> <path>`, `task gate <id>` (the pre-merge verdict), `task done <id>`, `task status <id> [<state>]`,
   `task classify "<text>"`, `task session`.
 metadata:
   author: alex-mextner
@@ -73,6 +73,7 @@ task find "<query>"              # search title+body (cross-project when outside
 task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of — records a
 #   relationship in ## Links, mirrored on the other ticket (except duplicate-of, one-sided)
 task change <id> --acceptance "..." --screenshot proof.png
+task attach <id> shot.png            # add implementation screenshot (repeatable paths)
 task check <id> 1 2 --proof a.png --proof b.png   # tick criteria WITH a proof each (in order)
 task check <id> --all --proof shot.png            # every criterion, one shared proof
 task accept <id>                 # walk the unaccepted criteria, asking for a proof each (TTY)
@@ -98,8 +99,11 @@ task session                     # show current session + its tickets
   Three are hard (no per-ticket skip, only a config-level toggle disables them, and the config
   key uses an UNDERSCORE, not the gate's hyphenated display name): every-criterion-checked-
   with-proof on close (`enforce.acceptance_checked: false`), the title's `tg#<id>` ban
-  (`enforce.msgref_title: false`), and a title shaped like the auto-generated "review this
-  diff" pattern, checked on create and on any `--title` edit (`enforce.junk_title: false`).
+  (`enforce.msgref_title: false`), and a title shaped like "Review uncommitted …" or the
+  auto-generated "review this diff" pattern (including "Review … diff for performance
+  regressions"), checked on create and on any `--title` edit (`enforce.junk_title: false`).
+  Process / review-uncommitted work belongs in `harness task`, not `task new` against a
+  product GitHub/Linear tracker.
 - **Post-`task new` relatedness nudge**: after creating a ticket, a cheap title/label keyword
   scan over open tickets suggests plausibly related ones and prints the exact `task link`
   command for each — it never auto-links, only suggests; run the printed command if the

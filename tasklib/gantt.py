@@ -10,7 +10,7 @@ The chart is computed in two passes that this module owns:
    yielding a :class:`GanttRow` per ticket (its bar's start/end column + a status marker) and a
    separate list of *undated* tickets. Undated tickets are returned, never dropped.
 
-``cli.py``/``render``-side code turns a :class:`GanttChart` into ANSI; tests assert the integer
+``cli.py``/``render``-side code turns a :class:`GanttChart` into ANSI; :func:`to_html` is the SVG page ``task web`` serves. Tests assert the integer
 layout here (deterministic), not the rendered escape codes. The bar geometry is the contract:
 ``bar_start``/``bar_end`` are 0-based inclusive column indices into a chart of ``width`` columns.
 
@@ -21,6 +21,7 @@ case is a point bar; the span path is kept so a backend that supplies a start da
 
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import Enum
@@ -398,3 +399,109 @@ def to_json(chart: GanttChart, today: date) -> dict:
             for t in chart.undated
         ],
     }
+
+
+# ── HTML+SVG (the browser chart; same geometry as the terminal render) ──────────
+
+_STATUS_FILL: dict[GanttStatus, str] = {
+    GanttStatus.TODO: "#111111",
+    GanttStatus.IN_PROGRESS: "#0a7a8c",
+    GanttStatus.IN_REVIEW: "#2b5fd9",
+    GanttStatus.DONE: "#1a7a32",
+    GanttStatus.CANCELLED: "#888888",
+    GanttStatus.OVERDUE: "#c01818",
+}
+
+
+def chart_markup(chart: GanttChart, today: date) -> str:
+    """Inner HTML+SVG for the gantt (no document chrome) so ``task web`` can embed it."""
+    gutter = 200
+    bar_w = 520
+    row_h = 28
+    top = 36
+    n_rows = max(len(chart.rows), 1)
+    svg_h = top + n_rows * row_h + 16
+    svg_w = gutter + bar_w + 80
+    cols = max(chart.width, 1)
+
+    def x_for(col: int) -> float:
+        return gutter + (col / cols) * bar_w
+
+    today_x = x_for(chart.today_column)
+    bars: list[str] = []
+    for i, row in enumerate(chart.rows):
+        y = top + i * row_h
+        fill = _STATUS_FILL[row.status]
+        x0 = x_for(row.bar_start)
+        x1 = x_for(row.bar_end + 1)
+        width = max(x1 - x0, 8.0)
+        tid = html.escape(str(row.ticket.id or ""))
+        ttl = html.escape(str(row.ticket.title or ""))
+        label = html.escape(_truncate(f"{row.ticket.id or ''} {row.ticket.title or ''}", 28))
+        due = row.ticket.due_date()
+        due_s = html.escape(due.isoformat() if due else "")
+        bars.append(
+            f'<text x="0" y="{y + 16}" class="gantt-label">'
+            f"<title>{tid} {ttl}</title>{label}</text>"
+            f'<rect class="gantt-bar" data-status="{html.escape(row.status.value)}" '
+            f'x="{x0:.1f}" y="{y + 6}" width="{width:.1f}" height="14" fill="{fill}" rx="3" />'
+            f'<text x="{gutter + bar_w + 8}" y="{y + 16}" class="gantt-due">{due_s}</text>'
+        )
+    if not chart.rows:
+        bars.append(
+            f'<text x="{gutter}" y="{top + 16}" class="gantt-empty">no tickets to chart</text>'
+        )
+
+    undated = ""
+    if chart.undated:
+        items = []
+        for t in chart.undated:
+            tid = html.escape(str(t.id or ""))
+            ttl = html.escape(str(t.title or ""))
+            items.append(f"<li>{tid} {ttl}</li>")
+        undated = (
+            f"<h2>undated ({len(chart.undated)})</h2>\n<ul>\n"
+            + "\n".join(items)
+            + "\n</ul>"
+        )
+
+    start = chart.window.start.isoformat()
+    end = chart.window.end.isoformat()
+    axis_y1 = top - 8
+    axis_y2 = top + n_rows * row_h
+    return f"""<h1>Gantt</h1>
+<p>{html.escape(start)} → {html.escape(end)} · today: {html.escape(today.isoformat())}</p>
+<svg viewBox="0 0 {svg_w} {svg_h}" role="img" aria-label="Gantt" data-gantt="1">
+  <line class="axis" x1="{gutter}" y1="{axis_y1}" x2="{gutter}" y2="{axis_y2}" />
+  <line class="today" x1="{today_x:.1f}" y1="{axis_y1}" x2="{today_x:.1f}" y2="{axis_y2}" />
+  {"".join(bars)}
+</svg>
+{undated}
+"""
+
+
+def to_html(chart: GanttChart, today: date) -> str:
+    """Self-contained HTML+SVG gantt chart (no CDN, no JS required)."""
+    inner = chart_markup(chart, today)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gantt</title>
+<style>
+body {{ font-family: ui-sans-serif, system-ui, sans-serif; margin: 1.5rem; color: #111; background: #fff; }}
+h1 {{ font-size: 1.25rem; }}
+h2 {{ font-size: 1rem; color: #555; }}
+svg {{ max-width: 100%; height: auto; }}
+.axis {{ stroke: #ccc; }}
+.today {{ stroke: #888; stroke-dasharray: 3 3; }}
+.gantt-label, .gantt-due {{ font-size: 12px; fill: #111; }}
+.gantt-empty {{ font-size: 12px; fill: #666; }}
+ul {{ padding-left: 1.2rem; }}
+</style>
+</head>
+<body>
+{inner}
+</body>
+</html>
+"""
