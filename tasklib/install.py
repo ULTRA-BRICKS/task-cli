@@ -141,8 +141,8 @@ task session                     # show current session + its tickets
 - **No host harness's own in-session/ephemeral task list is a substitute for a task-cli
   ticket**, in any harness — it is never a source of truth for whether external work
   succeeded; a ticket in task-cli is the durable record of work. In Claude Code specifically,
-  the built-in in-session tracker is called **TaskList** — name it by that name there, not a
-  vague "internal list/tracker of tasks".
+  the built-in in-session tracker is the **TodoList tool (TodoWrite/TaskCreate)** — name it by
+  that name there, not a vague "internal list/tracker of tasks".
 
 ## Accept BEFORE you merge — and never "Closes"/"Fixes" in a PR body
 - **A merge moves the ticket to In Review; only acceptance closes it.** Linear's "PR merged"
