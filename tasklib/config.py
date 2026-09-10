@@ -37,25 +37,32 @@ RIG_CONFIG_FILENAME = "rig.yaml"
 
 VALID_BACKENDS = {"github-issues", "linear"}
 
-# How a screenshot/file gets attached to a Linear ticket (tg#11652, CTO decision):
-#   "native" — upload the bytes through Linear's OWN authenticated GraphQL API
-#              (fileUpload + attachmentCreate; see backends/linear.py) so the ticket carries a
-#              real Linear attachment object with an inline preview. This is the DEFAULT: it is
-#              the properly-fixed path (no 401 — see the module docstring on backends/linear.py
-#              for why the earlier "any non-browser consumer 401s" finding does NOT apply here).
-#   "link"   — never touch Linear's upload API for a local file. If the ref is ALREADY a hosted
-#              URL (e.g. a GitHub PR asset, or a PR's `#screenshots` anchor) it is registered as
-#              an external-link attachment as-is. A bare local path in this mode has nothing to
-#              link to and is skipped (best-effort, see `_attach_screenshots`'s existing swallow).
-#              hyperide pins this mode (HYP-1248): raw pasted-image `uploads.linear.app` URLs are
-#              session-scoped and 401 for a non-browser viewer, so hyperide's own mitigation is to
-#              link out to the PR's `#screenshots` section instead of embedding/uploading an image.
+# How a screenshot/file gets attached to a ticket (tg#11652, CTO decision — originally Linear-
+# only; extended to GitHub too by tg#16794/review-cli#484, see backends/github_issues.py's module
+# docstring for why GitHub needed the identical knob):
+#   "native" — upload the bytes through the backend's OWN authenticated API (Linear:
+#              fileUpload + attachmentCreate, backends/linear.py; GitHub:
+#              uploads.github.com/user-attachments/assets, backends/github_issues.py) so the
+#              ticket carries a real, durably-hosted asset with an inline preview. This is the
+#              DEFAULT for both backends: it is the properly-fixed path (no 401 for Linear — see
+#              the module docstring on backends/linear.py for why the earlier "any non-browser
+#              consumer 401s" finding does NOT apply here; GitHub's upload endpoint needs no such
+#              caveat, it's a plain bearer-token POST).
+#   "link"   — never touch the backend's upload API for a local file. If the ref is ALREADY a
+#              hosted URL (e.g. a GitHub PR asset, or a PR's `#screenshots` anchor) it is
+#              registered as an external-link attachment as-is. A bare local path in this mode
+#              has nothing to link to and is skipped (best-effort, see `_attach_screenshots`'s
+#              existing swallow) or raises `BackendError` (a direct `backend.attach()` call, e.g.
+#              `task attach`/`task check --proof`). hyperide pins this mode for Linear (HYP-1248):
+#              raw pasted-image `uploads.linear.app` URLs are session-scoped and 401 for a
+#              non-browser viewer, so hyperide's own mitigation is to link out to the PR's
+#              `#screenshots` section instead of embedding/uploading an image.
 VALID_ATTACHMENT_MODES = {"link", "native"}
 
-# Highest-precedence override for `linear.attachment_mode` — set on ONE machine to beat even a
-# repo-committed pin (hyperide's `task.yaml` pins "link" for everyone, HYP-1248; tg#11652 asked
-# for a personal override without touching that shared file). Mirrors this ecosystem's other
-# per-machine env overrides (RIG_TMUX_DRY_RUN, RIG_TG_CTL_DRY_RUN).
+# Highest-precedence override for BOTH `linear.attachment_mode` and `github.attachment_mode` —
+# set on ONE machine to beat even a repo-committed pin (hyperide's `task.yaml` pins "link" for
+# everyone, HYP-1248; tg#11652 asked for a personal override without touching that shared file).
+# Mirrors this ecosystem's other per-machine env overrides (RIG_TMUX_DRY_RUN, RIG_TG_CTL_DRY_RUN).
 ATTACHMENT_MODE_ENV_VAR = "TASK_CLI_ATTACHMENT_MODE"
 
 # A single DNS label: alnum, optionally hyphenated, never starting/ending in a hyphen (RFC 1123).
@@ -85,16 +92,21 @@ def rig_config_path(repo_root: Path) -> Path:
     return repo_root / RIG_CONFIG_FILENAME
 
 
-# Aliases in the rig.yaml ``task:`` block → the dotted path they map onto in task-cli's own
+# Aliases in the rig.yaml ``task:`` block → the dotted path(s) they map onto in task-cli's own
 # config shape. The block is intentionally flat (a CTO drops `task: {backend: linear, team:
 # HYP}` into rig.yaml without learning task-cli's nesting), so we translate the shorthands.
 # ``team``/``project`` are Linear coordinates; ``repo`` is the GitHub coordinate;
-# ``attachment_mode`` is the Linear screenshot-attach strategy (see ``VALID_ATTACHMENT_MODES``).
-_RIG_TASK_ALIASES: dict[str, tuple[str, ...]] = {
-    "team": ("linear", "team"),
-    "project": ("linear", "project"),
-    "repo": ("github", "repo"),
-    "attachment_mode": ("linear", "attachment_mode"),
+# ``attachment_mode`` is the screenshot-attach strategy (see ``VALID_ATTACHMENT_MODES``) — it
+# fans out onto BOTH backends' sections (tg#16794/review-cli#484: extended from Linear-only to
+# backend-agnostic), since whichever backend is actually active reads its own section and
+# setting the value on the inactive one is harmless. Every other alias here maps to exactly one
+# path, so the value type is a tuple of paths (each itself a tuple of path segments) rather than
+# a single path, to accommodate the one multi-target alias without a second shape.
+_RIG_TASK_ALIASES: dict[str, tuple[tuple[str, ...], ...]] = {
+    "team": (("linear", "team"),),
+    "project": (("linear", "project"),),
+    "repo": (("github", "repo"),),
+    "attachment_mode": (("linear", "attachment_mode"), ("github", "attachment_mode")),
 }
 # Keys passed through verbatim (same name in both shapes): the backend selector + the nested
 # sections a power user might want to override straight from rig.yaml. ``version`` is
@@ -159,12 +171,17 @@ def rig_task_overlay(rig_data: dict[str, Any]) -> dict[str, Any]:
     overlay: dict[str, Any] = {}
     for key, value in block.items():
         if key in _RIG_TASK_ALIASES:
-            *parents, leaf = _RIG_TASK_ALIASES[key]
+            # Fan out onto every target path the alias maps to (only `attachment_mode` maps to
+            # more than one — see `_RIG_TASK_ALIASES`'s own comment); each path builds its own
+            # nested cursor into the SAME fragment dict, so disjoint paths (e.g. `linear.*` and
+            # `github.*`) combine into one fragment instead of clobbering each other.
             fragment: dict[str, Any] = {}
-            cursor = fragment
-            for part in parents:
-                cursor = cursor.setdefault(part, {})
-            cursor[leaf] = value
+            for path in _RIG_TASK_ALIASES[key]:
+                *parents, leaf = path
+                cursor = fragment
+                for part in parents:
+                    cursor = cursor.setdefault(part, {})
+                cursor[leaf] = value
         elif key in _RIG_TASK_PASSTHROUGH:
             fragment = {key: copy.deepcopy(value)} if isinstance(value, dict) else {key: value}
         else:
@@ -200,7 +217,7 @@ def _assert_no_leaf_conflict(base: dict[str, Any], over: dict[str, Any], *, pref
 DEFAULTS: dict[str, Any] = {
     "version": 1,
     "backend": "github-issues",
-    "github": {"repo": "auto", "default_labels": ["agent"]},
+    "github": {"repo": "auto", "default_labels": ["agent"], "attachment_mode": "native"},
     "linear": {"team": "", "project": "", "attachment_mode": "native"},
     # Extra hostnames (repo-configured) `_save_attachments` treats as safe to auto-fetch bytes
     # from even though they aren't the tracker's own native asset domain — e.g. a repo's own
@@ -354,6 +371,12 @@ class LoadedConfig:
         return str(self.section("linear").get("attachment_mode", "native"))
 
     @property
+    def github_attachment_mode(self) -> str:
+        """``"native"`` (real GitHub attachment upload) or ``"link"`` (never re-host a local
+        file; only register an already-hosted URL). See :data:`VALID_ATTACHMENT_MODES`."""
+        return str(self.section("github").get("attachment_mode", "native"))
+
+    @property
     def trusted_attachment_hosts(self) -> frozenset[str]:
         """Extra hostnames (repo-configured, top-level ``trusted_attachment_hosts:``) that
         ``_save_attachments`` treats as safe to auto-fetch bytes from, even though they are not
@@ -463,18 +486,21 @@ def load(
             merged = _deep_merge(merged, _load_yaml(rpath))
             layers.append(f"repo:{rpath}")
 
-    # Highest-precedence layer: a personal, per-machine override for the Linear attachment
-    # strategy (tg#11652) — set TASK_CLI_ATTACHMENT_MODE=native on one machine to beat even a
-    # repo-committed pin (e.g. hyperide's task.yaml pins "link" for everyone, HYP-1248) without
-    # touching that shared file or affecting any other machine/user. Still goes through the SAME
-    # validate() call below as every other layer, so a value ALSO invalid for any other reason
-    # (e.g. a future stricter check on attachment_mode) still fails closed there too — but
-    # review finding: relying SOLELY on that generic post-merge error means a bad env value
-    # produces "linear.attachment_mode must be one of [...], got 'carrier-pigeon'" with no
-    # mention of TASK_CLI_ATTACHMENT_MODE, and cfg.layers (which WOULD show the env source) is
-    # never built because validate() raises before LoadedConfig() exists — a user auditing
-    # task.yaml/rig.yaml for the typo finds nothing wrong there and has no pointer to check their
-    # shell env. Validate the override eagerly, right here, so the error names its actual source.
+    # Highest-precedence layer: a personal, per-machine override for the attachment strategy
+    # (tg#11652; extended from Linear-only to BOTH backends by tg#16794/review-cli#484) — set
+    # TASK_CLI_ATTACHMENT_MODE=native on one machine to beat even a repo-committed pin (e.g.
+    # hyperide's task.yaml pins "link" for everyone, HYP-1248) without touching that shared file
+    # or affecting any other machine/user. Sets BOTH `linear.attachment_mode` and
+    # `github.attachment_mode` so the one env var works regardless of which backend is active.
+    # Still goes through the SAME validate() call below as every other layer, so a value ALSO
+    # invalid for any other reason (e.g. a future stricter check on attachment_mode) still fails
+    # closed there too — but review finding: relying SOLELY on that generic post-merge error
+    # means a bad env value produces "linear.attachment_mode must be one of [...], got
+    # 'carrier-pigeon'" with no mention of TASK_CLI_ATTACHMENT_MODE, and cfg.layers (which WOULD
+    # show the env source) is never built because validate() raises before LoadedConfig() exists
+    # — a user auditing task.yaml/rig.yaml for the typo finds nothing wrong there and has no
+    # pointer to check their shell env. Validate the override eagerly, right here, so the error
+    # names its actual source.
     override = str(env.get(ATTACHMENT_MODE_ENV_VAR, "")).strip()
     if override:
         if override not in VALID_ATTACHMENT_MODES:
@@ -482,7 +508,10 @@ def load(
                 f"{ATTACHMENT_MODE_ENV_VAR}={override!r} must be one of "
                 f"{sorted(VALID_ATTACHMENT_MODES)}"
             )
-        merged = _deep_merge(merged, {"linear": {"attachment_mode": override}})
+        merged = _deep_merge(
+            merged,
+            {"linear": {"attachment_mode": override}, "github": {"attachment_mode": override}},
+        )
         layers.append(f"env:{ATTACHMENT_MODE_ENV_VAR}={override}")
 
     validate(merged)
@@ -519,6 +548,14 @@ def validate(data: dict[str, Any]) -> None:
         # raw TypeError from the `in` check against the (unhashable-safe) set.
         if not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES:
             raise ConfigError(f"linear.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)}, got {mode!r}")
+
+    github = data.get("github")
+    if isinstance(github, dict) and "attachment_mode" in github:
+        mode = github["attachment_mode"]
+        # Symmetric with `linear.attachment_mode` above (tg#16794/review-cli#484: the knob is
+        # now backend-agnostic) — same isinstance-before-membership guard.
+        if not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES:
+            raise ConfigError(f"github.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)}, got {mode!r}")
 
     if "trusted_attachment_hosts" in data:
         hosts = data["trusted_attachment_hosts"]

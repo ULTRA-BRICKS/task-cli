@@ -6,25 +6,65 @@ The default backend (§1). State is mapped onto GitHub's open/closed + a small s
 
 ``repo`` defaults to ``auto`` = the ``origin`` owner/name resolved from git. Credentials come
 from :mod:`tasklib.credentials` (never re-prompted, never logged).
+
+## Attachments: uploads.github.com/user-attachments/assets (tg#16794/review-cli#484)
+
+GitHub has no DOCUMENTED REST/GraphQL endpoint for uploading an issue/comment image attachment —
+the official answer from GitHub staff (github/docs#39328, github/orgs/community#28219, #46951)
+is "host externally, or use Releases/Actions artifacts". :meth:`attach` used to accept that at
+face value and just posted the raw LOCAL FILESYSTEM PATH as a plain comment — which is not an
+attachment at all, only auditable to whoever already had the file on their own machine. That
+broke silently for anyone else: a screenshot attached to task-cli ticket review-cli#484 (spec-web
+version history feature) came through as "битый скриншот" ("broken screenshot") in the Telegram
+task-change notification, because the "attachment" was never anything but a path string only the
+attaching machine could resolve.
+
+There IS a real, currently-working, UNDOCUMENTED endpoint: the exact one github.com's own web UI
+uses internally for drag-and-drop image paste —
+``POST https://uploads.github.com/user-attachments/assets?name=<filename>&content_type=<mime>
+&repository_id=<numeric repo id>``, bearer-authenticated, raw bytes as the body (not JSON),
+returning ``{"url": "https://github.com/user-attachments/assets/<uuid>", ...}`` on 201. Verified
+working (as of Aug 2026) and documented by a third party (island94.org/2026/08/programmatically-
+upload-attachments-to-github-issues-pull-requests-comments) and packaged as a reference
+implementation by Intercom's ``attach-github-assets`` GitHub Skill (github.com/intercom/2x-
+skills). :meth:`_upload_and_attach` mirrors that exact request shape.
+
+Because this is undocumented and could change or break without notice, ``attachment_mode: link``
+(see :data:`tasklib.config.VALID_ATTACHMENT_MODES`) is the escape hatch: a repo/machine that
+doesn't want to depend on this endpoint can opt out and only ever register ALREADY-hosted URLs,
+never uploading a local file — exactly the same semantics Linear's own ``link`` mode already has
+(see :mod:`tasklib.backends.linear`'s module docstring for the sibling implementation).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..model import State, Ticket
 from ..render import parse, render
 from ..taskref import TaskRefError, github_issue_number
 from . import AmbiguousBackendError, BackendError
-from .http import AmbiguousHttpError, HttpError, request_json
+from .http import (
+    AmbiguousHttpError,
+    HttpError,
+    detect_content_type,
+    request_bytes,
+    request_json,
+)
 
 # Default to public GitHub; honor GITHUB_API_URL the same way gh/octokit do, so a GitHub
 # Enterprise host (https://ghe.example.com/api/v3) — or a hermetic mock server in a test
 # harness — is reachable without code changes. Read per-call (not a frozen module constant)
 # so an env set after import still takes effect.
 _DEFAULT_API_ROOT = "https://api.github.com"
+# The undocumented upload endpoint the github.com web UI itself uses for drag-and-drop image
+# paste — see the module docstring's "Attachments" section. A DIFFERENT host from
+# _DEFAULT_API_ROOT (uploads.github.com, not api.github.com), so it gets its own env override
+# and its own resolver rather than being derived from _api_root()'s result.
+_DEFAULT_UPLOADS_ROOT = "https://uploads.github.com"
 
 
 def _api_root() -> str:
@@ -58,6 +98,37 @@ def _api_root() -> str:
         )
     return root
 
+
+def _uploads_api_root() -> str:
+    """Resolve the GitHub uploads-asset base. Honors ``GITHUB_UPLOADS_URL`` (a hermetic mock
+    server in a test harness — there is no GHE equivalent of this undocumented endpoint to
+    override for).
+
+    Mirrors :func:`_api_root`'s exact validation logic (same security invariant: the bearer
+    token rides this request too, so a non-loopback host MUST be https) — kept as an
+    independent, parallel function rather than refactored to share code with :func:`_api_root`
+    (review finding: that function has extensive existing test coverage pinning its exact
+    behavior/error text; duplicating ~15 lines here is the smaller-blast-radius choice).
+    """
+    root = os.environ.get("GITHUB_UPLOADS_URL", _DEFAULT_UPLOADS_ROOT).rstrip("/")
+    if root == _DEFAULT_UPLOADS_ROOT:
+        return root
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(root)
+    except ValueError as exc:
+        raise BackendError(f"GITHUB_UPLOADS_URL is not a valid url ({root!r}): {exc}") from exc
+    host = (parsed.hostname or "").lower()
+    is_loopback = host in ("localhost", "127.0.0.1", "::1")
+    if parsed.scheme != "https" and not is_loopback:
+        raise BackendError(
+            f"GITHUB_UPLOADS_URL must be https for a non-loopback host (got {root!r}); refusing "
+            "to send the auth token over cleartext / to an untrusted scheme."
+        )
+    return root
+
+
 # GitHub issues are open/closed; we carry the finer lifecycle as managed labels.
 _STATE_LABEL = {
     State.TODO: "status:todo",
@@ -71,13 +142,23 @@ _LABEL_STATE = {v: k for k, v in _STATE_LABEL.items()}
 
 @dataclass
 class GitHubIssuesBackend:
-    """REST adapter. ``owner``/``repo`` target the issues; ``token`` authenticates."""
+    """REST adapter. ``owner``/``repo`` target the issues; ``token`` authenticates.
+
+    ``attachment_mode`` selects how :meth:`attach` handles a LOCAL file ref (already-hosted URLs
+    are always registered as-is regardless of mode — see :meth:`attach`'s docstring): ``"native"``
+    uploads the bytes through the undocumented ``uploads.github.com/user-attachments/assets``
+    endpoint (see the module docstring); ``"link"`` refuses a bare local path (nothing to link
+    to) and no-ops. Mirrors :class:`~tasklib.backends.linear.LinearBackend`'s identical contract
+    — see :data:`tasklib.config.VALID_ATTACHMENT_MODES`.
+    """
 
     owner: str
     repo: str
     token: str
     default_labels: tuple[str, ...] = ()
     name: str = "github-issues"
+    attachment_mode: str = "native"
+    _repo_id_cache: int | None = field(default=None, init=False, repr=False, compare=False)
 
     # ── construction ──────────────────────────────────────────────────────────────
     @classmethod
@@ -89,7 +170,14 @@ class GitHubIssuesBackend:
         owner, repo = _resolve_repo(repo_spec, config.repo_root)
         creds = github_token(env)
         labels = tuple(str(x) for x in (gh.get("default_labels") or []))
-        return cls(owner=owner, repo=repo, token=creds.token, default_labels=labels)
+        attachment_mode = str(gh.get("attachment_mode", "native"))
+        return cls(
+            owner=owner,
+            repo=repo,
+            token=creds.token,
+            default_labels=labels,
+            attachment_mode=attachment_mode,
+        )
 
     # ── helpers ───────────────────────────────────────────────────────────────────
     def _headers(self) -> dict[str, str]:
@@ -269,11 +357,110 @@ class GitHubIssuesBackend:
         self._call(self._issues_url(f"/{num}/comments"), method="POST", payload={"body": body})
 
     def attach(self, ticket_id: str, file_path: str) -> str:
-        # GitHub has no issue-attachment REST endpoint; the upload path is the web UI only.
-        # We record the local path as a reference comment so the proof is auditable. The
-        # body's Screenshots section embeds the same ref via render().
-        self.comment(ticket_id, f"screenshot: {file_path}")
-        return file_path
+        """Attach ``file_path`` (a local path OR an already-hosted URL) to ``ticket_id``,
+        durably. Mirrors :meth:`LinearBackend.attach`'s contract exactly (task-cli's uniform
+        attach API — tg#16794/review-cli#484: this method used to post the raw LOCAL
+        FILESYSTEM PATH as comment text and call that "attached"; see the module docstring).
+
+        An already-hosted URL (``"://" in file_path``) is ALWAYS registered as-is via a comment
+        embedding a real markdown image, regardless of ``attachment_mode`` — nothing to upload.
+        Only a bare LOCAL path branches on ``attachment_mode``:
+        - ``"native"``: upload the bytes via :meth:`_upload_and_attach` and post the resulting
+          permanent asset URL as an inline markdown image comment.
+        - ``"link"``: a local path has no hosted URL to link to — raise :class:`BackendError`
+          (matches :meth:`LinearBackend.attach`'s identical ``"link"`` contract).
+        """
+        if "://" in file_path:
+            title = os.path.basename(file_path) or "attachment"
+            self.comment(ticket_id, f"screenshot: ![{title}]({file_path})")
+            return file_path
+        if self.attachment_mode == "link":
+            raise BackendError(
+                f"github: attachment_mode=link cannot attach local path {file_path!r} "
+                "(nothing hosted to link to) — pre-host the file and pass a URL, or switch to "
+                "attachment_mode: native"
+            )
+        return self._upload_and_attach(ticket_id, file_path)
+
+    def _upload_and_attach(self, ticket_id: str, file_path: str) -> str:
+        """The real native-upload path: POST the raw bytes to the undocumented
+        ``uploads.github.com/user-attachments/assets`` endpoint (see the module docstring for
+        why this is the right endpoint and what ``attachment_mode: link`` is the escape hatch
+        for), then register the returned permanent asset URL as an inline markdown image
+        comment via :meth:`comment` — mirrors :meth:`LinearBackend._upload_and_attach`'s shape.
+        """
+        # review finding (same class as LinearBackend._upload_and_attach): `_attach_screenshots`
+        # (cli.py) only swallows `BackendError`/`AmbiguousBackendError` as best-effort — a bare
+        # OSError (missing file, permission denied) must not escape past that guard and crash a
+        # command whose underlying create/update already succeeded.
+        try:
+            content_type = detect_content_type(file_path)
+            with open(file_path, "rb") as f:
+                body = f.read()
+        except OSError as exc:
+            raise BackendError(f"github: cannot read {file_path} for upload: {exc}") from exc
+
+        import urllib.parse
+
+        repository_id = self._repository_id()
+        filename = os.path.basename(file_path)
+        query = urllib.parse.urlencode(
+            {"name": filename, "content_type": content_type, "repository_id": repository_id}
+        )
+        url = f"{_uploads_api_root()}/user-attachments/assets?{query}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            # The real MIME type rides the `content_type` QUERY PARAM above, not this header —
+            # this is the exact request shape the github.com web UI's own uploader sends (see
+            # the module docstring); "fixing" this to the real MIME breaks the upload.
+            "Content-Type": "application/octet-stream",
+        }
+        try:
+            raw = request_bytes(
+                url,
+                method="POST",
+                headers=headers,
+                data=body,
+                same_host_redirects_only=True,
+            )
+        except AmbiguousHttpError as exc:
+            raise AmbiguousBackendError(f"github: upload for {file_path}: {exc}") from exc
+        except HttpError as exc:
+            raise BackendError(
+                f"github: upload for {file_path} failed: {exc} {exc.body}".strip()
+            ) from exc
+        try:
+            response = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise BackendError(
+                f"github: upload for {file_path} returned a malformed response: {exc}"
+            ) from exc
+        asset_url = response.get("url") if isinstance(response, dict) else None
+        if not isinstance(asset_url, str) or not asset_url:
+            raise BackendError(
+                f"github: upload for {file_path} returned no asset url: {response!r}"
+            )
+        self.comment(ticket_id, f"screenshot: ![{filename}]({asset_url})")
+        return asset_url
+
+    def _repository_id(self) -> int:
+        """The numeric repository id the upload endpoint's ``repository_id`` query param
+        requires (it is NOT ``owner/repo`` — the endpoint wants the opaque numeric id). Fetched
+        once per backend instance and cached: every :meth:`attach` call in native mode needs it,
+        and it never changes for the lifetime of one ``owner``/``repo`` pairing.
+        """
+        if self._repo_id_cache is not None:
+            return self._repo_id_cache
+        row = self._call(f"{_api_root()}/repos/{self.owner}/{self.repo}")
+        repo_id = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(repo_id, int):
+            raise BackendError(
+                f"github: /repos/{self.owner}/{self.repo} returned no numeric id: {row!r}"
+            )
+        self._repo_id_cache = repo_id
+        return repo_id
 
     def transition(self, ticket_id: str, state: State) -> Ticket:
         ticket = self.get(ticket_id)
