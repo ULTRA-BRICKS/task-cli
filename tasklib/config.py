@@ -132,6 +132,21 @@ _RIG_TASK_PASSTHROUGH = frozenset(
 )
 
 
+def _nested_override_set(block: dict[str, Any], path: tuple[str, ...]) -> bool:
+    """Whether ``block`` sets ``path`` directly through NESTED (passthrough) dicts — e.g.
+    ``block = {"github": {"attachment_mode": "link"}}``, ``path = ("github",
+    "attachment_mode")`` → ``True``. Used by a fan-out alias (see :func:`rig_task_overlay`) to
+    tell "the author wrote an explicit override for this exact target" apart from "nothing else
+    touches this leaf" — only the former should suppress the alias's own write to that path.
+    """
+    cursor: Any = block
+    for part in path[:-1]:
+        if not isinstance(cursor, dict):
+            return False
+        cursor = cursor.get(part)
+    return isinstance(cursor, dict) and path[-1] in cursor
+
+
 def rig_task_overlay(rig_data: dict[str, Any]) -> dict[str, Any]:
     """Translate a ``rig.yaml`` ``task:`` block into a task-cli config overlay.
 
@@ -175,8 +190,20 @@ def rig_task_overlay(rig_data: dict[str, Any]) -> dict[str, Any]:
             # more than one — see `_RIG_TASK_ALIASES`'s own comment); each path builds its own
             # nested cursor into the SAME fragment dict, so disjoint paths (e.g. `linear.*` and
             # `github.*`) combine into one fragment instead of clobbering each other.
-            fragment: dict[str, Any] = {}
-            for path in _RIG_TASK_ALIASES[key]:
+            paths = _RIG_TASK_ALIASES[key]
+            fragment = {}
+            for path in paths:
+                # review finding (PR #184): a fan-out alias (more than one target path) must
+                # defer to an explicit NESTED override at that SAME path, not collide with it —
+                # `attachment_mode: native` alongside `github: {attachment_mode: link}` means
+                # "native by default, link specifically for github", the same thing it meant
+                # before this alias fanned out to github at all. Skipping this path here means
+                # the passthrough branch below writes it alone, so `_assert_no_leaf_conflict`
+                # never even sees two writers for it. A single-path alias (team/project/repo)
+                # never takes this branch — a genuine collision there still hard-errors, as
+                # before this fix.
+                if len(paths) > 1 and _nested_override_set(block, path):
+                    continue
                 *parents, leaf = path
                 cursor = fragment
                 for part in parents:

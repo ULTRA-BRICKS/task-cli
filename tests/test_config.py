@@ -451,6 +451,26 @@ def test_rig_yaml_task_attachment_mode_flat_alias(tmp_path, monkeypatch):
     assert cfg.github_attachment_mode == "link"
 
 
+def test_rig_yaml_flat_attachment_mode_defers_to_nested_backend_override(tmp_path, monkeypatch):
+    # review finding (PR #184): the flat alias fans `attachment_mode` onto BOTH backend
+    # sections, so it must NOT collide with an explicit NESTED override for one specific
+    # backend — "native by default, link specifically for github" is a deliberate per-backend
+    # narrowing, not a contradiction, and must load exactly as it did before the fan-out ever
+    # touched github (when this same block only ever set linear.attachment_mode).
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "rig.yaml").write_text(
+        "task:\n"
+        "  backend: linear\n"
+        "  team: HYP\n"
+        "  attachment_mode: native\n"
+        "  github: { attachment_mode: link }\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)  # must not raise ConfigError
+    assert cfg.linear_attachment_mode == "native"  # unaffected — no nested linear override
+    assert cfg.github_attachment_mode == "link"  # the explicit nested override wins
+
+
 def test_rig_yaml_task_attachment_mode_nested_passthrough(tmp_path, monkeypatch):
     # the nested shape (linear: {attachment_mode: ...}) also works, since `linear` is already
     # a verbatim-passthrough key.
