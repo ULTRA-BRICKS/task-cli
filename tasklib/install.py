@@ -42,17 +42,10 @@ SKILL_MD = """\
 ---
 name: task
 description: >-
-  The enforced interface to the ticket system. Every user request becomes a durable,
-  well-formed ticket — task-cli enforces acceptance criteria, motivation, user-impact,
-  cost-of-inaction, screenshots (for UI), and the section template, so a ticket and its
-  PR speak one shape. Use INSTEAD of raw `gh issue` / `linear` by hand. Backends: GitHub
-  Issues (default) and Linear (per-repo). Commands: `task new`/`task create`, `task list`
-  (this session's tickets), `task read <id>`, `task find <q>`, `task change <id>`,
-  `task link <id> <relation> <other-id>` (blocks/blocked-by/relates-to/duplicate-of — record a
-  relationship between two tickets; `task new` nudges you toward this when it spots a
-  plausibly related open ticket), `task check <id> ... --proof`, `task accept <id>`,
-  `task attach <id> <path>`, `task gate <id>` (the pre-merge verdict), `task done <id>`, `task status <id> [<state>]`,
-  `task classify "<text>"`, `task session`.
+  The enforced interface to the ticket system — every request becomes a durable ticket
+  with acceptance criteria and evidence. Use INSTEAD of raw `gh issue`/`linear`. Backends:
+  GitHub Issues, Linear. Commands: `task new`, `task read <id>`, `task check <id> --proof`,
+  `task gate <id>`, `task done <id>`.
 metadata:
   author: alex-mextner
   repo: https://github.com/alex-mextner/task-cli
