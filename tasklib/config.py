@@ -37,6 +37,12 @@ RIG_CONFIG_FILENAME = "rig.yaml"
 
 VALID_BACKENDS = {"github-issues", "linear"}
 
+# Falsy string spellings for a config key documented as boolean-ish but user-editable as a
+# quoted YAML string (e.g. `route_process_to_harness: "false"`) — mirrors the shared
+# `require-ticket-before-commit` hook's `REQUIRE_TICKET_STRICT` falsy-string set so an operator
+# only has to learn this convention once across the ecosystem.
+_FALSY_STRINGS = frozenset({"0", "false", "no", "off"})
+
 # How a screenshot/file gets attached to a ticket (tg#11652, CTO decision — originally Linear-
 # only; extended to GitHub too by tg#16794/review-cli#484, see backends/github_issues.py's module
 # docstring for why GitHub needed the identical knob):
@@ -273,6 +279,11 @@ DEFAULTS: dict[str, Any] = {
             {"ollama": "qwen2.5:3b"},
         ],
         "bias": "change",
+        # Whether a `process`-classified message (classify.py's process/product axis) routes
+        # to `harness tasks new` instead of the product ticket backend. Default True; a repo
+        # sets this False to keep every classified item on the normal product-ticket path
+        # regardless of that axis (e.g. a repo with no `harness` binary on its agents' PATH).
+        "route_process_to_harness": True,
     },
     "session": {
         "detect": ["env:TASK_SESSION", "tmux-pane", "git-branch"],
@@ -390,6 +401,34 @@ class LoadedConfig:
     @property
     def classify_bias(self) -> str:
         return str(self.section("classify").get("bias", "change"))
+
+    @property
+    def classify_route_process_to_harness(self) -> bool:
+        """Whether a `process`-classified message (`classify.py`'s process/product axis)
+        routes to `harness tasks new` instead of the configured product ticket backend.
+        Default True (opt-out, not opt-in). Read from `classify.route_process_to_harness`.
+
+        NOT a bare `bool()` coercion (review finding): a real YAML boolean scalar
+        (`false`/`0`/unquoted) already parses to Python `False`/`0` and `bool()` handles
+        those correctly, but a QUOTED string value (`route_process_to_harness: "false"`)
+        parses to the Python string `"false"`, and `bool("false")` is `True` — the opt-out
+        would silently fail to opt out, leaving every process-classified item still routed
+        to `harness` even though the operator's config says not to. `_FALSY_STRINGS` (the
+        same falsy-string-spelling set the shared `require-ticket-before-commit` hook's
+        `REQUIRE_TICKET_STRICT` dial already uses) makes a quoted falsy value behave
+        exactly like its unquoted equivalent. A BLANK key (`route_process_to_harness:` with
+        nothing after the colon, parsing to YAML ``null``/Python ``None``) and an explicit
+        empty string (`route_process_to_harness: ""`) are both treated as UNSET — i.e. the
+        documented `True` default — rather than disagreeing with each other (review finding,
+        round 2: `bool(None)` is `False` while `"" not in _FALSY_STRINGS` is `True`, so the
+        two "nothing was really said here" spellings silently gave OPPOSITE answers).
+        """
+        value = self.section("classify").get("route_process_to_harness", True)
+        if value is None or value == "":
+            return True
+        if isinstance(value, str):
+            return value.strip().lower() not in _FALSY_STRINGS
+        return bool(value)
 
     @property
     def linear_attachment_mode(self) -> str:
