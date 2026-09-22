@@ -40,7 +40,8 @@ def _gh_config(tmp_path, projects: str) -> str:
 def test_list_outside_repo_no_registry_errors_with_guidance(
     capsys, tmp_path, monkeypatch
 ):
-    rc = main(["list", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list"])
     out = capsys.readouterr().out
     assert rc == 2
     assert "no projects to list" in out
@@ -74,8 +75,9 @@ def test_create_outside_repo_gives_3part_error(capsys, tmp_path, monkeypatch):
     assert "--repo owner/name" in out  # HOW names a real flag (must not lie)
 
 
-def test_read_outside_repo_unroutable_id_errors(capsys, tmp_path):
-    rc = main(["read", "#5", "-C", str(tmp_path)])
+def test_read_outside_repo_unroutable_id_errors(capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["read", "#5"])
     out = capsys.readouterr().out
     assert rc == 2
     assert "cannot resolve which project" in out
@@ -263,7 +265,8 @@ def test_list_outside_repo_groups_by_project(capsys, tmp_path, monkeypatch):
         ),
     )
 
-    rc = main(["list", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list"])
     out = capsys.readouterr().out
     assert rc == 0
     # session-vs-all messaging present (implicit aggregate must explain itself)
@@ -285,7 +288,8 @@ def test_list_outside_repo_json_is_structured(capsys, tmp_path, monkeypatch):
             tmp_path, "projects:\n  - {name: acme/frontend, repo: acme/frontend}\n"
         ),
     )
-    rc = main(["list", "-C", str(tmp_path), "--json"])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list", "--json"])
     out = capsys.readouterr().out
     assert rc == 0
     import json
@@ -311,7 +315,8 @@ def test_find_outside_repo_searches_all_projects_grouped(capsys, tmp_path, monke
             "projects:\n  - {repo: acme/frontend}\n  - {repo: acme/backend}\n",
         ),
     )
-    rc = main(["find", "header", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["find", "header"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "acme/frontend" in out and "#1" in out
@@ -340,7 +345,8 @@ def test_gantt_outside_repo_flattens_projects_onto_one_axis(
             tmp_path, "projects:\n  - {repo: acme/frontend}\n  - {repo: acme/backend}\n"
         ),
     )
-    rc = main(["gantt", "-C", str(tmp_path), "--json"])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["gantt", "--json"])
     out = capsys.readouterr().out
     assert rc == 0
     import json
@@ -351,9 +357,10 @@ def test_gantt_outside_repo_flattens_projects_onto_one_axis(
     assert ids == ["#7", "#12"]
 
 
-def test_gantt_outside_repo_no_registry_errors(capsys, tmp_path):
+def test_gantt_outside_repo_no_registry_errors(capsys, tmp_path, monkeypatch):
     # the _UserError branch: outside a repo with NO registered projects → a clean 3-part error.
-    rc = main(["gantt", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["gantt"])
     out = capsys.readouterr().out
     assert rc == 2
     assert "no projects to chart" in out
@@ -385,7 +392,8 @@ def test_grouped_list_is_paged_on_tty(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("TASK_PAGER", str(fake_pager))
     monkeypatch.setattr(_cli.sys.stdout, "isatty", lambda: True, raising=False)
 
-    rc = main(["list", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list"])
     assert rc == 0
     paged = sink.read_text(encoding="utf-8")
     # the heading-per-project body reached the pager, including the session-vs-all notice.
@@ -414,7 +422,8 @@ def test_read_outside_repo_routes_to_single_github_project(
     monkeypatch.setenv(
         "XDG_CONFIG_HOME", _gh_config(tmp_path, "projects:\n  - {repo: acme/only}\n")
     )
-    rc = main(["read", "#42", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["read", "#42"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "#42" in out and "The one" in out
@@ -427,7 +436,8 @@ def test_read_outside_repo_ambiguous_github_id_errors(capsys, tmp_path, monkeypa
         "XDG_CONFIG_HOME",
         _gh_config(tmp_path, "projects:\n  - {repo: a/one}\n  - {repo: a/two}\n"),
     )
-    rc = main(["read", "#9", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["read", "#9"])
     out = capsys.readouterr().out
     assert rc == 2
     assert "cannot resolve which project" in out
@@ -455,7 +465,8 @@ def test_status_outside_repo_routes_linear_id_by_team(capsys, tmp_path, monkeypa
             "projects:\n  - {repo: a/gh}\n  - {name: HYP, backend: linear, team: HYP}\n",
         ),
     )
-    rc = main(["status", "HYP-3", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["status", "HYP-3"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "HYP-3" in out and "in-progress" in out
@@ -484,7 +495,8 @@ def test_status_outside_repo_routes_tasks_id_by_team(capsys, tmp_path, monkeypat
             "  - {name: GL, backend: tasks, tasks: {url: 'https://tasks.example.test', team: GL}}\n",
         ),
     )
-    rc = main(["status", "GL-3", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["status", "GL-3"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "GL-3" in out and "in-progress" in out
@@ -517,7 +529,8 @@ def test_read_outside_repo_two_same_team_linear_projects_routes_deterministicall
             "  - {name: HYP-beta, backend: linear, linear: {team: HYP, project: beta}}\n",
         ),
     )
-    rc = main(["read", "HYP-7", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["read", "HYP-7"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "HYP-7" in out
@@ -566,7 +579,8 @@ def test_list_in_repo_no_session_falls_back_to_all(capsys, tmp_path, monkeypatch
     )
     monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: backend)
     # no TASK_SESSION, cwd is not a git repo → session.source == 'none' → fallback
-    rc = main(["list", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "showing all project tasks" in out
@@ -581,7 +595,8 @@ def test_list_in_repo_session_with_no_tickets_falls_back(capsys, tmp_path, monke
         session_tickets=[],  # session resolves but has nothing → fallback + say so
     )
     monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: backend)
-    rc = main(["list", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "showing all project tasks" in out
@@ -601,7 +616,8 @@ def test_list_in_repo_session_with_tickets_scopes_no_fallback_line(
         session_tickets=[Ticket(title="Mine", state=State.TODO, id="#9")],
     )
     monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: backend)
-    rc = main(["list", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "showing all project tasks" not in out
@@ -617,7 +633,8 @@ def test_list_all_in_repo_uses_grouped_view(capsys, tmp_path, monkeypatch):
         session_tickets=[],
     )
     monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: backend)
-    rc = main(["list", "--all", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list", "--all"])
     out = capsys.readouterr().out
     assert rc == 0
     # explicit --all does NOT print the apologetic session-vs-all line
@@ -648,7 +665,8 @@ def test_list_all_marks_current_even_when_repo_is_in_registry(
             "projects:\n  - {name: The Web App, repo: acme/web}\n  - {repo: acme/other}\n",
         ),
     )
-    rc = main(["list", "--all", "-C", str(tmp_path), "--json"])
+    monkeypatch.chdir(tmp_path)  # outside any repo, no explicit -C (UB-25 contract)
+    rc = main(["list", "--all", "--json"])
     out = capsys.readouterr().out
     assert rc == 0
     import json

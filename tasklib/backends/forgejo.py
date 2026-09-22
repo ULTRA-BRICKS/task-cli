@@ -47,7 +47,7 @@ from dataclasses import dataclass, field, replace
 from urllib.parse import quote, urlencode
 
 from ..model import State, Ticket
-from ..render import parse, render
+from ..render import parse, render, round_trips_losslessly
 from ..taskref import TaskRefError, forgejo_issue_number
 from . import AmbiguousBackendError, BackendError
 from .github_issues import _STATE_LABEL, _derive_state
@@ -405,7 +405,8 @@ class ForgejoBackend:
         original = parse(stored)
         if all(getattr(ticket, f) == getattr(original, f) for f in _BODY_FIELDS):
             return None
-        if render(original).strip() != stored.strip():
+        # Tolerates only the heading spacing an editor UI adds (see round_trips_losslessly).
+        if not round_trips_losslessly(stored):
             raise BackendError(
                 f"forgejo: update refuses to overwrite {self.owner}/{self.repo}{ticket.id}'s body — "
                 "its Markdown holds content outside task-cli's managed template, so the requested "

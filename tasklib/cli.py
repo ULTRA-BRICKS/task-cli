@@ -151,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cwd",
         default=None,
         help="repository to operate on (default: cwd). An explicit path must be inside a git "
-        "repository, except for read-only registry commands (list/find/read/...)",
+        "repository",
     )
     common.add_argument(
         "--backend",
@@ -686,38 +686,30 @@ class _ClassifyBatchAmbiguous(Exception):
 _QUALIFIED_ID_RE = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[0-9]+")
 _FORGE_BACKENDS = ("github-issues", "forgejo")
 
-# Commands that may legitimately run with no repository target: the registry/aggregation views
-# and id-routed reads (outside a repo they resolve through `projects:`). An explicit `-C` that is
-# not a repository is refused for every OTHER command before config, credentials or network are
-# touched. `daemon` refuses a repo-less context itself (see `_daemon_coordinate`).
-_UNSCOPED_READ_COMMANDS = frozenset(
-    {"list", "find", "gantt", "burn", "web", "read", "view", "gate", "session", "daemon"}
-)
-
 
 def _refuse_explicit_non_repo_cwd(args: argparse.Namespace) -> None:
-    """UB-25: an explicit ``-C``/``--cwd`` naming a non-repository path is an error for any
-    repo-scoped command — it would otherwise silently fall back to a global/registry route and
-    write into whatever project that resolves to. Runs before any backend is built."""
+    """UB-25 contract: EVERY explicit ``-C``/``--cwd`` — for reads and writes alike — must name
+    a path inside a git worktree, checked before any config, credential or provider I/O.
+
+    An explicit target says "operate on THIS repository"; a non-repository path would silently
+    fall back to a global/registry route that may be a different project. The unscoped
+    registry/aggregation views (``list``/``find``/``read`` outside a repo) stay available, but
+    only from a non-repository shell cwd with NO ``-C``.
+    """
     explicit = getattr(args, "cwd", None)
-    if explicit is None or args.command in _UNSCOPED_READ_COMMANDS:
+    if explicit is None:
         return
-    if args.command == "status" and not getattr(args, "new_state", None):
-        return  # a bare `status <id>` only reads
-    if args.command == "audit" and not getattr(args, "revert", False):
-        return  # `audit` only reads unless --revert moves tickets
-    if args.command == "classify" and not (getattr(args, "create", False) or getattr(args, "update", None)):
-        return  # classification alone writes nothing
     target = Path(explicit).expanduser()
     if target.is_dir() and _in_git_repo(target.resolve()):
         return
     raise _UserError(
         f"-C {explicit} is not inside a git repository.\n"
-        "  why: an explicit -C/--cwd selects the repository whose tracker this command writes "
-        "to; a non-repository path would fall back to a global or registry route that may be "
-        "a different project.\n"
+        "  why: an explicit -C/--cwd selects the repository this command operates on; a "
+        "non-repository path would fall back to a global or registry route that may be a "
+        "different project.\n"
         "  fix: pass -C with a path inside the target repository, or run the command from "
-        "inside it (no flag needed)."
+        "inside it (no flag needed). For the cross-project registry view, run it from outside "
+        "any repository without -C."
     )
 
 

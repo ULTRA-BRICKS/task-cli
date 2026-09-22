@@ -83,12 +83,10 @@ Global flags: `-C/--cwd`, `--backend`, `--repo`, `--config`, `--json`, and the p
 hatch `--skip-<gate> "<reason>"`.
 
 Normal use needs no `-C`: run `task` inside the repository. An **explicit** `-C`/`--cwd` must
-point inside a git repository — a non-repository path is refused before any config, credential
-or network access, because it would otherwise fall back to a global/registry route that may be
-a different project. The read-only registry commands (`list`, `find`, `read`/`view`, a bare
-`status <id>`, `gate`, `audit` without `--revert`, `classify` without `--create`/`--update`,
-`gantt`, `burn`, `web`, `session`) keep
-accepting a non-repository `-C`, since reading across projects outside a repo is their job.
+point inside a git repository — for every command, reads included. A non-repository path is
+refused before any config, credential or network access, because it would otherwise fall back
+to a global/registry route that may be a different project. The cross-project registry views
+(`list`, `find`, `read` outside a repo) work from a non-repository shell cwd **without** `-C`.
 
 ### Due-date reminders (the daemon)
 
@@ -536,8 +534,8 @@ A tool's *read* and *global* operations should not demand you stand inside a git
   clear, actionable error.
 - **Only `task new`/`create` is repo-bound** — it writes a ticket into one specific project, so
   it needs a repo (or `--repo owner/name`). Outside one it fails with a 3-part WHAT/WHY/HOW error.
-  Writes routed by id through the registry work from a non-repository shell cwd, but never
-  through an explicit non-repository `-C` (see Global flags).
+  Id-routed reads and writes work from a non-repository shell cwd, never through an explicit
+  non-repository `-C` (see Global flags).
 - A project whose backend errors (auth, offline, unknown team) is shown as a **degraded
   group** — it never aborts the whole cross-project listing.
 

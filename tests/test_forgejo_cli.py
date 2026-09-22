@@ -85,15 +85,30 @@ def test_explicit_missing_cwd_is_refused(tmp_path, monkeypatch, capsys):
     assert "not inside a git repository" in capsys.readouterr().out
 
 
-def test_read_only_registry_commands_keep_working_with_explicit_non_repo_cwd(
-    tmp_path, monkeypatch, capsys
-):
-    # `read` outside a repo is an intentional registry lookup — the refusal is for writes only.
+@pytest.mark.parametrize(
+    "argv",
+    [["read", "#4"], ["list"], ["find", "x"], ["status", "#4"], ["gantt"], ["audit"],
+     ["classify", "is this a question?"]],
+)
+def test_explicit_non_repo_cwd_is_refused_for_reads_too(argv, tmp_path, monkeypatch, capsys):
+    # UB-25 contract: EVERY explicit -C must be a git worktree, reads included — including the
+    # classification-only `classify` (a review suggested exempting it; the user's requirement is
+    # that an explicit target is always a repository).
     _global_config(tmp_path, monkeypatch, _REGISTRY)
     rec = _Recorder(_Commentable())
     monkeypatch.setattr("tasklib.backends.get_backend", rec)
-    rc = main(["read", "#4", "-C", str(tmp_path)])
-    assert rc == 0
+    rc = main([*argv, "-C", str(tmp_path)])
+    assert rc == 2
+    assert "not inside a git repository" in capsys.readouterr().out
+    assert rec.configs == []
+
+
+def test_registry_read_works_from_an_unscoped_cwd_without_c(tmp_path, monkeypatch):
+    _global_config(tmp_path, monkeypatch, _REGISTRY)
+    rec = _Recorder(_Commentable())
+    monkeypatch.setattr("tasklib.backends.get_backend", rec)
+    monkeypatch.chdir(tmp_path)
+    assert main(["read", "#4"]) == 0
     (cfg,) = rec.configs
     assert cfg.backend == "forgejo" and cfg.section("forgejo")["repo"] == "acme/web"
 
@@ -168,7 +183,8 @@ def test_bare_number_outside_repo_with_github_and_forgejo_projects_is_ambiguous(
         _REGISTRY + "  - {repo: acme/gh}\n",
     )
     monkeypatch.setattr("tasklib.backends.get_backend", _Recorder())
-    rc = main(["read", "#4", "-C", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)
+    rc = main(["read", "#4"])
     assert rc == 2
     assert "cannot resolve which project" in capsys.readouterr().out
 
@@ -184,7 +200,8 @@ def test_repo_qualified_id_outside_repo_selects_the_matching_forgejo_project(
     )
     rec = _Recorder(_Commentable())
     monkeypatch.setattr("tasklib.backends.get_backend", rec)
-    assert main(["read", "acme/api#4", "-C", str(tmp_path)]) == 0
+    monkeypatch.chdir(tmp_path)
+    assert main(["read", "acme/api#4"]) == 0
     assert rec.configs[0].section("forgejo")["repo"] == "acme/api"
 
 
@@ -247,13 +264,8 @@ def test_same_team_id_across_linear_and_tasks_is_ambiguous_outside_a_repo(tmp_pa
     assert "cannot resolve which project" in capsys.readouterr().out
 
 
-def test_classify_without_create_accepts_an_explicit_non_repo_cwd(tmp_path, monkeypatch):
-    from tasklib import cli
-
+def test_classify_with_create_and_explicit_non_repo_cwd_is_refused(tmp_path, monkeypatch, capsys):
     _global_config(tmp_path, monkeypatch, _REGISTRY)
-    seen = []
-    monkeypatch.setattr(cli, "cmd_classify", lambda args: seen.append(args.cwd) or 0)
-    monkeypatch.setitem(cli.main.__globals__, "cmd_classify", cli.cmd_classify)
-    assert main(["classify", "is this a question?", "-C", str(tmp_path)]) == 0
-    assert seen == [str(tmp_path)]
+    monkeypatch.setattr("tasklib.backends.get_backend", _Recorder())
     assert main(["classify", "fix it", "--create", "-C", str(tmp_path)]) == 2
+    assert "not inside a git repository" in capsys.readouterr().out

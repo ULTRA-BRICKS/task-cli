@@ -64,6 +64,30 @@ def render(ticket: Ticket) -> str:
     return "\n\n".join(out) + "\n"
 
 
+def round_trips_losslessly(raw: str) -> bool:
+    """Whether ``raw`` is exactly the managed template ``render(parse(raw))`` would produce,
+    tolerating ONLY the spacing an editor UI adds around it: blank lines directly after a managed
+    ``## <section>`` heading, and trailing blank lines at the end. A body passing this holds
+    nothing ``render`` would drop, so re-rendering it is lossless in content. Blank lines
+    anywhere else (prose, code fences), unknown sections and any other difference still fail.
+    """
+    return _without_ui_spacing(raw) == _without_ui_spacing(render(parse(raw)))
+
+
+_MANAGED_HEADING_LINES = frozenset(f"## {name}" for name in (*SECTIONS, _SKIP_MARKER, _DUE_MARKER))
+
+
+def _without_ui_spacing(body: str) -> str:
+    out: list[str] = []
+    after_heading = False
+    for line in body.rstrip().split("\n"):
+        if after_heading and line.strip() == "":
+            continue
+        after_heading = line.rstrip() in _MANAGED_HEADING_LINES
+        out.append(line)
+    return "\n".join(out)
+
+
 def _render_criterion(c: Criterion) -> str:
     """One acceptance-criterion checkbox line. A checked criterion carries its visual proof
     (``— proof: ![proof](ref)``) or, when forced, the recorded reason (``— forced: <reason>``)."""

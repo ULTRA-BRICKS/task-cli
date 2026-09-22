@@ -804,3 +804,15 @@ def test_scan_keeps_the_snapshot_of_the_ticket_it_returns(forge, monkeypatch):
     (first, *_) = b.list(limit=5)
     assert first.title == "old title"
     assert b._snapshots["2"].title == "old title"
+
+
+def test_forgejo_body_change_on_ui_spaced_managed_body_is_accepted(forge):
+    managed = render(_ticket())
+    spaced = "\n".join(line + ("\n" if line.startswith("## ") else "") for line in managed.splitlines()) + "\n\n"
+    forge.add(_issue(50, "M", body=spaced))
+    b = backend()
+    t = b.get("#50")
+    t.skips["post-merge-acceptance"] = "verified after deploy"
+    b.update(t)
+    patch = next(c for c in forge.calls if c[0] == "PATCH")
+    assert "## Skipped gates" in patch[2]["body"]

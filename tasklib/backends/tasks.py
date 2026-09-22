@@ -55,7 +55,7 @@ from dataclasses import dataclass, field, replace
 from urllib.parse import quote, urlencode
 
 from ..model import State, Ticket
-from ..render import parse, render
+from ..render import parse, render, round_trips_losslessly
 from ..taskref import TaskRefError, tasks_identifier
 from . import AmbiguousBackendError, BackendError
 from .http import (
@@ -498,7 +498,8 @@ class TasksBackend:
         # section template. If it doesn't, raw_body carries custom Markdown (extra headings,
         # imported prose, ...) this backend doesn't understand and render(ticket) would silently
         # drop on the way back out — refuse instead of clobbering it (UB-23 review, option b).
-        if render(original).strip() != ticket.raw_body.strip():
+        # Tolerates only the heading spacing an editor UI adds (see round_trips_losslessly).
+        if not round_trips_losslessly(ticket.raw_body):
             raise BackendError(
                 f"tasks: update refuses to overwrite ticket {ticket.id!r}'s body — its current "
                 "Markdown contains content this backend's parser doesn't fully understand "

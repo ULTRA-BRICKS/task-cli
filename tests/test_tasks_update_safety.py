@@ -250,3 +250,57 @@ def test_unmanaged_body_mutation_with_new_label_makes_zero_api_calls(api):
     with pytest.raises(BackendError, match="body"):
         backend().update(ticket)
     assert api == []  # zero API calls at all — no catalog read, no label creation, no PATCH
+
+
+# ── UI-normalized template spacing (UB-25 live regression) ─────────────────────────────
+
+
+def _ui_spaced(body: str) -> str:
+    """What tasks-app's editor did to a task-cli body: one blank line after every managed
+    heading, plus one at the end. Content is otherwise byte-identical."""
+    lines = []
+    for line in body.splitlines():
+        lines.append(line)
+        if line.startswith("## "):
+            lines.append("")
+    return "\n".join(lines) + "\n\n"
+
+
+def test_skips_change_on_ui_spaced_managed_body_is_accepted(api):
+    original = ticket_from_original_read()
+    spaced = _ui_spaced(original.raw_body)
+    read = dc_replace(parse(spaced, original), raw_body=spaced)
+    read.skips["post-merge-acceptance"] = "verified after deploy"
+    backend().update(read)
+    (patch,) = patch_calls(api)
+    assert "## Skipped gates" in patch[2]["description"]
+    assert "Original what" in patch[2]["description"]
+
+
+def test_metadata_only_edit_on_ui_spaced_body_still_omits_description(api):
+    original = ticket_from_original_read()
+    spaced = _ui_spaced(original.raw_body)
+    read = dc_replace(parse(spaced, original), raw_body=spaced, state=State.DONE)
+    backend().update(read)
+    (patch,) = patch_calls(api)
+    assert "description" not in patch[2]
+
+
+def test_ui_spaced_body_with_an_unknown_section_is_still_refused(api):
+    original = ticket_from_original_read()
+    spaced = _ui_spaced(original.raw_body) + "## Custom notes\n\nhand-written\n"
+    read = dc_replace(parse(spaced, original), raw_body=spaced)
+    read.skips["post-merge-acceptance"] = "x"
+    with pytest.raises(BackendError, match="refuses to overwrite"):
+        backend().update(read)
+    assert patch_calls(api) == []
+
+
+def test_blank_lines_inside_prose_survive_a_body_update(api):
+    original = ticket_from_original_read({"what": "line one\n\n\n\nline two"})
+    spaced = _ui_spaced(render(original))
+    read = dc_replace(parse(spaced, original), raw_body=spaced)
+    read.skips["post-merge-acceptance"] = "x"
+    backend().update(read)
+    (patch,) = patch_calls(api)
+    assert "line one\n\n\n\nline two" in patch[2]["description"]
