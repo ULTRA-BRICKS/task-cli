@@ -23,3 +23,10 @@ ci:
 
 ecosystem_readme:
   enabled: true
+
+task:
+  backend: forgejo
+  forgejo:
+    url: https://git.hyperide.ai
+    repo: ultrabricks/task-cli
+    attachment_mode: native

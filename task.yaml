@@ -1,10 +1,6 @@
 # task.yaml — task-cli's own ticket config (committed; the per-repo source of truth).
-# This repo files its tickets as GitHub Issues against alex-mextner/task-cli.
+# Tracker routing lives in rig.yaml (task: backend forgejo, UB-25); this file keeps policy only.
 version: 1
-backend: github-issues
-github:
-  repo: auto                 # auto = resolve owner/name from the `origin` remote
-  default_labels: [agent]
 enforce:
   acceptance_criteria: required
   motivation: required
