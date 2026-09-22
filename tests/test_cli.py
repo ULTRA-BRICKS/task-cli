@@ -4661,9 +4661,27 @@ def test_classify_no_provider_biases(capsys, monkeypatch, _inject_fake):
     )
     rc = main(["classify", "ambiguous message"])
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "no classifier provider available" in out
-    assert "change" in out
+    captured = capsys.readouterr()
+    assert "no classifier provider available" in captured.err
+    assert "no classifier provider available" not in captured.out
+    assert "change" in captured.out
+
+
+def test_classify_no_provider_json_output_is_a_single_clean_document(capsys, monkeypatch, _inject_fake):
+    # review finding: the no-provider warning used to print to stdout, so `classify --json`
+    # with no reachable provider emitted the warning line BEFORE the JSON document — a hook
+    # doing `json.loads(stdout)` would fail on exactly this stream-purity violation.
+    import json
+
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain", lambda fallbacks=None, env=None, **_kw: None
+    )
+    rc = main(["classify", "ambiguous message", "--json"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "no classifier provider available" in captured.err
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "change"
 
 
 def test_classify_bias_actionable_config_falls_back_to_change(capsys, monkeypatch, _inject_fake):
@@ -5013,8 +5031,9 @@ def test_classify_process_route_missing_harness_binary_falls_back_to_product_tic
     created = _spy_create(monkeypatch, _inject_fake)
     rc = main(["classify", "clean up my local scratch notes before the demo", "--create"])
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "`harness` binary not found on PATH" in out
+    result = capsys.readouterr()
+    assert "`harness` binary not found on PATH" in result.err
+    assert "`harness` binary not found on PATH" not in result.out
     assert len(created) == 1  # filed as a product ticket, never dropped
     assert "sp:3" in created[0].labels
     assert "priority:P2" in created[0].labels

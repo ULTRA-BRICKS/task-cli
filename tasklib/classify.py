@@ -28,9 +28,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Literal, TypeVar
+from typing import Literal, TypeVar
 
 CLASSIFY_PROMPT = (
     "Classify this message to a dev agent as EXACTLY ONE of:\n"

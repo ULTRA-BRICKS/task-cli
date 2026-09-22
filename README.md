@@ -598,9 +598,12 @@ surface them — they mint no ticket, so the axes are moot):
 - **`priority`** — one of `P0` (drop everything) .. `P3` (low).
 - **`process_or_product`** — `process` (a session-local/agent process step — reviewing an
   uncommitted diff, a pre-commit checklist) vs `product` (durable product work). On `--create`,
-  a `process` item routes to a LOCAL `harness tasks new --title <derived> --body <message>`
-  ticket instead of the configured GitHub/Linear backend (a missing `harness` binary or a
-  non-zero exit prints a clean `error:` line, never a traceback); a `product` item creates the
+  a `process` item routes to a LOCAL `harness tasks new --title=<derived> --body=<message>`
+  ticket instead of the configured GitHub/Linear backend (glued `=`-form; no dedup, no session
+  recording — a repeated message mints a fresh local task each time, unlike the product path).
+  A MISSING `harness` binary never drops the item — it warns and falls back to the normal
+  product-ticket path; a harness binary that's present but fails AT RUNTIME still errors
+  cleanly (`error:` line, never a traceback) with no fallback. A `product` item creates the
   ticket exactly as before, additionally labeled `sp:<n>` and `priority:<Pn>`. Set
   `classify.route_process_to_harness: false` to keep every item on the product-ticket path
   regardless of this axis. An axis the model doesn't cleanly answer biases to a SAFE default

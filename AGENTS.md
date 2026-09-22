@@ -154,16 +154,24 @@ safe default (`product`/`P2`/`3` — never caller-configurable, unlike the chang
 `process_or_product` biases to `product` specifically because a mis-routed PROCESS ticket is
 far cheaper to fix than a silently DROPPED product ticket — never write to neither store.
 
-On `--create`, a `process`-classified item shells out to `harness tasks new --title <derived>
---body <message>` (the local harness-cli peer tool, reached ONLY via its installed binary on
-PATH — never a Python import of harness-cli, mirroring the `review` shell-out) instead of the
-configured product ticket backend; a missing binary or non-zero exit prints a clean `error:`
-line, never a traceback. `classify.route_process_to_harness: false` disables this — every item
-then follows the normal product-ticket path regardless of the axis. A `product`-classified
-create additionally labels the new ticket `sp:<n>` and `priority:<Pn>`, threaded through the
-SAME `labels=[...]` list `_classify_create` already builds (no backend-adapter changes). In a
-multi-ask batch (`_classify_multi`), every split part is classified fully and independently, so
-one message bundling a product bug and a process step correctly mints one product ticket AND
+On `--create`, a `process`-classified item shells out to `harness tasks new --title=<derived>
+--body=<message>` (glued `=`-form, not a separate value token — the derived title/message can
+itself start with `-`, which a separate token would read as an option flag; the local
+harness-cli peer tool, reached ONLY via its installed binary on PATH — never a Python import of
+harness-cli, mirroring the `review` shell-out) instead of the configured product ticket
+backend. A MISSING `harness` binary never drops the item: it warns (stderr) and falls back to
+the normal product-ticket path — the exact same "never write to neither store" posture the
+process/product axis's own default already has. A harness binary that IS present but fails AT
+RUNTIME (non-zero exit, timeout) is a different, genuinely actionable error and still surfaces
+as a clean `error:` line, never a traceback — nothing falls back in that case.
+`classify.route_process_to_harness: false` disables routing entirely — every item then follows
+the normal product-ticket path regardless of the axis. A `product`-classified create
+additionally labels the new ticket `sp:<n>` and `priority:<Pn>`, threaded through the SAME
+`labels=[...]` list `_classify_create` already builds (no backend-adapter changes). The harness
+route has NO dedup and no session recording (unlike `_classify_create`'s near-exact + advisory
+token/Jaccard net) — a repeated inbound message mints a fresh local harness task each time. In
+a multi-ask batch (`_classify_multi`), every split part is classified fully and independently,
+so one message bundling a product bug and a process step correctly mints one product ticket AND
 one local harness task.
 
 ## Tests

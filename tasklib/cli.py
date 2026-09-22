@@ -5313,11 +5313,17 @@ def _classify_one(
         # model output to read either, so they take classify.py's own fixed safe defaults
         # (default_classification — the single source of truth, never hand-copied here).
         classification = default_classification(bias)
-        print(_warn(f"  no classifier provider available; biasing to {classification.verdict.value}"))
+        print(
+            _warn(f"  no classifier provider available; biasing to {classification.verdict.value}"),
+            file=sys.stderr,  # a warning, not the verdict/axes/--json unit stdout callers parse
+        )
     else:
         output = _run_review_just_ask(resolved.model_arg, build_prompt(args.text))
         classification = parse_classification(output, bias=bias, message=args.text)
     verdict = classification.verdict
+    # `actionable`/`justAsk` never mint a ticket, so their axes are moot — computed once here
+    # rather than repeating `verdict is Verdict.CHANGE` at every log_event/`--json`/human site.
+    axes = classification if verdict is Verdict.CHANGE else None
 
     from .logging import log_event
 
@@ -5325,27 +5331,24 @@ def _classify_one(
         "classify",
         verdict=verdict.value,
         model=(resolved.model_arg if resolved else "none"),
-        process_or_product=(classification.process_or_product if verdict is Verdict.CHANGE else None),
-        priority=(classification.priority if verdict is Verdict.CHANGE else None),
-        story_points=(classification.story_points if verdict is Verdict.CHANGE else None),
+        process_or_product=(axes.process_or_product if axes is not None else None),
+        priority=(axes.priority if axes is not None else None),
+        story_points=(axes.story_points if axes is not None else None),
     )
 
     if args.json:
         import json
 
         payload = {"verdict": verdict.value}
-        if verdict is Verdict.CHANGE:
-            payload["process_or_product"] = classification.process_or_product
-            payload["priority"] = classification.priority
-            payload["story_points"] = classification.story_points
+        if axes is not None:
+            payload["process_or_product"] = axes.process_or_product
+            payload["priority"] = axes.priority
+            payload["story_points"] = axes.story_points
         print(json.dumps(payload, ensure_ascii=False))
     else:
         print(f"{verdict.value}")
-        if verdict is Verdict.CHANGE:
-            print(
-                f"  {classification.process_or_product} / {classification.priority} / "
-                f"{classification.story_points}sp"
-            )
+        if axes is not None:
+            print(f"  {axes.process_or_product} / {axes.priority} / {axes.story_points}sp")
 
     if verdict is Verdict.JUST_ASK:
         return 0
@@ -5359,23 +5362,18 @@ def _classify_one(
     if args.update:
         return _classify_append(args, cfg)
     if args.create:
-        if (
-            classification.process_or_product == "process"
-            and cfg.classify_route_process_to_harness
-        ):
+        # verdict is CHANGE here (JUST_ASK/ACTIONABLE returned above), so axes is never None.
+        if axes.process_or_product == "process" and cfg.classify_route_process_to_harness:
             # `_which_harness()` is checked ONCE here, never re-probed inside
-            # `_classify_route_to_harness` (review finding, TOCTOU — see that function's
-            # docstring for the full race this closes): the axis correctly resolved to
-            # `process`, so this is NOT the "ambiguous axis" case `default_classification`'s
-            # product-bias already guards — it's a DIFFERENT failure mode (a confidently-
-            # process-classified item whose target store, harness-cli, isn't installed) that
-            # must fall back to the SAME safe default rather than erroring out and dropping the
-            # message with no ticket filed anywhere. `harness` genuinely missing is the common
-            # case for any repo that hasn't installed the peer tool — an unattended caller (the
-            # tg-cli inbound hook) upgrading to this feature must never silently lose a message
-            # it used to file as a product ticket. A harness binary that IS present but fails AT
-            # RUNTIME (non-zero exit, timeout) is a different, genuinely actionable error and
-            # still surfaces as one — `_classify_route_to_harness` handles that case unchanged.
+            # `_classify_route_to_harness` — see that function's docstring for the full TOCTOU
+            # race this closes: the axis correctly resolved to `process`, so this is NOT the
+            # "ambiguous axis" case `default_classification`'s product-bias already guards —
+            # it's a DIFFERENT failure mode (a confidently-process-classified item whose target
+            # store, harness-cli, isn't installed) that must fall back to the SAME safe default
+            # rather than erroring out and dropping the message with no ticket filed anywhere. A
+            # harness binary that IS present but fails AT RUNTIME (non-zero exit, timeout) is a
+            # different, genuinely actionable error and still surfaces as one —
+            # `_classify_route_to_harness` handles that case unchanged.
             harness = _which_harness()
             if harness is not None:
                 return _classify_route_to_harness(args, harness)
@@ -5384,7 +5382,8 @@ def _classify_one(
                     "  `harness` binary not found on PATH; filing as a product ticket instead "
                     "of a local process ticket (install harness-cli, or this is expected "
                     "behavior — nothing is ever silently dropped)"
-                )
+                ),
+                file=sys.stderr,  # a warning, not the payload stdout callers parse
             )
         return _classify_create(args, cfg, classification, batch_resolved_ids=batch_resolved_ids)
     return 0
@@ -5487,7 +5486,9 @@ def _classify_create(
                 _warn(
                     f"  the comment on {match.id} may have already been posted — check the "
                     "backend before retrying, to avoid a duplicate comment."
-                )
+                ),
+                file=sys.stderr,  # advisory, not the machine-consumed unit — mirrors the
+                # possible-duplicate warning above.
             )
             if batch_resolved_ids is not None:
                 raise _ClassifyBatchAmbiguous(exc.exit_code) from exc
