@@ -48,10 +48,13 @@ description: >-
   PR speak one shape. Use INSTEAD of raw `gh issue` / `linear` by hand. Backends: GitHub
   Issues (default) and Linear (per-repo). Commands: `task new`/`task create`, `task list`
   (this session's tickets), `task read <id>`, `task find <q>`, `task change <id>`,
-  `task link <id> <relation> <other-id>` (blocks/blocked-by/relates-to/duplicate-of — record a
-  relationship between two tickets; `task new` nudges you toward this when it spots a
-  plausibly related open ticket), `task check <id> ... --proof`, `task accept <id>`,
-  `task attach <id> <path>`, `task gate <id>` (the pre-merge verdict), `task done <id>`, `task status <id> [<state>]`,
+  `task link <id> <relation> <other-id>` (blocks/blocked-by/relates-to/duplicate-of/
+  follow-up-of/followed-up-by — record a relationship between two tickets, e.g. tracing a
+  later regression back to the ticket it followed up; `task new` nudges you toward this when
+  it spots a plausibly related open ticket), `task check <id> ... --proof`, `task accept <id>`,
+  `task attach <id> <path>`, `task gate <id>` (the pre-merge verdict), `task done <id>`,
+  `task change <id> --deployed "<note>"` (record a production deploy of a done ticket),
+  `task status <id> [<state>]`,
   `task classify "<text>"`, `task session`.
 metadata:
   author: alex-mextner
@@ -70,8 +73,9 @@ task list                        # THIS session's tickets (falls back to all whe
 task list --all                  # every known project's tickets, grouped by project
 task read <id>                   # full ticket (every section) — works outside a repo
 task find "<query>"              # search title+body (cross-project when outside a repo)
-task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of — records a
-#   relationship in ## Links, mirrored on the other ticket (except duplicate-of, one-sided)
+task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of|
+#   follow-up-of|followed-up-by — records a relationship in ## Links, mirrored on the other
+#   ticket (except duplicate-of, one-sided)
 task change <id> --acceptance "..." --screenshot proof.png
 task attach <id> shot.png            # add implementation screenshot (repeatable paths)
 task check <id> 1 2 --proof a.png --proof b.png   # tick criteria WITH a proof each (in order)
@@ -80,6 +84,7 @@ task accept <id>                 # walk the unaccepted criteria, asking for a pr
 task gate <id> [--json]          # read-only pre-merge verdict: exit 0 only when fully accepted
 task change <id> --post-merge-acceptance "<reason>"  # opt-out when acceptance is inherently post-merge
 task done <id>                   # close a ticket (runs the on-done gates)
+task change <id> --deployed "<note>"  # record a production deploy (state must already be done)
 task status <id>                 # read state (works outside a repo)
 task status <id> done            # transition (runs the on-done gates)
 task classify "<text>" --create  # change|actionable|justAsk; on `change`, create/dedup a ticket

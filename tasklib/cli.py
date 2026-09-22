@@ -7,7 +7,8 @@ filesystem (sidecar). All pure logic lives in the sibling modules (``model``/``r
 the backends) are lazy so ``task --help`` stays fast and dependency-light.
 
 Subcommands: create/new · list · gantt (read-only due-date timeline) · burn (read-only remaining-over-time chart) · web (local HTML burn chart: start/stop/status/run) · read/view · find · change
-· attach (implementation screenshot proof) · status · done · check · link (record a typed blocks/blocked-by/relates-to/duplicate-of
+· attach (implementation screenshot proof) · status · done · check · link (record a typed
+blocks/blocked-by/relates-to/duplicate-of/follow-up-of/followed-up-by
 relationship between two tickets) · audit (reconciliation backstop — flags/reverts a Done ticket
 that never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close)
 · mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
@@ -365,6 +366,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--done", action="store_true", help="close the ticket (runs the on-done gates)"
     )
     chp.add_argument(
+        "--deployed",
+        metavar="NOTE",
+        help="record that this ticket's work has been deployed to production (requires "
+        "state=done; e.g. --deployed \"shipped in v1.4.0\")",
+    )
+    chp.add_argument(
         "--force",
         action="store_true",
         help="override the legal-transition check (e.g. re-close a cancelled ticket)",
@@ -470,11 +477,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     acp.add_argument("id", help="ticket id (#123 or HYP-456)")
 
-    # link — a typed relationship between two tickets (task-cli#154)
+    # link — a typed relationship between two tickets (task-cli#154, deploy-followup-links)
     lkp = sub.add_parser(
         "link",
         parents=[common],
-        help="record a typed relationship between two tickets (blocks|blocked-by|relates-to|duplicate-of)",
+        # `'|'.join(RELATIONS)` (not a hand-kept string): RELATIONS is derived from _LABELS
+        # (links.py), so a future relation addition can't leave this help text stale again.
+        help=f"record a typed relationship between two tickets ({'|'.join(RELATIONS)})",
     )
     lkp.add_argument("id", help="ticket id (#123 or HYP-456)")
     lkp.add_argument("relation", choices=list(RELATIONS), help="relation type")
@@ -997,6 +1006,15 @@ def _ticket_dict(t: Ticket) -> dict:
         "labels": t.labels,
         "what": t.what,
         "due": t.due,
+        # `links` (raw key -> URL dict, unchanged shape) and the deploy fields are the JSON
+        # surface harness-cli's `stats` command reads via `task read <id> --json`
+        # (deploy-followup-links) — grep the keys for the `"Follow-up of #<id>"` /
+        # `"Followed up by #<id>"` prefixes `linked_other_ids()` (tasklib/links.py) already
+        # parses internally, rather than adding a second, parsed "followups" shape here.
+        "links": dict(t.links),
+        "deployed": t.deployed,
+        "deployed_at": t.deployed_at,
+        "deployed_note": t.deployed_note,
     }
     # Only emitted when the backend actually returned any (Linear; GitHub never populates this)
     # — keeps the JSON shape unchanged for every existing consumer that doesn't care about it.
@@ -3285,6 +3303,21 @@ def cmd_change(args: argparse.Namespace) -> int:
     if args.done:
         validate_transition(ticket.state, State.DONE, force=args.force)
 
+    # `--deployed` is a plain guard, NOT a `transitions.py` state: `deployed` is orthogonal to
+    # `state` (a ticket can be `done` then reopened to `in-progress` for a regression fix while
+    # `deployed` stays True, recording that a deploy DID happen historically — see
+    # `Ticket.deployed`'s docstring). Checked against the state AS FETCHED, before any mutation
+    # below (including this same command's own `--done`) — a combined `--done --deployed` call
+    # on a not-yet-done ticket refuses too, same as every other pre-mutation gate here.
+    if args.deployed is not None and ticket.state is not State.DONE:
+        raise _UserError(
+            f"cannot mark {ticket.id} deployed: state is `{ticket.state.value}`, not `done`\n"
+            "  why: `deployed` records a PAST production deploy of ACCEPTED work — marking "
+            "undone/unaccepted work deployed would misrepresent what actually shipped\n"
+            f"  fix: close the ticket first (`task done {ticket.id}`), then re-run "
+            f"`task change {ticket.id} --deployed \"...\"`"
+        )
+
     # A --skip-msgref-quote passed on THIS edit turns expansion off for this command — the skip
     # governs the quote machinery, not only the gate (review finding), so a waived false positive
     # isn't expanded into an unrelated Telegram quote. Gate on THIS command's skips only, NOT a
@@ -3339,6 +3372,26 @@ def cmd_change(args: argparse.Namespace) -> int:
             ticket.labels.append(label)
     ticket.skips.update(new_skips)
     _record_post_merge_acceptance(ticket, args.post_merge_acceptance)
+    if args.deployed is not None:
+        # Legality was already checked above (ticket.state is State.DONE) before any mutation —
+        # this only ever runs on a refusal-free path.
+        from datetime import datetime, timezone
+
+        # `## Deploy` is rendered/parsed as a SINGLE line (render.py's `_render_deploy`/
+        # `_DEPLOY_LINE_RE`, deliberately — see their docstrings), unlike every other free-text
+        # field, which round-trips multi-line content through `_escape_embedded_headings`. A
+        # note carrying a literal newline would silently break that single-line parse on the
+        # NEXT fetch→parse cycle (review finding: `_parse_deploy` returns `(False, "", "")`,
+        # permanently erasing `deployed`/`deployed_at` with no error anywhere) and a note
+        # carrying a line starting `## ` would forge a phantom section boundary and corrupt an
+        # unrelated field on the next render (the same class of bug task-cli#181 already fixed
+        # for What/Why/Impact/Cost — Deploy has no multi-line escaping to fall back on, so the
+        # fix here is to never let the note contain a newline in the first place). Collapsing
+        # internal newlines to spaces keeps the note itself intact and human-readable while
+        # making the single-line format's own invariant impossible to violate.
+        ticket.deployed = True
+        ticket.deployed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ticket.deployed_note = " ".join(args.deployed.splitlines())
 
     # An edit that TOUCHES a text field is re-scanned for bare references (rule 1) and re-graded
     # on impact quality (rule 5) — whether or not this same command ALSO closes the ticket, so
@@ -4934,13 +4987,15 @@ class _LinkOutcome:
 
 
 def cmd_link(args: argparse.Namespace) -> int:
-    """Record a typed relationship (`blocks`/`blocked-by`/`relates-to`/`duplicate-of`) between
-    two tickets, writing a structured entry into their `## Links` sections (task-cli#154).
+    """Record a typed relationship (see `tasklib.links.RELATIONS`: `blocks`/`blocked-by`/
+    `relates-to`/`duplicate-of`/`follow-up-of`/`followed-up-by`) between two tickets, writing a
+    structured entry into their `## Links` sections (task-cli#154, deploy-followup-links).
 
-    Mirrors `blocks`/`blocked-by`/`relates-to` onto the OTHER ticket too (A blocks B implies B
-    is blocked-by A); `duplicate-of` is deliberately one-sided — see `tasklib/links.py`'s module
-    docstring for why. Idempotent: re-running the identical call writes nothing (the target key
-    already maps to the same URL), so it never accumulates a duplicate Links entry.
+    Mirrors `blocks`/`blocked-by`/`relates-to`/`follow-up-of`/`followed-up-by` onto the OTHER
+    ticket too (A blocks B implies B is blocked-by A; A is a follow-up of B implies B was
+    followed up by A); `duplicate-of` is deliberately one-sided — see `tasklib/links.py`'s
+    module docstring for why. Idempotent: re-running the identical call writes nothing (the
+    target key already maps to the same URL), so it never accumulates a duplicate Links entry.
 
     Each entry is written independently and its own outcome recorded (`_LinkOutcome`) — a
     `BackendError`/`AmbiguousBackendError` on ONE entry (a network blip, an auth hiccup, a
