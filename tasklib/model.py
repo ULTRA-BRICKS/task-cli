@@ -228,6 +228,13 @@ class Ticket:
     # body — operational metadata, not ticket content.
     backend_version: int = 0
 
+    # Also operational metadata, never rendered: the normalized ``state`` value as the backend
+    # READ it (``""`` = unknown, e.g. a Ticket built locally). A backend whose native workflow has
+    # several statuses per normalized state (Tasks: "In progress" and "Blocked" are both
+    # IN_PROGRESS) compares against this to tell a real state change from a metadata/body-only
+    # edit, and leaves the native status untouched in the latter case (UB-25).
+    backend_read_state: str = ""
+
     def __post_init__(self) -> None:
         # Coerce plain-string criteria to unchecked Criterion objects. This keeps construction
         # ergonomic (`Ticket(acceptance=["a", "b"])`) while the rest of the code — render, parse,

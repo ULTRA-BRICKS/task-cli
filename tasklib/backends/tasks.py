@@ -363,11 +363,13 @@ class TasksBackend:
         # body-parsed due date on every read (found during Phase-3 integration review).
         has_native_due = "due_date" in row
         native_due = str(row.get("due_date") or "")
+        state = self._derive_state(row)
         base = Ticket(
             title=str(row.get("title", "")),
             id=str(row.get("key") or row.get("id") or ""),
             url=f"{self.url}/issues/{row.get('id', '')}",
-            state=self._derive_state(row),
+            state=state,
+            backend_read_state=state.value,
             labels=self._label_names(row.get("labels")),
             updated_at=str(row.get("updated_at") or ""),
             created_at=str(row.get("created_at") or ""),
@@ -452,10 +454,15 @@ class TasksBackend:
         payload: dict = {
             "version": version,
             "title": ticket.title,
-            "status_id": self._status_id_for(ticket.state),
             "label_ids": self._label_ids(ticket.labels),
             "due_date": ticket.due.strip() or None,
         }
+        # Only a real state change sends a status: recomputing it from the normalized state
+        # would move e.g. a native "Blocked" ticket to the first `started` status on a pure
+        # metadata/body edit. The comparison uses the state from the caller's original read
+        # (``backend_read_state``), never a second GET; unknown (``""``) keeps sending it.
+        if ticket.state.value != ticket.backend_read_state:
+            payload["status_id"] = self._status_id_for(ticket.state)
         if description is not None:
             payload["description"] = description
         updated = self._call(f"/api/v1/issues/{quote(code, safe='')}", method="PATCH", payload=payload)

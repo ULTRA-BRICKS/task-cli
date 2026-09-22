@@ -304,3 +304,97 @@ def test_blank_lines_inside_prose_survive_a_body_update(api):
     backend().update(read)
     (patch,) = patch_calls(api)
     assert "line one\n\n\n\nline two" in patch[2]["description"]
+
+
+# ── native status preservation (UB-25 blocker) ─────────────────────────────────────────
+
+BLOCKED_CATALOG = {
+    "teams": [{"id": "team-1", "key": TEAM}],
+    "statuses": [
+        {"id": "todo", "team_id": "team-1", "category": "unstarted", "name": "Todo"},
+        {"id": "doing", "team_id": "team-1", "category": "started", "name": "In progress"},
+        {"id": "blocked", "team_id": "team-1", "category": "started", "name": "Blocked"},
+        {"id": "review", "team_id": "team-1", "category": "started", "name": "In review"},
+        {"id": "done", "team_id": "team-1", "category": "completed", "name": "Done"},
+    ],
+    "labels": [{"id": "lbl-bug", "name": "bug"}],
+}
+
+
+@pytest.fixture
+def blocked_api(monkeypatch):
+    """A tasks-app whose issue HYP-1 sits in the native "Blocked" status (a second `started`
+    status after "In progress"); PATCH applies only the keys it is sent."""
+    state = {"row": {
+        "id": ROW_ID, "key": "HYP-1", "version": 7, "title": "Blocked one",
+        "description": render(Ticket(title="Blocked one", what="w", why="y", user_impact="u",
+                                     cost_of_inaction="c", acceptance=["a", "b"])),
+        "status_id": "blocked", "status_category": "started", "status_name": "Blocked",
+        "labels": [], "due_date": None,
+    }}
+    calls = []
+
+    def request(url, *, method="GET", headers=None, data=None, **options):
+        payload = json.loads(data) if data else None
+        path = urlsplit(url).path
+        calls.append((method, path, payload))
+        if path.endswith("/catalog"):
+            return json.dumps(BLOCKED_CATALOG).encode()
+        if method == "POST" and path == "/api/v1/issues":
+            state["row"].update({"title": payload["title"], "description": payload["description"]})
+            return json.dumps(state["row"]).encode()
+        if method == "PATCH":
+            row = {**state["row"], **{k: v for k, v in payload.items() if k != "version"}}
+            row["version"] = state["row"]["version"] + 1
+            status = next(s for s in BLOCKED_CATALOG["statuses"] if s["id"] == row["status_id"])
+            row.update(status_category=status["category"], status_name=status["name"])
+            state["row"] = row
+        return json.dumps(state["row"]).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", request)
+    return state, calls
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda t: setattr(t, "title", "renamed"),
+        lambda t: t.labels.append("bug"),
+        lambda t: setattr(t, "due", "2026-12-01"),
+        lambda t: setattr(t, "what", "a managed body change"),
+    ],
+    ids=["title", "label", "due", "body"],
+)
+def test_non_state_edit_keeps_native_blocked_status(blocked_api, edit):
+    state, calls = blocked_api
+    b = backend()
+    t = b.get("HYP-1")
+    edit(t)
+    b.update(t)
+    (patch,) = [c for c in calls if c[0] == "PATCH"]
+    assert "status_id" not in patch[2]
+    assert state["row"]["status_id"] == "blocked"
+
+
+def test_real_state_change_still_sends_the_status(blocked_api):
+    state, calls = blocked_api
+    b = backend()
+    t = b.get("HYP-1")
+    t.state = State.DONE
+    b.update(t)
+    (patch,) = [c for c in calls if c[0] == "PATCH"]
+    assert patch[2]["status_id"] == "done"
+    assert b.transition("HYP-1", State.IN_REVIEW).state == State.IN_REVIEW
+    assert state["row"]["status_id"] == "review"
+
+
+def test_create_then_update_keeps_the_native_status(blocked_api):
+    state, calls = blocked_api
+    b = backend()
+    created = b.create(Ticket(title="New", what="w", why="y", user_impact="u",
+                              cost_of_inaction="c", acceptance=["a", "b"], state=State.IN_PROGRESS))
+    created.title = "New, renamed"
+    b.update(created)
+    patch = [c for c in calls if c[0] == "PATCH"][-1]
+    assert "status_id" not in patch[2]
+    assert state["row"]["status_id"] == "blocked"
