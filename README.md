@@ -48,8 +48,9 @@ task burn         [--all] [--json] [--since YYYY-MM-DD] [--until YYYY-MM-DD]  # 
 task web start|stop|status|run [--port N]  # local HTML burn chart (default http://127.0.0.1:8765/burn)
 task read <id>     (alias: view)   # the full ticket — every section (works outside a repo)
 task find "<query>"                # search title+body (cross-project when outside a repo)
-task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of — writes a
-#   structured ## Links entry, mirrored on the other ticket (see "Linking tickets" below)
+task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of|follow-up-of|
+#   followed-up-by — writes a structured ## Links entry, mirrored on the other ticket (see
+#   "Linking tickets" below)
 task check <id> <n|text> --proof p # tick an acceptance criterion (needs a visual proof)
 task check <id> 1 2 3 --proof a --proof b --proof c  # several at once, one proof each (in order)
 task check <id> --all --proof p    # every criterion, one shared proof
@@ -63,7 +64,9 @@ task mark-shipped <id> --pr <url> [--commit <sha>]  # record a merged PR; NEVER 
 #   before a genuine `task done`.
 task attach <id> <path> [path...]  # add implementation screenshot(s) (Playwright/agent-browser capture, not screencapture)
 task done <id>    [--screenshot p] # close a ticket — runs the on-done gates (all criteria checked)
-task change <id>  [--due ...] [--done]  # update; --due sets/clears the due date; --done closes (gates)
+task change <id>  [--due ...] [--done] [--deployed "<note>"]  # update; --due sets/clears the
+#   due date; --done closes (gates); --deployed records a production deploy (state must
+#   already be `done` — see "Deploy + follow-up traceability" below)
 task status <id> [<new-state>]     # read or transition state (works outside a repo)
 #   close/transition verbs validate legality first: a cancelled ticket is a dead-end and a
 #   re-close of an already-done ticket is rejected (no silent re-write). `--force` overrides.
@@ -369,19 +372,51 @@ task link <id> blocks <other-id>         # <id> blocks <other-id>
 task link <id> blocked-by <other-id>     # <id> is blocked by <other-id>
 task link <id> relates-to <other-id>     # symmetric — no canonical direction
 task link <id> duplicate-of <other-id>   # <id> is a duplicate of <other-id> (the canonical one)
+task link <id> follow-up-of <other-id>   # <id> is a follow-up (e.g. a regression) of <other-id>
+task link <id> followed-up-by <other-id> # <id> was followed up by <other-id> (the inverse)
 ```
 
 Writes a structured entry into `<id>`'s `## Links` section (e.g. `Blocks #149: <url>`).
-`blocks`/`blocked-by`/`relates-to` also write the mirrored entry on the OTHER ticket (`A blocks
-B` implies `B is blocked-by A`); `duplicate-of` is deliberately one-sided (marking something a
-duplicate of a popular ticket shouldn't spam that ticket's own Links section with every dupe
-that ever pointed at it). Re-running the same `task link` call is a no-op — it never adds a
-second entry for the same relation + ticket pair.
+`blocks`/`blocked-by`/`relates-to`/`follow-up-of`/`followed-up-by` also write the mirrored
+entry on the OTHER ticket (`A blocks B` implies `B is blocked-by A`; `A follow-up-of B` implies
+`B followed-up-by A`); `duplicate-of` is deliberately one-sided (marking something a duplicate
+of a popular ticket shouldn't spam that ticket's own Links section with every dupe that ever
+pointed at it). Re-running the same `task link` call is a no-op — it never adds a second entry
+for the same relation + ticket pair.
 
 After a successful `task new`/`create`, a cheap same-repo scan (title/label keyword overlap —
 no embeddings, no fuzzy matching) checks currently-open tickets for plausible relatives and
 prints a nudge with the exact `task link` command for each candidate. It only ever *suggests* —
 nothing is auto-linked, and a scan hiccup never fails the create.
+
+### Deploy + follow-up traceability — `task change --deployed` + `follow-up-of`
+
+A ticket's lifecycle can be traced past `done` (accepted) through to an actual production
+deploy, and a bug/regression found afterward back to the original ticket that shipped it:
+
+```
+todo → in-progress → in-review → done —[optionally]→ deployed
+                                          │
+                                          └─ regression found → new ticket, linked
+                                             `follow-up-of` the original
+```
+
+```
+task change <id> --deployed "<note>"     # record a production deploy (e.g. "shipped in v1.4.0")
+task link <followup-id> follow-up-of <original-id>  # trace a later regression back to it
+```
+
+`--deployed` sets `deployed=true` and `deployed_at` (UTC ISO8601, captured at call time) and
+appends `<note>` into the ticket's `## Deploy` section — refused with a clean `error:` (no
+backend write) unless the ticket's state is already `done`: `deployed` is a historical record
+of a PAST deploy of ACCEPTED work, not a way to close a ticket early. It is deliberately
+orthogonal to `state`, not a new lifecycle state — a `done` ticket that gets reopened to
+`in-progress` for a regression fix keeps `deployed=true`, since a deploy DID happen
+historically even though the ticket is active again. `--json` (on `read`/`change`/`list`)
+exposes `"deployed"`/`"deployed_at"`, plus the raw `"links"` dict so a caller can walk a full
+request → ship → deploy → follow-up chain: `task read <id> --json` on the original ticket shows
+`"Followed up by #<id>"` in `links` and `deployed: true` in `## Deploy`; `task read
+<followup-id> --json` shows `"Follow-up of #<original-id>"`.
 
 ### Checking criteria off — `task check`
 
@@ -489,12 +524,16 @@ ticket-by-ticket.
 ## Acceptance criteria
 - [ ] …
 ## Screenshots
+## Deploy
 ## Links
 ```
 
-This is the same section set as the agent-tools `pull_request_template.md`, so a ticket and
-its PR speak one shape. `render.py` is the single source of truth — fields are authoritative,
-the body is derived.
+This is the same section set as the agent-tools `pull_request_template.md`, PLUS `## Deploy`
+(this repo's own deploy/follow-up traceability addition — see "Deploy + follow-up
+traceability" above), so a ticket and its PR speak one shape. `render.py` is the single source
+of truth — fields are authoritative, the body is derived. `## Deploy` always renders (even
+`Deployed: no`), but `parse()` tolerates a body with no `## Deploy` heading at all — every
+ticket rendered before this field existed round-trips as not-deployed instead of crashing.
 
 ## Session-scoped `task list`
 

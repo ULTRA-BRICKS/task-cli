@@ -102,6 +102,24 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
 - **`render.py` is the single source of truth for the ticket body.** The §5 section template
   (fixed order) is the contract; fields are authoritative, the body is derived. Do not
   hand-format a body anywhere else. `validate_format()` is what the formatting gate calls.
+- **Deploy + follow-up traceability** (`deploy-followup-links`): `task change <id> --deployed
+  "<note>"` records that ACCEPTED work actually reached production — sets `Ticket.deployed`
+  (bool) / `deployed_at` (UTC ISO8601) / `deployed_note`, rendered as the §5 template's
+  `## Deploy` section (a FIXED slot, right after `## Screenshots` and before `## Links` —
+  `render()` always emits it, but `parse()` tolerates a pre-existing body with no `## Deploy`
+  heading at all, defaulting to not-deployed rather than crashing). Refused (clean `error:`,
+  non-zero exit, no backend write) unless the ticket's `state` is already `done` — this is a
+  plain guard in `cmd_change`, NOT a new `transitions.py` `State`: `deployed` is deliberately
+  orthogonal to `state` (a `done` ticket reopened to `in-progress` for a regression fix keeps
+  `deployed=True`, since a deploy DID happen historically). `task link <followup-id>
+  follow-up-of <original-id>` traces a later-discovered bug/regression back to the ticket that
+  shipped it — `tasklib/links.py`'s `follow-up-of`/`followed-up-by` relation pair, structurally
+  identical to `blocks`/`blocked-by` (two entries, asymmetric label strings, both directly
+  invocable) even though the documented workflow only ever calls `follow-up-of` by hand. Both
+  the `## Deploy` fields and the raw `links` dict are in `--json` output (`read`/`change`/
+  `list`) so a caller can walk the full request → ship → deploy → follow-up chain without a
+  second IPC mechanism — `task read <id> --json` IS the integration point (e.g. harness-cli's
+  `harness stats` shells out to it; it never imports `tasklib`).
 - **`task.yaml` is committed by default** (per-repo source of truth) and **overrides** the
   global `~/.config/task-cli/config.yaml`. Scope is by location, never a flag. The tool works
   with **zero config** on any GitHub repo (built-in defaults = github-issues, all gates on).

@@ -17,6 +17,10 @@ from dataclasses import replace
 from .model import Criterion, Screenshot, Ticket
 
 # Fixed section order — the contract. Changing this is a breaking change to the template.
+# "Deploy" (deploy-followup-links) sits between Screenshots and Links: it always renders (even
+# "Deployed: no"), unlike the OPTIONAL Due/Skipped-gates trailers below — but parse() still
+# tolerates a body with no "## Deploy" heading at all (every ticket rendered before this field
+# existed), defaulting to not-deployed rather than crashing.
 SECTIONS: tuple[str, ...] = (
     "What",
     "Why (motivation)",
@@ -24,9 +28,11 @@ SECTIONS: tuple[str, ...] = (
     "Cost of inaction",
     "Acceptance criteria",
     "Screenshots",
+    "Deploy",
     "Links",
 )
 
+_DEPLOY_MARKER = "Deploy"
 _SKIP_MARKER = "Skipped gates"  # an optional trailing section recording escape hatches
 # An optional trailing section carrying the daemon-watched due date. Like Skipped gates it is
 # NOT in SECTIONS — keeping it out of the fixed contract means every pre-existing ticket (no
@@ -50,6 +56,8 @@ def render(ticket: Ticket) -> str:
     else:
         shots = "(none)"
     out.append(f"## Screenshots\n{shots}")
+
+    out.append(f"## {_DEPLOY_MARKER}\n{_render_deploy(ticket)}")
 
     links = _render_links(ticket)
     out.append(f"## Links\n{links}")
@@ -87,6 +95,16 @@ def _render_links(ticket: Ticket) -> str:
     if not ticket.links:
         return "- (none)"
     return "\n".join(f"- {key}: {val}" for key, val in ticket.links.items())
+
+
+def _render_deploy(ticket: Ticket) -> str:
+    """The single-line ``## Deploy`` section body: ``"Deployed: no"``, or ``"Deployed: yes
+    (<iso-timestamp>)"`` with an optional ``— <note>`` suffix (set by ``task change --deployed
+    "<note>"``)."""
+    if not ticket.deployed:
+        return "Deployed: no"
+    note = f" — {ticket.deployed_note}" if ticket.deployed_note else ""
+    return f"Deployed: yes ({ticket.deployed_at}){note}"
 
 
 # ── parsing (round-trip) ──────────────────────────────────────────────────────────
@@ -151,6 +169,15 @@ def parse(body: str, ticket: Ticket | None = None) -> Ticket:
     # so a backend that supplied the date natively (Linear dueDate) isn't clobbered by a body
     # that happens to omit the section.
     due = sec.get(_DUE_MARKER, "").strip() or base.due
+    # The Deploy section is REQUIRED going forward (in SECTIONS), but a body written before this
+    # field existed has no "## Deploy" heading at all — fall back to the base ticket's deploy
+    # fields (mirrors the Due fallback above) so an old ticket round-trips as not-deployed
+    # instead of crashing.
+    deploy_text = sec.get(_DEPLOY_MARKER, "").strip()
+    if deploy_text:
+        deployed, deployed_at, deployed_note = _parse_deploy(deploy_text)
+    else:
+        deployed, deployed_at, deployed_note = base.deployed, base.deployed_at, base.deployed_note
 
     return replace(
         base,
@@ -163,8 +190,29 @@ def parse(body: str, ticket: Ticket | None = None) -> Ticket:
         links=links or base.links,
         skips=skips or base.skips,
         due=due,
+        deployed=deployed,
+        deployed_at=deployed_at,
+        deployed_note=deployed_note,
         raw_body=body,
     )
+
+
+_DEPLOY_LINE_RE = re.compile(
+    r"^Deployed:\s*(yes|no)(?:\s*\(([^)]*)\))?(?:\s*—\s*(.*))?\s*$", re.IGNORECASE
+)
+
+
+def _parse_deploy(text: str) -> tuple[bool, str, str]:
+    """Parse the ``## Deploy`` section's single line back into ``(deployed, deployed_at,
+    deployed_note)``. An unrecognized/malformed line (a hand-edited body) is tolerated the same
+    way a malformed ``due`` date is — treated as not-deployed rather than raising."""
+    m = _DEPLOY_LINE_RE.match(text.strip())
+    if not m:
+        return False, "", ""
+    deployed = m.group(1).lower() == "yes"
+    at = (m.group(2) or "").strip()
+    note = (m.group(3) or "").strip()
+    return deployed, at, note
 
 
 _CRITERION_RE = re.compile(r"^\s*-\s*\[([ xX])\]\s*(.+?)\s*$")
