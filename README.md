@@ -72,7 +72,9 @@ task change <id>  [--due ...] [--done]  # update; --due sets/clears the due date
 task status <id> [<new-state>]     # read or transition state (works outside a repo)
 #   close/transition verbs validate legality first: a cancelled ticket is a dead-end and a
 #   re-close of an already-done ticket is rejected (no silent re-write). `--force` overrides.
-task classify "<text>" [--create]  # change|actionable|justAsk via review; --create makes/dedups a ticket
+task classify "<text>" [--create]  # change|actionable|justAsk (+ SP/priority/process-vs-product
+                                    # on `change`) via review; --create makes/dedups a product
+                                    # ticket, or files a local `harness task` for a `process` item
 task session [show|bind <id>]      # show/bind the current session and its tickets
 task daemon start|stop|status|run  # the due-date reminder watcher (see Daemon below)
 task audit [<id>] [--revert]       # reconciliation backstop — flags a Done ticket that never
@@ -596,7 +598,32 @@ once per item (so `--create` files one ticket per ask instead of one vague ticke
 them). An ordinary single-topic message, however long, is never split — a bare English "and"
 (or its Russian equivalent) is deliberately NOT a signal (see the module docstring for why).
 Only applies to `--create`; `--update <ID>` names one explicit target for the whole raw message
-and is left unsplit.
+and is left unsplit. Each split item is classified (verdict + the three axes below)
+INDEPENDENTLY, so a message that bundles a product bug and a process step in one batch routes
+each correctly — one becomes a GitHub/Linear ticket, the other a local `harness` task.
+
+**SP / priority / process-vs-product axes.** On a `change` verdict the SAME model round-trip
+(one shell-out, not two) also resolves three ticket-shaping axes, printed under the verdict
+(`--json` gains `process_or_product`/`priority`/`story_points`; `actionable`/`justAsk` never
+surface them — they mint no ticket, so the axes are moot):
+
+- **`story_points`** — one of `1, 2, 3, 5, 8, 13`, a Fibonacci-ish COMPLEXITY estimate, not a
+  time estimate: `1` trivial/typo-level, `2` small single-function fix, `3` moderate/
+  single-file, `5` substantial/multi-file or new test infra, `8` large/new subsystem or
+  design-heavy, `13` epic/major feature from scratch.
+- **`priority`** — one of `P0` (drop everything) .. `P3` (low).
+- **`process_or_product`** — `process` (a session-local/agent process step — reviewing an
+  uncommitted diff, a pre-commit checklist) vs `product` (durable product work). On `--create`,
+  a `process` item routes to a LOCAL `harness tasks new --title=<derived> --body=<message>`
+  ticket instead of the configured GitHub/Linear backend (glued `=`-form; no dedup, no session
+  recording — a repeated message mints a fresh local task each time, unlike the product path).
+  A MISSING `harness` binary never drops the item — it warns and falls back to the normal
+  product-ticket path; a harness binary that's present but fails AT RUNTIME still errors
+  cleanly (`error:` line, never a traceback) with no fallback. A `product` item creates the
+  ticket exactly as before, additionally labeled `sp:<n>` and `priority:<Pn>`. Set
+  `classify.route_process_to_harness: false` to keep every item on the product-ticket path
+  regardless of this axis. An axis the model doesn't cleanly answer biases to a SAFE default
+  (`product`/`P2`/`3`) — never silently to neither store.
 
 ## Config — `rig.yaml` `task:` block (per-repo) + `task.yaml` + global
 
@@ -671,7 +698,13 @@ classify:
     - { zai:         glm-4.6-flash }
     - { google:      gemini-2.5-flash }
     - { ollama:      qwen2.5:3b }
+    # - { laya: <model> }             # opt-in (config plumbing only — see Classification
+    # - { jev:  <model> }             # section above; unverified, no real endpoint call here)
   bias: change
+  route_process_to_harness: true     # `process`-classified `--create` items file a local
+                                     # `harness tasks new` ticket instead of the product
+                                     # backend; false keeps everything on the product-ticket
+                                     # path regardless of the process/product axis
 session:
   detect: [env:TASK_SESSION, tmux-pane, git-branch]
   label_prefix: "session:"

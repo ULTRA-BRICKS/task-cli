@@ -34,6 +34,7 @@ from .model import Criterion, Screenshot, State, Ticket
 from .transitions import TransitionError, validate_transition
 
 if TYPE_CHECKING:
+    from .classify import Classification
     from .links import LinkEntry
     from .policy import Violation
 
@@ -5485,8 +5486,25 @@ def _classify_one(
 
     `batch_resolved_ids` (only ever non-`None` when called FROM `_classify_multi`) is forwarded
     to `_classify_create`'s dedup check — see that function's docstring for why a multi-ask
-    batch must not dedup its own parts against each other."""
-    from .classify import Verdict, build_prompt, parse_verdict, resolve_chain
+    batch must not dedup its own parts against each other.
+
+    On a `change` verdict, also resolves the three ticket-shaping axes (`classify.
+    parse_classification` — story points, priority, process-vs-product) from the SAME model
+    round-trip, and surfaces them alongside the verdict in both human and `--json` output.
+    `actionable`/`justAsk` never mint a ticket, so their axes are never surfaced (moot) even
+    though the model answers them regardless (parsing never branches on the verdict). A
+    `process`-classified `change` routes `--create` to a local `harness tasks new` ticket
+    instead of the configured product backend (`_classify_route_to_harness`), unless
+    `classify.route_process_to_harness` is disabled, in which case it falls through to the
+    normal product-ticket path unchanged.
+    """
+    from .classify import (
+        Verdict,
+        build_prompt,
+        default_classification,
+        parse_classification,
+        resolve_chain,
+    )
 
     # `actionable` (task-cli#80) is deliberately EXCLUDED from the configurable-bias set (review
     # finding): it's a genuine model-signaled verdict, never a "when confused, assume this"
@@ -5502,12 +5520,21 @@ def _classify_one(
         cfg.classify_fallbacks or None, capability=cfg.classify_capability or None
     )
     if resolved is None:
-        # no provider reachable → bias-decide, still observable
-        verdict = bias
-        print(_warn(f"  no classifier provider available; biasing to {verdict.value}"))
+        # no provider reachable → bias-decide, still observable. The three new axes have no
+        # model output to read either, so they take classify.py's own fixed safe defaults
+        # (default_classification — the single source of truth, never hand-copied here).
+        classification = default_classification(bias)
+        print(
+            _warn(f"  no classifier provider available; biasing to {classification.verdict.value}"),
+            file=sys.stderr,  # a warning, not the verdict/axes/--json unit stdout callers parse
+        )
     else:
         output = _run_review_just_ask(resolved.model_arg, build_prompt(args.text))
-        verdict = parse_verdict(output, bias=bias, message=args.text)
+        classification = parse_classification(output, bias=bias, message=args.text)
+    verdict = classification.verdict
+    # `actionable`/`justAsk` never mint a ticket, so their axes are moot — computed once here
+    # rather than repeating `verdict is Verdict.CHANGE` at every log_event/`--json`/human site.
+    axes = classification if verdict is Verdict.CHANGE else None
 
     from .logging import log_event
 
@@ -5515,14 +5542,24 @@ def _classify_one(
         "classify",
         verdict=verdict.value,
         model=(resolved.model_arg if resolved else "none"),
+        process_or_product=(axes.process_or_product if axes is not None else None),
+        priority=(axes.priority if axes is not None else None),
+        story_points=(axes.story_points if axes is not None else None),
     )
 
     if args.json:
         import json
 
-        print(json.dumps({"verdict": verdict.value}, ensure_ascii=False))
+        payload = {"verdict": verdict.value}
+        if axes is not None:
+            payload["process_or_product"] = axes.process_or_product
+            payload["priority"] = axes.priority
+            payload["story_points"] = axes.story_points
+        print(json.dumps(payload, ensure_ascii=False))
     else:
         print(f"{verdict.value}")
+        if axes is not None:
+            print(f"  {axes.process_or_product} / {axes.priority} / {axes.story_points}sp")
 
     if verdict is Verdict.JUST_ASK:
         return 0
@@ -5536,12 +5573,38 @@ def _classify_one(
     if args.update:
         return _classify_append(args, cfg)
     if args.create:
-        return _classify_create(args, cfg, batch_resolved_ids=batch_resolved_ids)
+        # verdict is CHANGE here (JUST_ASK/ACTIONABLE returned above), so axes is never None.
+        if axes.process_or_product == "process" and cfg.classify_route_process_to_harness:
+            # `_which_harness()` is checked ONCE here, never re-probed inside
+            # `_classify_route_to_harness` — see that function's docstring for the full TOCTOU
+            # race this closes: the axis correctly resolved to `process`, so this is NOT the
+            # "ambiguous axis" case `default_classification`'s product-bias already guards —
+            # it's a DIFFERENT failure mode (a confidently-process-classified item whose target
+            # store, harness-cli, isn't installed) that must fall back to the SAME safe default
+            # rather than erroring out and dropping the message with no ticket filed anywhere. A
+            # harness binary that IS present but fails AT RUNTIME (non-zero exit, timeout) is a
+            # different, genuinely actionable error and still surfaces as one —
+            # `_classify_route_to_harness` handles that case unchanged.
+            harness = _which_harness()
+            if harness is not None:
+                return _classify_route_to_harness(args, harness)
+            print(
+                _warn(
+                    "  `harness` binary not found on PATH; filing as a product ticket instead "
+                    "of a local process ticket (install harness-cli, or this is expected "
+                    "behavior — nothing is ever silently dropped)"
+                ),
+                file=sys.stderr,  # a warning, not the payload stdout callers parse
+            )
+        return _classify_create(args, cfg, classification, batch_resolved_ids=batch_resolved_ids)
     return 0
 
 
 def _classify_create(
-    args: argparse.Namespace, cfg, batch_resolved_ids: set[str] | None = None
+    args: argparse.Namespace,
+    cfg,
+    classification: "Classification",
+    batch_resolved_ids: set[str] | None = None,
 ) -> int:
     """`change` + --create: dedup against the session, else create from the message.
 
@@ -5552,6 +5615,11 @@ def _classify_create(
     another part's resolution is never a real duplicate, only same-batch noise. This function
     adds its own part's resolved id to the set before returning (on EITHER the create path or
     the dedup-comment path), so a LATER part in the batch also excludes it.
+
+    `classification` (the `classify.Classification` `_classify_one` already resolved for this
+    part) supplies the `sp:<n>`/`priority:<Pn>` labels stamped on a freshly-CREATED ticket —
+    never on a dedup-fold-in comment, since that path touches an EXISTING ticket whose own
+    labels (possibly from an earlier, different classification) must not be silently relabeled.
     """
     backend = _backend(cfg)
     session = _detect_session(cfg)
@@ -5629,7 +5697,9 @@ def _classify_create(
                 _warn(
                     f"  the comment on {match.id} may have already been posted — check the "
                     "backend before retrying, to avoid a duplicate comment."
-                )
+                ),
+                file=sys.stderr,  # advisory, not the machine-consumed unit — mirrors the
+                # possible-duplicate warning above.
             )
             if batch_resolved_ids is not None:
                 raise _ClassifyBatchAmbiguous(exc.exit_code) from exc
@@ -5679,6 +5749,8 @@ def _classify_create(
                     *cfg.section("github").get("default_labels", []),
                     session.label,
                     "needs-triage",
+                    f"sp:{classification.story_points}",
+                    f"priority:{classification.priority}",
                 ]
             )
         ),
@@ -5786,6 +5858,84 @@ def _classify_append(args: argparse.Namespace, cfg) -> int:
         _record_session_touch(cfg, backend, ticket)
     print(_ok(f"appended to {args.update}"))
     return 0
+
+
+def _classify_route_to_harness(args: argparse.Namespace, harness: str) -> int:
+    """`change` + `--create`, classified `process` (`classify.py`'s process/product axis):
+    file this as a LOCAL harness-cli process ticket instead of a product-tracker ticket.
+
+    harness-cli is a local peer tool, not a `TicketBackend` — this is reached ONLY by shelling
+    out to its already-installed `harness` binary on PATH (mirroring this module's existing
+    `review just-ask` shell-out; AGENTS.md's "Backends call the provider API directly" rule
+    governs GitHub/Linear, not this local-process sibling). A non-zero exit or a spawn failure
+    is reported as a clean `error:` line, never a raw traceback — the caller (often the
+    unattended tg-cli inbound hook) needs an observable failure, not a crash.
+
+    `harness` is the ALREADY-RESOLVED `shutil.which("harness")` path, passed in by the sole
+    caller (`_classify_one`) rather than re-probed here (review finding, TOCTOU — a second,
+    independent `_which_harness()` call here could disagree with the caller's check, e.g. the
+    binary is removed from PATH between the two calls, silently defeating the caller's
+    "harness missing -> fall back to the product ticket path, never drop the message"
+    guarantee: THIS function has no such fallback, it only ever errors on failure, so a
+    caller-vs-callee split-brain here would re-introduce the exact silent-drop bug the
+    fallback was added to close). One resolved path, one decision, no race.
+
+    Every printed fragment below is `redact`ed then `safe_display`d before it reaches stdout
+    (review finding, security): `args.text` is UNTRUSTED inbound content that can contain a
+    token-shaped secret or a terminal-escape/stdout-injection payload, and this function's
+    stdout is the SAME stream the tg-cli inbound hook parses. A raw `subprocess.TimeoutExpired`
+    stringifies to its full argv (which embeds the untrusted `--body`), so that exception is
+    NEVER interpolated directly — mirrors `_run_review_just_ask`'s existing fail-quiet posture
+    for its own subprocess call, which already never echoes the prompt back on failure.
+
+    `--title=<value>`/`--body=<value>` (glued, not a separate token) is deliberate (review
+    finding): the derived title or the raw message can itself start with a `-` (an inbound
+    "- fix the login page" bullet, or a short dash-prefixed message like "-x"), and argparse
+    (harness-cli's own, like this repo's) reads a SEPARATE `--title -x` as "expected one
+    argument" whenever the value token alone looks option-like — the glued form has no such
+    ambiguity for any value, regardless of what it starts with.
+    """
+    title = _derive_title_from_message(args.text)
+    if not title:
+        raise _UserError(
+            "cannot route to harness — no title could be derived from this message"
+        )
+    from .logging import redact
+    from .policy import safe_display
+
+    try:
+        result = subprocess.run(
+            [harness, "tasks", "new", f"--title={title}", f"--body={args.text.strip()}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Never interpolate the exception itself: `TimeoutExpired.__str__`/`CalledProcessError`
+        # both embed the full argv, which carries the untrusted message via `--body`.
+        print(_err("error: `harness tasks new` failed to run (see harness-cli's own logs)"))
+        return 1
+    if result.returncode != 0:
+        detail = safe_display(str(redact((result.stderr or result.stdout or "").strip())))
+        detail = detail.replace("\n", " ")
+        print(_err("error: `harness tasks new` failed" + (f": {detail}" if detail else "")))
+        return 1
+    filed_title = safe_display(str(redact((result.stdout or "").strip() or title))).replace("\n", " ")
+    # Human text ONLY, never a second JSON document (review finding): `_classify_one` already
+    # printed the verdict/axes payload as the ONE JSON document a `--json` caller gets for this
+    # invocation — exactly mirroring `_classify_create`, which never checks `args.json` either
+    # and always prints its "created #N"/dedup status as plain text. A caller doing a single
+    # `json.loads(stdout)` on `--create --json` output must see exactly one JSON object
+    # regardless of which routing branch (harness vs. the product backend) actually fired.
+    print(_ok(f"filed local process task via harness: {filed_title}"))
+    return 0
+
+
+def _which_harness() -> str | None:
+    import shutil
+
+    return shutil.which("harness")
 
 
 def _best_dedup_match(text: str, candidates: list[Ticket]) -> Ticket | None:

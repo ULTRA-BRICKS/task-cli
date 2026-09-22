@@ -136,8 +136,43 @@ fake-backed test; do not special-case a backend anywhere in `cli.py`.
 `task classify` resolves the **first available** model in the per-provider fallback chain
 (`classify.resolve_chain`, default head haiku) and shells out to
 `review just-ask "<prompt>" -m <model> --pool 1`. Availability = a provider key in env, or
-(ollama) the daemon on PATH. Bias to `change` on ambiguity. The shell-out is the only effect;
-prompt-building and verdict-parsing are pure and tested without spawning `review`.
+(ollama/laya) the daemon on PATH. Bias to `change` on ambiguity. The shell-out is the only
+effect; prompt-building and verdict-parsing are pure and tested without spawning `review`.
+`laya`/`jev` are additional provider-table entries (config plumbing only, unverified — no
+credentials/HTTP call exist for either in this repo; wiring the real call is `review`'s job).
+
+**SP / priority / process-vs-product** (`classify.parse_classification` → `Classification`):
+the SAME `review` round-trip that yields the verdict also yields three axes on a `change`
+verdict (never surfaced for `actionable`/`justAsk`, which mint no ticket): `story_points`
+(`1,2,3,5,8,13` — a Fibonacci-ish COMPLEXITY scale, not time: `1` trivial/typo, `2` small
+single-function fix, `3` moderate/single-file, `5` substantial/multi-file or new test infra,
+`8` large/new subsystem or design-heavy, `13` epic/major feature from scratch), `priority`
+(`P0`..`P3`), and `process_or_product` (`process` = a session-local/agent process step vs
+`product` = durable work). Each axis is parsed independently via its own `LABEL: value`
+sentinel regex (mirrors `_VERDICT_RE`); an axis that doesn't cleanly resolve biases to a FIXED
+safe default (`product`/`P2`/`3` — never caller-configurable, unlike the change/justAsk bias).
+`process_or_product` biases to `product` specifically because a mis-routed PROCESS ticket is
+far cheaper to fix than a silently DROPPED product ticket — never write to neither store.
+
+On `--create`, a `process`-classified item shells out to `harness tasks new --title=<derived>
+--body=<message>` (glued `=`-form, not a separate value token — the derived title/message can
+itself start with `-`, which a separate token would read as an option flag; the local
+harness-cli peer tool, reached ONLY via its installed binary on PATH — never a Python import of
+harness-cli, mirroring the `review` shell-out) instead of the configured product ticket
+backend. A MISSING `harness` binary never drops the item: it warns (stderr) and falls back to
+the normal product-ticket path — the exact same "never write to neither store" posture the
+process/product axis's own default already has. A harness binary that IS present but fails AT
+RUNTIME (non-zero exit, timeout) is a different, genuinely actionable error and still surfaces
+as a clean `error:` line, never a traceback — nothing falls back in that case.
+`classify.route_process_to_harness: false` disables routing entirely — every item then follows
+the normal product-ticket path regardless of the axis. A `product`-classified create
+additionally labels the new ticket `sp:<n>` and `priority:<Pn>`, threaded through the SAME
+`labels=[...]` list `_classify_create` already builds (no backend-adapter changes). The harness
+route has NO dedup and no session recording (unlike `_classify_create`'s near-exact + advisory
+token/Jaccard net) — a repeated inbound message mints a fresh local harness task each time. In
+a multi-ask batch (`_classify_multi`), every split part is classified fully and independently,
+so one message bundling a product bug and a process step correctly mints one product ticket AND
+one local harness task.
 
 ## Tests
 

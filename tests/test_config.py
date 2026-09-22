@@ -65,6 +65,59 @@ def test_classify_capability_read_and_stripped(tmp_path, monkeypatch):
     assert cfg.classify_capability == "fast"  # whitespace trimmed
 
 
+def test_classify_route_process_to_harness_default_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    cfg = load(tmp_path)
+    assert cfg.classify_route_process_to_harness is True
+
+
+def test_classify_route_process_to_harness_opt_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\nclassify: {route_process_to_harness: false}\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_route_process_to_harness is False
+
+
+def test_classify_route_process_to_harness_opt_out_via_quoted_yaml_string(tmp_path, monkeypatch):
+    # Review finding: a bare `bool()` coercion treats the QUOTED string "false" as truthy
+    # (Python's `bool("false")` is `True`), silently defeating the opt-out for any operator
+    # who quotes the YAML value. Every falsy spelling in `_FALSY_STRINGS` must opt out too.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        'version: 1\nbackend: github-issues\nclassify: {route_process_to_harness: "false"}\n',
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_route_process_to_harness is False
+
+
+def test_classify_route_process_to_harness_blank_key_defaults_true(tmp_path, monkeypatch):
+    # review finding, round 2: a BLANK key (`route_process_to_harness:` with nothing after the
+    # colon, YAML `null`/Python `None`) and an explicit empty string previously disagreed with
+    # each other (`bool(None)` is False, `"" not in _FALSY_STRINGS` is True) — both must mean
+    # "unset" and fall back to the documented `True` default.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\nclassify:\n  route_process_to_harness:\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_route_process_to_harness is True
+
+
+def test_classify_route_process_to_harness_empty_string_defaults_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        'version: 1\nbackend: github-issues\nclassify: {route_process_to_harness: ""}\n',
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_route_process_to_harness is True
+
+
 def test_session_detect_default(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     cfg = load(tmp_path)
