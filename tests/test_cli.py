@@ -4724,6 +4724,374 @@ def test_classify_empty_capability_passes_none(monkeypatch, _inject_fake):
     assert seen["capability"] is None
 
 
+# ── SP / priority / process-vs-product axes (story-point+priority+process/product ticket) ──
+
+
+def _spy_create(monkeypatch, backend):
+    """Wrap ``backend.create`` to record every Ticket passed to it, still delegating through
+    (so the FakeBackend's own round-trip/id-assignment behavior is unaffected)."""
+    created: list[Ticket] = []
+    original = backend.create
+
+    def _wrapped(ticket: Ticket) -> Ticket:
+        created.append(ticket)
+        return original(ticket)
+
+    monkeypatch.setattr(backend, "create", _wrapped)
+    return created
+
+
+def test_classify_process_routes_to_harness_not_ticket_backend(capsys, monkeypatch, _inject_fake):
+    # a `process`-classified message must file a LOCAL harness task, never touch the product
+    # ticket backend's create() at all.
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: process\nPRIORITY: P1\nSP: 2\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(cli, "_which_harness", lambda: "/usr/local/bin/harness")
+    created = _spy_create(monkeypatch, _inject_fake)
+    calls = []
+
+    def _fake_run(argv, **kwargs):
+        import types
+
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="review my uncommitted diff\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    rc = main(["classify", "review my uncommitted diff before committing", "--create"])
+    assert rc == 0
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0] == "/usr/local/bin/harness"
+    assert argv[1] == "tasks"
+    assert argv[2] == "new"
+    assert any(a.startswith("--title=") for a in argv)
+    assert any(a.startswith("--body=") for a in argv)
+    assert created == []  # no product-backend create() call at all
+    out = capsys.readouterr().out
+    assert "filed local process task via harness" in out
+
+
+def test_classify_process_route_title_and_body_starting_with_dash_are_safe(
+    capsys, monkeypatch, _inject_fake
+):
+    # review finding: a SEPARATE `--title -x` token pair is ambiguous to argparse (harness-cli's
+    # own parser included) whenever the value alone looks option-like — glued `--title=-x` has
+    # no such ambiguity for any value. Pin the argv shape, not just that SOME call happened.
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: process\nPRIORITY: P2\nSP: 1\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(cli, "_which_harness", lambda: "/usr/local/bin/harness")
+    calls = []
+
+    def _fake_run(argv, **kwargs):
+        import types
+
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="-x\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    rc = main(["classify", "--create", "--", "-x"])
+    assert rc == 0
+    argv = calls[0]
+    assert argv[3] == "--title=-x"
+    assert argv[4] == "--body=-x"
+
+
+def test_classify_actionable_with_process_axis_never_routes_to_harness(
+    capsys, monkeypatch, _inject_fake
+):
+    # `actionable` never mints a ticket at all (task-cli#80) — this must hold even when the
+    # SAME round-trip's process/product axis says `process`, pinning that the early return for
+    # actionable happens BEFORE the harness-routing branch is ever reached.
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: actionable\nPROCESS_OR_PRODUCT: process\nPRIORITY: P1\nSP: 2\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    harness_probed = []
+    monkeypatch.setattr(cli, "_which_harness", lambda: harness_probed.append(1) or "/usr/bin/harness")
+    created = _spy_create(monkeypatch, _inject_fake)
+    rc = main(["classify", "run the test suite", "--create"])
+    assert rc == 0
+    assert harness_probed == []  # harness route never even probed
+    assert created == []  # no product ticket either
+
+
+def test_classify_process_routes_to_harness_json_mode_prints_exactly_one_json_document(
+    capsys, monkeypatch, _inject_fake
+):
+    # Review finding: `_classify_one` already prints ONE JSON document (the verdict/axes
+    # payload) when `--json` is set. The harness-routing status must stay plain text — like
+    # `_classify_create`'s existing "created #N" status, which never checks `args.json` either
+    # — so a caller doing a single `json.loads(stdout)` on `--create --json` output never sees
+    # a second, unparseable JSON object appended after it.
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: process\nPRIORITY: P1\nSP: 2\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(cli, "_which_harness", lambda: "/usr/local/bin/harness")
+    _spy_create(monkeypatch, _inject_fake)
+
+    def _fake_run(argv, **kwargs):
+        import types
+
+        return types.SimpleNamespace(returncode=0, stdout="review my uncommitted diff\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    rc = main(["classify", "review my uncommitted diff before committing", "--create", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    import json
+
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    json_lines = []
+    for ln in lines:
+        try:
+            json_lines.append(json.loads(ln))
+        except json.JSONDecodeError:
+            pass
+    assert len(json_lines) == 1, f"expected exactly one JSON document, got {json_lines}"
+    assert json_lines[0]["verdict"] == "change"
+    assert json_lines[0]["process_or_product"] == "process"
+    # the harness-filed status is plain text, not a second JSON object
+    assert "filed local process task via harness" in out
+
+
+def test_classify_product_creates_ticket_with_sp_and_priority_labels(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: product\nPRIORITY: P0\nSP: 8\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    created = _spy_create(monkeypatch, _inject_fake)
+    rc = main(["classify", "please add rate limiting to the login endpoint", "--create"])
+    assert rc == 0
+    assert len(created) == 1
+    assert "sp:8" in created[0].labels
+    assert "priority:P0" in created[0].labels
+    out = capsys.readouterr().out
+    assert "product / P0 / 8sp" in out
+
+
+def test_classify_mixed_process_and_product_multi_ask_batch_routes_each_correctly(
+    capsys, monkeypatch, _inject_fake
+):
+    # a single inbound message bundling a PROCESS step and a PRODUCT bug must route each part
+    # independently: one becomes a local harness task, the other a real product ticket.
+    def _fake_review(model, prompt):
+        if "review my uncommitted diff" in prompt:
+            return "VERDICT: change\nPROCESS_OR_PRODUCT: process\nPRIORITY: P2\nSP: 1\n"
+        return "VERDICT: change\nPROCESS_OR_PRODUCT: product\nPRIORITY: P1\nSP: 5\n"
+
+    monkeypatch.setattr(cli, "_run_review_just_ask", _fake_review)
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(cli, "_which_harness", lambda: "/usr/local/bin/harness")
+    created = _spy_create(monkeypatch, _inject_fake)
+    calls = []
+
+    def _fake_run(argv, **kwargs):
+        import types
+
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="filed\n", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    rc = main(
+        [
+            "classify",
+            "1. review my uncommitted diff before committing\n2. fix the login bug on mobile Safari",
+            "--create",
+        ]
+    )
+    assert rc == 0
+    assert len(calls) == 1  # only the process part shelled out to harness
+    assert len(created) == 1  # only the product part became a real ticket
+    assert created[0].title.startswith("fix the login bug")
+    assert "sp:5" in created[0].labels
+    assert "priority:P1" in created[0].labels
+    # the harness call carries THIS part's own text, not the whole unsplit batch (review
+    # finding: verify `args.text` is threaded per-part, not left as the original message)
+    harness_argv = calls[0]
+    body_arg = next(a for a in harness_argv if a.startswith("--body="))
+    body = body_arg[len("--body=") :]
+    assert "review my uncommitted diff" in body
+    assert "fix the login bug" not in body
+
+
+def test_classify_process_route_opt_out_falls_through_to_ticket_backend(
+    capsys, monkeypatch, _inject_fake
+):
+    # `classify.route_process_to_harness: false` keeps a process-classified item on the
+    # normal product-ticket path — harness must never even be probed.
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: process\nPRIORITY: P3\nSP: 1\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(
+        "tasklib.config.LoadedConfig.classify_route_process_to_harness",
+        property(lambda self: False),
+    )
+    probed = []
+    monkeypatch.setattr(cli, "_which_harness", lambda: probed.append(1) or "/usr/local/bin/harness")
+    created = _spy_create(monkeypatch, _inject_fake)
+    rc = main(["classify", "clean up the stale branch names in the release script", "--create"])
+    assert rc == 0
+    assert probed == []  # harness never even probed
+    assert len(created) == 1
+    assert "sp:1" in created[0].labels
+    assert "priority:P3" in created[0].labels
+
+
+def test_classify_process_route_missing_harness_binary_falls_back_to_product_ticket(
+    capsys, monkeypatch, _inject_fake
+):
+    # Review finding (real regression, fixed): a confidently `process`-classified item must
+    # NEVER be silently dropped just because `harness` isn't installed — it falls back to the
+    # normal product-ticket path (with a warning), exactly like it would have before this axis
+    # existed at all. Only a harness binary that IS present but fails AT RUNTIME still errors.
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: process\nPRIORITY: P2\nSP: 3\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(cli, "_which_harness", lambda: None)
+    created = _spy_create(monkeypatch, _inject_fake)
+    rc = main(["classify", "clean up my local scratch notes before the demo", "--create"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`harness` binary not found on PATH" in out
+    assert len(created) == 1  # filed as a product ticket, never dropped
+    assert "sp:3" in created[0].labels
+    assert "priority:P2" in created[0].labels
+
+
+def test_classify_process_route_harness_runtime_failure_still_errors(capsys, monkeypatch, _inject_fake):
+    # A harness binary that IS present but fails when actually invoked is a genuine, actionable
+    # operational error — unlike a MISSING binary (which falls back), this still surfaces as an
+    # error and does not silently fall back to a product ticket instead.
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: process\nPRIORITY: P2\nSP: 3\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    monkeypatch.setattr(cli, "_which_harness", lambda: "/usr/local/bin/harness")
+    created = _spy_create(monkeypatch, _inject_fake)
+
+    def _fake_run(argv, **kwargs):
+        import types
+
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="disk full")
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    rc = main(["classify", "review my uncommitted diff before committing", "--create"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "harness tasks new" in out
+    assert created == []  # never falls back — this is a real error, not a missing binary
+
+
+def test_classify_json_output_includes_new_axes_only_on_change(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(
+        cli,
+        "_run_review_just_ask",
+        lambda model, prompt: "VERDICT: change\nPROCESS_OR_PRODUCT: product\nPRIORITY: P1\nSP: 5\n",
+    )
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    rc = main(["classify", "please add rate limiting", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "verdict": "change",
+        "process_or_product": "product",
+        "priority": "P1",
+        "story_points": 5,
+    }
+
+
+def test_classify_json_output_omits_new_axes_for_just_ask(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "VERDICT: justAsk")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    rc = main(["classify", "how does this work?", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"verdict": "justAsk"}
+
+
 # ── session ──────────────────────────────────────────────────────────────────────────
 
 

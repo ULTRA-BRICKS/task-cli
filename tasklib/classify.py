@@ -30,6 +30,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from enum import Enum
+from typing import Callable, Literal, TypeVar
 
 CLASSIFY_PROMPT = (
     "Classify this message to a dev agent as EXACTLY ONE of:\n"
@@ -43,8 +44,21 @@ CLASSIFY_PROMPT = (
     "questions to a dev agent are latent edit requests. Do NOT apply that bias to a message "
     "that names an existing action/tool/command to run directly -- that is `actionable`, "
     "never `change`, even if running it might incidentally touch files.\n"
-    "Respond with EXACTLY one line and nothing else: the literal word VERDICT, a colon, "
-    "then your one-word answer (change/actionable/justAsk).\n\nMESSAGE:\n"
+    "\n"
+    "ALSO classify three more axes of the underlying work (answer them regardless of verdict; "
+    "they are simply ignored downstream for actionable/justAsk):\n"
+    "  PROCESS_OR_PRODUCT -- `process` if this is a session-local/agent process step (e.g. "
+    "reviewing an uncommitted diff, running a checklist before a commit) rather than durable "
+    "product work; otherwise `product`.\n"
+    "  PRIORITY -- one of P0 (drop everything), P1 (urgent), P2 (normal), P3 (low), for how "
+    "urgently the work should be picked up.\n"
+    "  SP -- a Fibonacci-ish story-point complexity estimate, one of 1, 2, 3, 5, 8, 13 "
+    "(1 = trivial/typo-level, 2 = small single-function fix, 3 = moderate/single-file, "
+    "5 = substantial/multi-file or new test infra, 8 = large/new subsystem or design-heavy, "
+    "13 = epic/major feature from scratch).\n"
+    "Respond with EXACTLY four lines and nothing else, each the literal label, a colon, then "
+    "your answer: VERDICT (change/actionable/justAsk), PROCESS_OR_PRODUCT (process/product), "
+    "PRIORITY (P0/P1/P2/P3), SP (1/2/3/5/8/13).\n\nMESSAGE:\n"
 )
 
 # The sentinel the model is asked to emit. Parsing keys off this first; it is unambiguous and
@@ -56,6 +70,85 @@ class Verdict(str, Enum):
     CHANGE = "change"
     ACTIONABLE = "actionable"
     JUST_ASK = "justAsk"
+
+
+# ── Story points / priority / process-vs-product axes ──────────────────────────────────────
+#
+# Three EXTRA classification axes riding the SAME `review just-ask` round-trip as the verdict
+# (CLASSIFY_PROMPT above asks for all four; one shell-out, not two -- matches this module's
+# existing cost/latency posture, and `review`'s own per-call cost). They are parsed the same
+# way the verdict is: a `LABEL: value` sentinel line, read via `parse_classification` below.
+# Only meaningful when the verdict is `change` (`actionable`/`justAsk` never mint a ticket, so
+# their SP/priority/process-product would be moot) -- `cli.cmd_classify` is what skips
+# surfacing them for those verdicts; parsing itself never branches on the verdict.
+#
+# Story-point scale (a plain Fibonacci-ish COMPLEXITY estimate, not a time estimate):
+#   1  = trivial / typo-level (a one-line copy fix, a renamed constant)
+#   2  = small, single-function fix (a bounded bug in one function, no new tests needed)
+#   3  = moderate, single-file change (a small new feature in one module, a couple of tests)
+#   5  = substantial: a multi-file change, or one that needs new test infrastructure
+#   8  = large: a new subsystem, or design-heavy (several approaches to weigh, cross-module)
+#   13 = epic: a major feature built from scratch, likely to itself need breaking into
+#        smaller tickets before work starts
+# review board finding (this ticket, two independent rounds): a negative lookahead that only
+# excludes a following `/` or word character is not enough -- the PROMPT's own descriptive
+# lines enumerate the allowed values with COMMAS and parentheses, not slashes ("PRIORITY --
+# one of P0 (drop everything), P1 (urgent), P2 (normal), P3 (low)"; "SP -- ... one of 1, 2, 3,
+# 5, 8, 13"), and a model that echoes/paraphrases that description onto a `LABEL: value` line
+# (`PRIORITY: P0 (drop everything), P1 (urgent), ...`) would have the FIRST, unsafe-end-of-
+# range token (`process`, `P0`, `1`) accepted, since a space/comma/`(` all satisfy "not `/` or
+# `\w`" just as well as a genuine line ending does. Closed properly here: the captured token
+# must be the ENTIRE remainder of its line (only trailing whitespace allowed after it, and the
+# `LABEL:` prefix must start the line, only leading whitespace before it) -- `re.MULTILINE`
+# anchors `^`/`$` to each line rather than the whole string. This matches the prompt's own
+# instruction ("Respond with EXACTLY four lines... each the literal label, a colon, then your
+# answer") — a genuine one-word answer is always alone on its line; anything else on that line
+# (an enumerated list, a parenthetical, trailing prose) is exactly the "did not cleanly
+# resolve" case this module already biases to a safe default for, module-wide.
+_PROCESS_PRODUCT_RE = re.compile(
+    r"^\s*process_or_product\s*:\s*(process|product)\s*$", re.IGNORECASE | re.MULTILINE
+)
+_PRIORITY_RE = re.compile(r"^\s*priority\s*:\s*(p[0-3])\s*$", re.IGNORECASE | re.MULTILINE)
+_SP_RE = re.compile(r"^\s*sp\s*:\s*(13|1|2|3|5|8)\s*$", re.IGNORECASE | re.MULTILINE)
+
+# Safe defaults when an axis doesn't cleanly resolve (mirrors `parse_verdict`'s `bias`
+# parameter in spirit, but these three are never caller-configurable -- there is no genuine
+# ambiguity here worth exposing a knob for, unlike the change/justAsk bias). `process_or_product`
+# biases to `product`: a mis-routed PROCESS ticket (filed as a local harness task when it
+# should have been a durable product ticket) is far cheaper to notice and fix than a silently
+# DROPPED product ticket would be, so on ambiguity this stays on the durable, auditable
+# product-tracker path rather than the local-only one -- never write to neither store.
+_DEFAULT_PROCESS_OR_PRODUCT = "product"
+_DEFAULT_PRIORITY = "P2"
+_DEFAULT_STORY_POINTS = 3
+
+
+@dataclass
+class Classification:
+    """A message's full classification: the change/actionable/justAsk verdict PLUS the three
+    ticket-shaping axes above (story points, priority, process-vs-product). See
+    :func:`parse_classification`."""
+
+    verdict: Verdict
+    process_or_product: Literal["process", "product"]
+    priority: Literal["P0", "P1", "P2", "P3"]
+    story_points: Literal[1, 2, 3, 5, 8, 13]
+
+
+def default_classification(verdict: Verdict) -> Classification:
+    """The safe-default :class:`Classification` used when there is no model output to parse at
+    all (no classifier provider reachable) -- every axis takes the SAME fixed default
+    ``parse_classification`` falls back to on a malformed/absent per-axis sentinel, exposed here
+    as the single source of truth so a caller (``cli._classify_one``) never hand-copies the
+    literal default values into a second file (review finding: a copy silently drifts from this
+    module's own defaults if either one is ever changed alone).
+    """
+    return Classification(
+        verdict=verdict,
+        process_or_product=_DEFAULT_PROCESS_OR_PRODUCT,
+        priority=_DEFAULT_PRIORITY,
+        story_points=_DEFAULT_STORY_POINTS,
+    )
 
 
 # Default per-provider fallback chain (§2). One cheap/fast model PER PROVIDER; the runner
@@ -70,7 +163,17 @@ DEFAULT_FALLBACKS: tuple[tuple[str, str], ...] = (
 )
 
 # How review-cli names each provider in a ``-m`` model string, and which env var(s) signal
-# the provider is reachable. ollama is reachable when the local daemon binary exists.
+# the provider is reachable. ollama/laya are reachable when their local daemon binary exists.
+#
+# ``laya`` and ``jev`` (task-cli's classification-axes ticket, 2026-09): CONFIG PLUMBING ONLY,
+# added the same way every other provider here is added — a prefix-table entry and an
+# availability rule — so a repo's ``classify.fallbacks``/``classify.capability`` CAN name one
+# of them, exactly like anthropic/openai/ollama today. Neither is wired to a real HTTP call
+# anywhere in this repo (making that call, like every other provider, is entirely
+# ``review``'s job — its own provider table is out of scope here); no credentials for either
+# exist in this environment, so this is unverified against a live endpoint. ``laya`` mirrors
+# ``ollama``'s local-daemon-on-PATH availability shape (a ``laya`` binary reachable on PATH);
+# ``jev`` mirrors the API-key shape (``JEV_API_KEY``).
 _PROVIDER_MODEL_PREFIX = {
     "anthropic": "claude",
     "openai": "commandcode",  # OpenAI models are routed through the commandcode gateway
@@ -78,7 +181,13 @@ _PROVIDER_MODEL_PREFIX = {
     "zai": "zai",
     "google": "gemini",
     "ollama": "ollama",
+    "laya": "laya",
+    "jev": "jev",
 }
+
+# Local-daemon-on-PATH providers: reachable when their own binary exists on PATH, not via an
+# env-var key (see ``provider_available``).
+_LOCAL_DAEMON_PROVIDERS = frozenset({"ollama", "laya"})
 
 _PROVIDER_KEY_ENV = {
     "anthropic": ("ANTHROPIC_API_KEY",),
@@ -91,6 +200,8 @@ _PROVIDER_KEY_ENV = {
     "zai": ("ZAI_API_KEY", "ZHIPU_API_KEY"),
     "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "ollama": (),  # availability is the daemon, not a key
+    "laya": (),  # availability is the daemon, not a key (see _LOCAL_DAEMON_PROVIDERS)
+    "jev": ("JEV_API_KEY",),
 }
 
 # The shared manifest (models.yaml) names Google's provider ``gemini`` and has no ``ollama``;
@@ -133,15 +244,15 @@ def to_model_arg(provider: str, model: str) -> str:
 
 
 def provider_available(provider: str, env: dict[str, str] | None = None) -> bool:
-    """Is a provider reachable? Key present in env, or (ollama) the daemon binary exists.
+    """Is a provider reachable? Key present in env, or (ollama/laya) its daemon binary exists.
 
-    Pure-ish: reads ``env`` (defaults to ``os.environ``) and, for ollama only, checks for the
-    binary on PATH. No network probe — availability here means "we have a credible way to
-    reach it", matching review-cli's startup failover posture.
+    Pure-ish: reads ``env`` (defaults to ``os.environ``) and, for a local-daemon provider,
+    checks for its binary on PATH. No network probe — availability here means "we have a
+    credible way to reach it", matching review-cli's startup failover posture.
     """
     env = os.environ if env is None else env
-    if provider == "ollama":
-        return shutil.which("ollama") is not None
+    if provider in _LOCAL_DAEMON_PROVIDERS:
+        return shutil.which(provider) is not None
     keys = _PROVIDER_KEY_ENV.get(provider, ())
     return any(env.get(k) for k in keys)
 
@@ -589,6 +700,59 @@ def _word_to_verdict(word: str) -> Verdict:
     return Verdict.JUST_ASK
 
 
+def _cleaned_output(output: str, message: str | None) -> str:
+    """Apply the SEQUENTIAL two-step echo strip (combined ``build_prompt(message)`` pattern
+    first, then the bare ``CLASSIFY_PROMPT`` pattern) exactly once. Shared by
+    :func:`parse_verdict` and :func:`parse_classification` (review finding: an earlier version
+    had each function run this strip independently off its OWN local ``cleaned`` variable —
+    correct by construction since both built it the same way, but a future edit to the
+    ordering/rationale below only had one chance in two of being applied everywhere). See
+    :func:`parse_verdict`'s docstring for the full rationale (echo-injection guard, why the
+    order is load-bearing, and the documented residual risk).
+    """
+    cleaned = output
+    if message is not None:
+        cleaned = _strip_echoed_prompt(cleaned, _build_echo_lines(build_prompt(message)))
+    return _strip_echoed_prompt(cleaned, _CLASSIFY_PROMPT_ECHO_LINES)
+
+
+def _verdict_from_cleaned(cleaned: str, bias: Verdict) -> Verdict:
+    """The verdict-sentinel + fallback-token scan over an ALREADY echo-stripped ``cleaned``
+    string. Split out of :func:`parse_verdict` so :func:`parse_classification` can read the
+    verdict off the SAME cleaned text it reads the three new axes from, without re-running the
+    strip (see :func:`_cleaned_output`)."""
+    matches = _VERDICT_RE.findall(cleaned)
+    if matches:
+        return _word_to_verdict(matches[-1])
+
+    # fallback: no sentinel. Take the last decisive standalone token — `change`/`justAsk`
+    # only; see the module-level note above on why `actionable` is excluded here.
+    tokens = re.findall(r"\b(change|justask|just-ask|just ask)\b", cleaned.lower())
+    if tokens:
+        return _word_to_verdict(tokens[-1])
+    return bias
+
+
+_T = TypeVar("_T")
+
+
+def _last_match(
+    pattern: re.Pattern[str], text: str, default: _T, transform: Callable[[str], _T]
+) -> _T:
+    """The transformed LAST match of ``pattern`` in ``text``, or ``default`` if none matched —
+    the shared "read the last `LABEL: value` sentinel, else fall back" idiom every axis in
+    :func:`parse_classification` uses (review finding: three copies of the same four-line
+    findall/transform/default shape, differing only in regex/transform/default). Generic on
+    ``_T`` (review finding) so each axis's declared type — ``Classification.priority``'s
+    ``Literal["P0", ...]``, ``story_points``'s ``Literal[1, 2, ...]`` — is carried through
+    ``transform``/``default`` rather than erased to ``Any``; a future regex broadened to admit
+    a value outside that Literal (e.g. a `P4`) becomes a type-checker-visible mismatch at the
+    call site instead of a silent runtime pass-through.
+    """
+    matches = pattern.findall(text)
+    return transform(matches[-1]) if matches else default
+
+
 def parse_verdict(output: str, *, bias: Verdict = Verdict.CHANGE, message: str | None = None) -> Verdict:
     """Parse ``review just-ask`` output into a verdict, biasing on ambiguity.
 
@@ -636,28 +800,52 @@ def parse_verdict(output: str, *, bias: Verdict = Verdict.CHANGE, message: str |
     reflow variant is an unbounded problem (there is always another paraphrase to handle); this
     stops the common, low-effort echo shapes without chasing all of them.
 
-    The two strips below are SEQUENTIAL, not either/or (task-cli#80 review round 3, Codex/Opus):
-    a model very often echoes back the fixed INSTRUCTIONS without also echoing the user's
-    message verbatim (reflowed, truncated, or simply not repeated) — if only the combined
-    ``build_prompt(message)`` pattern were tried, that partial echo wouldn't match at all, and
-    ``CLASSIFY_PROMPT``'s own instruction words (which literally include "justAsk") would leak
-    into the sentinel/fallback scans below, misreading the echoed instructions as the verdict.
-    Stripping the LONGER combined pattern first is still required: stripping ``CLASSIFY_PROMPT``
-    first would break apart a genuine full echo, leaving the message half's injected sentinel to
-    survive on its own.
+    The two strips (:func:`_cleaned_output`) are SEQUENTIAL, not either/or (task-cli#80 review
+    round 3, Codex/Opus): a model very often echoes back the fixed INSTRUCTIONS without also
+    echoing the user's message verbatim (reflowed, truncated, or simply not repeated) — if only
+    the combined ``build_prompt(message)`` pattern were tried, that partial echo wouldn't match
+    at all, and ``CLASSIFY_PROMPT``'s own instruction words (which literally include "justAsk")
+    would leak into the sentinel/fallback scans below, misreading the echoed instructions as the
+    verdict. Stripping the LONGER combined pattern first is still required: stripping
+    ``CLASSIFY_PROMPT`` first would break apart a genuine full echo, leaving the message half's
+    injected sentinel to survive on its own.
     """
-    cleaned = output
-    if message is not None:
-        cleaned = _strip_echoed_prompt(cleaned, _build_echo_lines(build_prompt(message)))
-    cleaned = _strip_echoed_prompt(cleaned, _CLASSIFY_PROMPT_ECHO_LINES)
+    return _verdict_from_cleaned(_cleaned_output(output, message), bias)
 
-    matches = _VERDICT_RE.findall(cleaned)
-    if matches:
-        return _word_to_verdict(matches[-1])
 
-    # fallback: no sentinel. Take the last decisive standalone token — `change`/`justAsk`
-    # only; see the module-level note above on why `actionable` is excluded here.
-    tokens = re.findall(r"\b(change|justask|just-ask|just ask)\b", cleaned.lower())
-    if tokens:
-        return _word_to_verdict(tokens[-1])
-    return bias
+def parse_classification(
+    output: str, *, bias: Verdict = Verdict.CHANGE, message: str | None = None
+) -> Classification:
+    """Parse ``review just-ask``'s multi-line answer into a full :class:`Classification`.
+
+    The VERDICT axis is read the SAME way :func:`parse_verdict` reads it (same echo-stripping,
+    same injection guards, same ``bias``/``message`` handling — see its docstring), off the
+    identical cleaned text the three NEW axes are read from (:func:`_cleaned_output` is applied
+    exactly ONCE, shared, not duplicated per axis). Each axis is then read independently from
+    the LAST ``LABEL: value`` sentinel match via its own regex (``_PROCESS_PRODUCT_RE`` /
+    ``_PRIORITY_RE`` / ``_SP_RE``, mirroring ``_VERDICT_RE``'s shape, applied through the shared
+    :func:`_last_match` idiom), so a doubled or partial echo is handled the same way the verdict
+    sentinel already is.
+
+    An axis whose sentinel is absent or doesn't cleanly resolve degrades to its own SAFE
+    DEFAULT (module comment above, and :func:`default_classification`) rather than aborting the
+    whole classification — a bad or truncated model reply must never crash ``task classify``,
+    only under-inform it. Unlike ``parse_verdict``'s ``bias``, these three defaults are fixed
+    (never caller-configurable — see the module comment for why). Each regex requires its
+    captured token to be the ENTIRE remainder of its line — see the module comment directly
+    above the three regex definitions for why a looser boundary check is not enough.
+    """
+    cleaned = _cleaned_output(output, message)
+    verdict = _verdict_from_cleaned(cleaned, bias)
+    process_or_product = _last_match(
+        _PROCESS_PRODUCT_RE, cleaned, _DEFAULT_PROCESS_OR_PRODUCT, str.lower
+    )
+    priority = _last_match(_PRIORITY_RE, cleaned, _DEFAULT_PRIORITY, str.upper)
+    story_points = _last_match(_SP_RE, cleaned, _DEFAULT_STORY_POINTS, int)
+
+    return Classification(
+        verdict=verdict,
+        process_or_product=process_or_product,
+        priority=priority,
+        story_points=story_points,
+    )
