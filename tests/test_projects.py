@@ -138,3 +138,56 @@ def test_current_repo_project_is_non_explicit():
     assert isinstance(p, Project)
     assert p.explicit is False
     assert p.name == "acme/here"
+
+
+# ── tasks (url + team, no flat shorthand — see _backend_from_shape's docstring) ────────────
+
+
+def test_tasks_nested_block_url_and_team():
+    projs = projects_from_config(
+        {"projects": [{"backend": "tasks", "tasks": {"url": "https://tasks.example.test", "team": "GL"}}]}
+    )
+    assert len(projs) == 1
+    p = projs[0]
+    assert p.backend == "tasks"
+    assert p.overlay == {"backend": "tasks", "tasks": {"url": "https://tasks.example.test", "team": "GL"}}
+    assert p.coordinate == "tasks:https://tasks.example.test/GL"
+
+
+def test_tasks_without_url_or_team_is_rejected():
+    assert projects_from_config({"projects": [{"backend": "tasks", "tasks": {"team": "GL"}}]}) == []
+    assert projects_from_config(
+        {"projects": [{"backend": "tasks", "tasks": {"url": "https://tasks.example.test"}}]}
+    ) == []
+
+
+def test_tasks_shape_inferred_without_explicit_backend():
+    # a bare `tasks:` block (no explicit `backend: tasks`) is still recognized by shape.
+    projs = projects_from_config(
+        {"projects": [{"tasks": {"url": "https://tasks.example.test", "team": "GL"}}]}
+    )
+    assert projs[0].backend == "tasks"
+
+
+def test_tasks_shape_survives_linear_merged_default():
+    # mirrors test_github_shorthand_survives_linear_merged_default — a tasks entry inside a
+    # Linear-default cascade must not be reinterpreted as a teamless Linear entry (the `team`
+    # key alone is ambiguous between the two — see _backend_from_shape's docstring; the nested
+    # `tasks:` block is what disambiguates).
+    projs = projects_from_config(
+        {
+            "backend": "linear",
+            "projects": [{"tasks": {"url": "https://tasks.example.test", "team": "GL"}}],
+        }
+    )
+    assert projs[0].backend == "tasks"
+
+
+def test_tasks_coordinate_distinguishes_team_and_url():
+    a = projects_from_config(
+        {"projects": [{"backend": "tasks", "tasks": {"url": "https://tasks.example.test", "team": "GL"}}]}
+    )[0]
+    b = projects_from_config(
+        {"projects": [{"backend": "tasks", "tasks": {"url": "https://tasks.example.test", "team": "HYP"}}]}
+    )[0]
+    assert a.coordinate != b.coordinate

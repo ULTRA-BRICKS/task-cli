@@ -6,8 +6,8 @@ cross-repo view: ``task list`` run **outside** any git repo, or ``task list --al
 should show ALL tasks GROUPED by repo/project. That needs a list of which projects exist — the
 single-backend resolution can't discover them on its own.
 
-A **project** is one named ticket source: a backend (``github-issues``/``linear``) plus the
-coordinates that scope it (a GitHub ``owner/repo``, or a Linear ``team``/``project``). The
+A **project** is one named ticket source: a backend (``github-issues``/``linear``/``tasks``/
+``forgejo``) plus the coordinates that scope it (a GitHub ``owner/repo``, or a Linear ``team``/``project``). The
 registry lives under a ``projects:`` key in the config cascade — usually the GLOBAL config
 (``~/.config/task-cli/config.yaml``), since it spans repos, but a per-repo ``task.yaml`` may
 add to it too. Each entry is turned into a config *overlay* that the existing backend selector
@@ -52,8 +52,35 @@ class Project:
             team = str(lin.get("team", "")).strip().upper()
             project = str(lin.get("project", "")).strip()
             return f"linear:{team}/{project}" if project else f"linear:{team}"
+        if self.backend == "tasks":
+            tasks = self.overlay.get("tasks", {})
+            url = _normalized_origin(str(tasks.get("url", "")))
+            team = str(tasks.get("team", "")).strip().upper()
+            return f"tasks:{url}/{team}" if team else f"tasks:{url}"
+        if self.backend == "forgejo":
+            fj = self.overlay.get("forgejo", {})
+            url = _normalized_origin(str(fj.get("url", "")))
+            return f"forgejo:{url}/{str(fj.get('repo', '')).strip().lower()}"
         repo = str(self.overlay.get("github", {}).get("repo", "")).strip().lower()
         return f"github-issues:{repo}"
+
+
+def _normalized_origin(url: str) -> str:
+    """``https://host[:port]`` lowercased with a default ``:443`` and trailing ``/`` dropped —
+    the same shape ``backend_coordinate`` gets from the backend's own validated origin, so a
+    registry entry and the live backend for one repository share one coordinate."""
+    from urllib.parse import urlsplit
+
+    text = url.strip().rstrip("/")
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        return text.lower()
+    if not parts.hostname:
+        return text.lower()
+    suffix = f":{port}" if port and port != 443 else ""
+    return f"{parts.scheme.lower()}://{parts.hostname.lower()}{suffix}"
 
 
 def projects_from_config(data: dict[str, Any]) -> list[Project]:
@@ -62,12 +89,18 @@ def projects_from_config(data: dict[str, Any]) -> list[Project]:
     Each entry is a mapping. Recognized keys::
 
         - name:    display label for the group (defaults to the repo/team coordinate)
-        - backend: github-issues | linear (defaults to the top-level ``backend``)
+        - backend: github-issues | linear | tasks (defaults to the top-level ``backend``)
         - repo:    owner/name              (github-issues shorthand)
         - github:  {repo: owner/name}      (explicit github block)
         - team:    HYP                      (linear shorthand)
         - project: <id>                     (linear project, optional)
         - linear:  {team: HYP, project: <id>}
+        - tasks:   {url: https://..., team: GL}  (tasks — no flat shorthand: ``team`` alone
+                     is already claimed by the linear shorthand above, so a tasks entry is
+                     always the nested ``tasks:`` block)
+        - forgejo: {url: https://..., repo: owner/name}  (forgejo — nested only, for the same
+                     reason: the flat ``repo`` shorthand is GitHub's; ``repo`` must be explicit,
+                     ``auto`` has no single cwd to resolve against here)
 
     A malformed entry (not a mapping, or missing the backend coordinate) is skipped rather
     than aborting the whole registry — the aggregation is best-effort by design.
@@ -97,6 +130,10 @@ def _project_from_entry(entry: Any, default_backend: str) -> Project | None:
         return _github_project(entry, backend)
     if backend == "linear":
         return _linear_project(entry, backend)
+    if backend == "tasks":
+        return _tasks_project(entry, backend)
+    if backend == "forgejo":
+        return _forgejo_project(entry, backend)
     return None
 
 
@@ -104,19 +141,19 @@ def _backend_from_shape(entry: dict[str, Any]) -> str | None:
     """Infer a registry entry's backend from its OWN coordinate keys, before the merged default.
 
     A global ``projects:`` entry carries an unambiguous coordinate (``repo``/``github`` → GitHub,
-    ``team``/``linear`` → Linear). The top-level ``backend`` is the cwd repo's choice and must NOT
-    reinterpret these: inside a Linear-backed repo the merged default is ``linear``, which would
-    otherwise turn a registered ``{repo: acme/web}`` GitHub shorthand into a teamless Linear entry
-    and silently drop it from ``task list --all``. An entry with neither shape (or both) falls back
-    to ``default_backend`` unchanged.
+    ``team``/``linear`` → Linear, ``tasks`` → Tasks, ``forgejo`` → Forgejo). The top-level
+    ``backend`` is the cwd repo's choice and must NOT reinterpret these: inside a Linear-backed
+    repo the merged default is ``linear``, which would otherwise turn a registered ``{repo: acme/web}`` GitHub shorthand
+    into a teamless Linear entry and silently drop it from ``task list --all``. An entry with
+    none of these shapes (or more than one) falls back to ``default_backend`` unchanged.
     """
     has_github = bool(entry.get("repo") or isinstance(entry.get("github"), dict))
     has_linear = bool(entry.get("team") or isinstance(entry.get("linear"), dict))
-    if has_github and not has_linear:
-        return "github-issues"
-    if has_linear and not has_github:
-        return "linear"
-    return None
+    has_tasks = bool(isinstance(entry.get("tasks"), dict) and entry["tasks"].get("url"))
+    has_forgejo = bool(isinstance(entry.get("forgejo"), dict) and entry["forgejo"].get("url"))
+    shapes = {"github-issues": has_github, "linear": has_linear, "tasks": has_tasks, "forgejo": has_forgejo}
+    present = [name for name, flag in shapes.items() if flag]
+    return present[0] if len(present) == 1 else None
 
 
 def _github_project(entry: dict[str, Any], backend: str) -> Project | None:
@@ -139,6 +176,28 @@ def _linear_project(entry: dict[str, Any], backend: str) -> Project | None:
     project_id = str(entry.get("project") or lin.get("project") or "").strip()
     name = str(entry.get("name") or (f"{team}/{project_id}" if project_id else team)).strip()
     overlay: dict[str, Any] = {"backend": "linear", "linear": {"team": team, "project": project_id}}
+    return Project(name=name, backend=backend, overlay=overlay)
+
+
+def _tasks_project(entry: dict[str, Any], backend: str) -> Project | None:
+    tasks = entry.get("tasks") if isinstance(entry.get("tasks"), dict) else {}
+    url = str(tasks.get("url") or "").strip()
+    team = str(tasks.get("team") or "").strip()
+    if not url or not team:
+        return None
+    name = str(entry.get("name") or f"{team}@{url}").strip()
+    overlay: dict[str, Any] = {"backend": "tasks", "tasks": {"url": url, "team": team}}
+    return Project(name=name, backend=backend, overlay=overlay)
+
+
+def _forgejo_project(entry: dict[str, Any], backend: str) -> Project | None:
+    fj = entry.get("forgejo") if isinstance(entry.get("forgejo"), dict) else {}
+    url = str(fj.get("url") or "").strip()
+    repo = str(fj.get("repo") or "").strip()
+    if not url or not repo or repo == "auto" or len(repo.split("/")) != 2:
+        return None
+    name = str(entry.get("name") or repo).strip()
+    overlay: dict[str, Any] = {"backend": "forgejo", "forgejo": {"url": url, "repo": repo}}
     return Project(name=name, backend=backend, overlay=overlay)
 
 

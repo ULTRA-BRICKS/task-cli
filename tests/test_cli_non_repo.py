@@ -48,12 +48,13 @@ def test_list_outside_repo_no_registry_errors_with_guidance(
     assert "projects:" in out  # the fix points at the registry
 
 
-def test_create_outside_repo_gives_3part_error(capsys, tmp_path):
+def test_create_outside_repo_gives_3part_error(capsys, tmp_path, monkeypatch):
+    # UB-25: an explicit non-repo -C is refused for writes; being outside a repo is
+    # expressed by the process cwd instead.
+    monkeypatch.chdir(tmp_path)
     rc = main(
         [
             "create",
-            "-C",
-            str(tmp_path),
             "--title",
             "t",
             "--why",
@@ -92,11 +93,12 @@ def test_create_outside_repo_linear_backend_gives_linear_3part_error(
         "version: 1\nbackend: linear\nlinear: {team: ''}\n", encoding="utf-8"
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
+    # UB-25: an explicit non-repo -C is refused for writes; being outside a repo is
+    # expressed by the process cwd instead.
+    monkeypatch.chdir(tmp_path)
     rc = main(
         [
             "create",
-            "-C",
-            str(tmp_path),
             "--title",
             "t",
             "--why",
@@ -166,6 +168,28 @@ def test_list_in_repo_linear_missing_team_surfaces_config_error_not_outside_repo
     assert "outside a git repo" not in out
     # the actionable backend error, anchored so a reworded message can't pass on a stray "team"
     assert "requires a team key" in out
+
+
+def test_list_in_repo_tasks_missing_url_surfaces_config_error_not_outside_repo(
+    capsys, tmp_path
+):
+    # Mirrors test_list_in_repo_linear_missing_team_surfaces_config_error_not_outside_repo for
+    # the tasks backend: INSIDE a git repo whose task.yaml selects `backend: tasks` but omits
+    # `tasks.url`/`tasks.team`, this is a real, actionable in-repo misconfiguration — it must
+    # surface the backend's "requires a url" error (exit 2), NOT be demoted to the "outside a
+    # repo" / "no projects" path.
+    import subprocess
+
+    repo = tmp_path / "tsk"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "task.yaml").write_text("version: 1\nbackend: tasks\n", encoding="utf-8")
+    rc = main(["list", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "no projects to list" not in out
+    assert "outside a git repo" not in out
+    assert "requires a url" in out
 
 
 # ── outside a repo, WITH a registry → grouped cross-project list ─────────────────────
@@ -437,6 +461,35 @@ def test_status_outside_repo_routes_linear_id_by_team(capsys, tmp_path, monkeypa
     assert "HYP-3" in out and "in-progress" in out
 
 
+def test_status_outside_repo_routes_tasks_id_by_team(capsys, tmp_path, monkeypatch):
+    # Mirrors test_status_outside_repo_routes_linear_id_by_team for the tasks backend: a
+    # TEAM-N-shaped id (GL-3) routes to the registered tasks project whose team is GL.
+    class _Get:
+        def __call__(self, cfg, env=None):
+            assert cfg.backend == "tasks"
+            assert cfg.section("tasks").get("url") == "https://tasks.example.test"
+            assert cfg.section("tasks").get("team") == "GL"
+            return _Tsk()
+
+    class _Tsk:
+        def get(self, tid):
+            return Ticket(title="Tasks one", state=State.IN_PROGRESS, id="GL-3", url="u")
+
+    monkeypatch.setattr("tasklib.backends.get_backend", _Get())
+    monkeypatch.setenv(
+        "XDG_CONFIG_HOME",
+        _gh_config(
+            tmp_path,
+            "projects:\n  - {repo: a/gh}\n"
+            "  - {name: GL, backend: tasks, tasks: {url: 'https://tasks.example.test', team: GL}}\n",
+        ),
+    )
+    rc = main(["status", "GL-3", "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "GL-3" in out and "in-progress" in out
+
+
 def test_read_outside_repo_two_same_team_linear_projects_routes_deterministically(
     capsys, tmp_path, monkeypatch
 ):
@@ -690,7 +743,10 @@ def test_status_outside_repo_same_team_linear_records_touch_under_actual_project
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", _misrouted_project_config(tmp_path))
 
-    rc = main(["status", "HYP-1", "in-progress", "-C", str(tmp_path)])
+    # UB-25: an explicit non-repo -C is refused for writes; being outside a repo is
+    # expressed by the process cwd instead.
+    monkeypatch.chdir(tmp_path)
+    rc = main(["status", "HYP-1", "in-progress"])
     assert rc == 0
     entries = read_entries("testsess")
     # the session-sidecar entry must be attributed to the ticket's REAL project ("proj-b"),
@@ -742,11 +798,14 @@ def test_status_outside_repo_same_team_linear_attention_notice_surfaces_earlier_
         ),
     )
 
-    rc = main(["status", "HYP-1", "in-progress", "-C", str(tmp_path)])
+    # UB-25: an explicit non-repo -C is refused for writes; being outside a repo is
+    # expressed by the process cwd instead.
+    monkeypatch.chdir(tmp_path)
+    rc = main(["status", "HYP-1", "in-progress"])
     assert rc == 0
     capsys.readouterr()  # discard the first command's own output
 
-    rc = main(["status", "HYP-2", "in-progress", "-C", str(tmp_path)])
+    rc = main(["status", "HYP-2", "in-progress"])
     out = capsys.readouterr().out
     assert rc == 0
     # HYP-1's earlier touch must still be visible — this is exactly what silently broke when

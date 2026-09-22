@@ -147,12 +147,19 @@ def build_parser() -> argparse.ArgumentParser:
     # global flags live on the top parser AND each subparser via parents
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
-        "-C", "--cwd", default=".", help="repo root to operate on (default: cwd)"
+        "-C",
+        "--cwd",
+        default=None,
+        help="repository to operate on (default: cwd). An explicit path must be inside a git "
+        "repository, except for read-only registry commands (list/find/read/...)",
     )
     common.add_argument(
-        "--backend", help="override the configured backend (github-issues|linear)"
+        "--backend",
+        help="override the configured backend (github-issues|linear|tasks|forgejo)",
     )
-    common.add_argument("--repo", help="override github repo (owner/name)")
+    common.add_argument(
+        "--repo", help="override the repository (owner/name) for github-issues or forgejo"
+    )
     common.add_argument(
         "--config", help="explicit config file (default: ./task.yaml + global)"
     )
@@ -386,6 +393,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="screenshot path or URL (one or more)",
     )
 
+    # comment — the supported way to add a note to any backend's ticket (UB-25: the normal path
+    # that replaces raw forge-CLI/API comment writes)
+    cmp = sub.add_parser(
+        "comment", parents=[common], help="add a comment to a ticket (Markdown kept as-is)"
+    )
+    cmp.add_argument("id", help="ticket id (#123, owner/repo#123 or HYP-456)")
+    cmp.add_argument("text", nargs="*", help="comment text (words are joined with spaces)")
+    cmp.add_argument(
+        "--body-file", help="read the comment body from a file ('-' reads stdin)"
+    )
+
     # status
     stp = sub.add_parser(
         "status", parents=[common], help="read or transition a ticket's state"
@@ -612,6 +630,7 @@ def main(argv: list[str] | None = None) -> int:
         "find": cmd_find,
         "change": cmd_change,
         "attach": cmd_attach,
+        "comment": cmd_comment,
         "status": cmd_status,
         "done": cmd_done,
         "check": cmd_check,
@@ -626,6 +645,7 @@ def main(argv: list[str] | None = None) -> int:
         "daemon": cmd_daemon,
     }
     try:
+        _refuse_explicit_non_repo_cwd(args)
         return handlers[args.command](args)
     except TransitionError as exc:
         # an illegal state transition (issue #10): clean error, no traceback. It returns the
@@ -662,11 +682,50 @@ class _ClassifyBatchAmbiguous(Exception):
 # ── shared plumbing ─────────────────────────────────────────────────────────────────
 
 
+# `owner/repo#N` — a repository-qualified GitHub/Forgejo issue id (numbers are per repository).
+_QUALIFIED_ID_RE = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[0-9]+")
+_FORGE_BACKENDS = ("github-issues", "forgejo")
+
+# Commands that may legitimately run with no repository target: the registry/aggregation views
+# and id-routed reads (outside a repo they resolve through `projects:`). An explicit `-C` that is
+# not a repository is refused for every OTHER command before config, credentials or network are
+# touched. `daemon` refuses a repo-less context itself (see `_daemon_coordinate`).
+_UNSCOPED_READ_COMMANDS = frozenset(
+    {"list", "find", "gantt", "burn", "web", "read", "view", "gate", "session", "daemon"}
+)
+
+
+def _refuse_explicit_non_repo_cwd(args: argparse.Namespace) -> None:
+    """UB-25: an explicit ``-C``/``--cwd`` naming a non-repository path is an error for any
+    repo-scoped command — it would otherwise silently fall back to a global/registry route and
+    write into whatever project that resolves to. Runs before any backend is built."""
+    explicit = getattr(args, "cwd", None)
+    if explicit is None or args.command in _UNSCOPED_READ_COMMANDS:
+        return
+    if args.command == "status" and not getattr(args, "new_state", None):
+        return  # a bare `status <id>` only reads
+    if args.command == "audit" and not getattr(args, "revert", False):
+        return  # `audit` only reads unless --revert moves tickets
+    if args.command == "classify" and not (getattr(args, "create", False) or getattr(args, "update", None)):
+        return  # classification alone writes nothing
+    target = Path(explicit).expanduser()
+    if target.is_dir() and _in_git_repo(target.resolve()):
+        return
+    raise _UserError(
+        f"-C {explicit} is not inside a git repository.\n"
+        "  why: an explicit -C/--cwd selects the repository whose tracker this command writes "
+        "to; a non-repository path would fall back to a global or registry route that may be "
+        "a different project.\n"
+        "  fix: pass -C with a path inside the target repository, or run the command from "
+        "inside it (no flag needed)."
+    )
+
+
 def _load(args: argparse.Namespace):
     """Load config for the -C repo, applying --backend/--repo/--config overrides."""
     from .config import ConfigError, load
 
-    repo_root = Path(args.cwd).resolve()
+    repo_root = Path(args.cwd or ".").resolve()
     explicit = None
     if getattr(args, "config", None):
         cp = Path(args.config)
@@ -684,7 +743,8 @@ def _load(args: argparse.Namespace):
         except ConfigError as exc:
             raise _UserError(str(exc)) from exc
     if getattr(args, "repo", None):
-        cfg.data.setdefault("github", {})["repo"] = args.repo
+        section = "forgejo" if cfg.backend == "forgejo" else "github"
+        cfg.data.setdefault(section, {})["repo"] = args.repo
     return cfg
 
 
@@ -751,6 +811,27 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
         name = f"{team}/{project}" if project else team
         return name, {"backend": "linear", "linear": {"team": team, "project": project}}
 
+    if backend == "forgejo":
+        return _current_forgejo_overlay(cfg)
+
+    if backend == "tasks":
+        sec = cfg.section("tasks")
+        url = str(sec.get("url", "")).strip()
+        team = str(sec.get("team", "")).strip()
+        if not url or not team:
+            # Same reasoning as the teamless-linear branch above: a misconfigured `backend:
+            # tasks` INSIDE a repo is a real, actionable misconfig, not "outside a repo".
+            if not _in_git_repo(cfg.repo_root):
+                return None
+            _backend(
+                cfg
+            )  # NoReturn here: raises _UserError("tasks backend requires a url"/"...team key")
+            raise AssertionError(
+                "unreachable: _backend raises on a misconfigured tasks config"
+            )
+        name = f"{team}@{url}"
+        return name, {"backend": "tasks", "tasks": {"url": url, "team": team}}
+
     # github-issues
     gh = cfg.section("github")
     repo_spec = str(gh.get("repo", "auto")).strip()
@@ -769,9 +850,44 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
     except BackendError as exc:
         # inside a repo, but the origin is broken/unsupported → a real, user-facing error
         # (not "outside a repo"). Surface it as a clean _UserError, never a traceback.
-        raise _UserError(str(exc)) from exc
+        raise _UserError(_with_forgejo_hint(str(exc))) from exc
     full = f"{owner}/{repo}"
     return full, {"backend": "github-issues", "github": {"repo": full}}
+
+
+def _with_forgejo_hint(message: str) -> str:
+    """UB-25: a repo still routed to the github default (or a stale `backend: github-issues`
+    override) whose origin is a non-GitHub forge gets a pointer at the Forgejo backend instead
+    of a bare "unrecognized github remote URL"."""
+    if not message.startswith("unrecognized github remote URL"):
+        return message
+    return (
+        f"{message}\n"
+        "  why: this repository is routed to the github-issues backend, but its origin is not "
+        "on github.com.\n"
+        "  fix: if it lives on a Forgejo forge, route it there in the repository's rig.yaml: "
+        "`task: {backend: forgejo, forgejo: {url: https://<forge-host>, repo: owner/name}}`."
+    )
+
+
+def _current_forgejo_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
+    """The forgejo branch of :func:`_current_project_overlay`: an explicit ``forgejo.repo``
+    pins the target; ``auto`` resolves the git ``origin`` (only on ``forgejo.url``'s host), and
+    returns ``None`` only when genuinely outside a git work tree."""
+    from .backends import BackendError
+    from .backends.forgejo import forgejo_origin, resolve_repo
+
+    sec = cfg.section("forgejo")
+    spec = str(sec.get("repo", "auto") or "auto").strip()
+    if spec == "auto" and not _in_git_repo(cfg.repo_root):
+        return None
+    try:
+        origin = forgejo_origin(str(sec.get("url", "") or ""))
+        owner, repo = resolve_repo(spec, cfg.repo_root, origin)
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+    full = f"{owner}/{repo}"
+    return full, {"backend": "forgejo", "forgejo": {"url": origin, "repo": full}}
 
 
 def _config_for_overlay(cfg, overlay: dict):
@@ -850,27 +966,57 @@ def _routing_for_id(cfg, ticket_id: str):
 def _route_id_to_project(ticket_id: str, projects: list):
     """Pick the registered project that owns ``ticket_id``, or ``None`` if ambiguous/none."""
     tid = ticket_id.strip()
+    qualified = _QUALIFIED_ID_RE.fullmatch(tid)
+    if qualified is not None:
+        # owner/repo#N names its repository: route to the registered forge project with that
+        # repo (never to a same-numbered issue elsewhere).
+        named = qualified.group(1).lower()
+        hits = [p for p in projects if p.backend in _FORGE_BACKENDS and _repo_of(p) == named]
+        return hits[0] if len(hits) == 1 else None
     if tid.startswith("#") or tid.lstrip("#").isdigit():
-        gh = [p for p in projects if p.backend == "github-issues"]
-        return gh[0] if len(gh) == 1 else None
-    # Linear-shaped id: TEAM-123 → route by the team prefix. A Linear identifier is team-scoped,
-    # and get/update resolve by the identifier alone (they ignore the project), so ANY registered
-    # project on that team can fetch it — pick the first deterministically rather than calling two
-    # same-team projects "ambiguous" (they'd resolve the same issue either way).
+        # A bare number is only meaningful inside ONE repository: with more than one registered
+        # GitHub/Forgejo repository it is ambiguous, whichever backends they use.
+        forge = [p for p in projects if p.backend in _FORGE_BACKENDS]
+        return forge[0] if len(forge) == 1 else None
+    # TEAM-123-shaped id: Linear AND Tasks both use this identifier shape and are both
+    # team-scoped, so route by team prefix across BOTH backends. Within ONE tracker, get/update
+    # resolve by the identifier alone (ignoring the project), so two same-team projects of that
+    # tracker resolve the same issue — pick the first deterministically. Across trackers (Linear
+    # vs Tasks, or two Tasks deployments) the same `HYP-3` names DIFFERENT tickets, so that is
+    # ambiguous and refused, never guessed (UB-25 review).
     prefix = tid.partition("-")[0].upper() if "-" in tid else ""
     if prefix:
         matches = [
             p
             for p in projects
-            if p.backend == "linear" and _linear_team_of(p) == prefix
+            if (p.backend == "linear" and _linear_team_of(p) == prefix)
+            or (p.backend == "tasks" and _tasks_team_of(p) == prefix)
         ]
-        if matches:
+        trackers = {_tracker_of(p) for p in matches}
+        if len(trackers) == 1:
             return matches[0]
     return None
 
 
+def _tracker_of(project) -> str:
+    """The ticket store a team-scoped project reads from: one Linear workspace, or one Tasks
+    deployment (by url)."""
+    if project.backend == "tasks":
+        return "tasks:" + str(project.overlay.get("tasks", {}).get("url", "")).strip().rstrip("/").lower()
+    return project.backend
+
+
+def _repo_of(project) -> str:
+    section = "forgejo" if project.backend == "forgejo" else "github"
+    return str(project.overlay.get(section, {}).get("repo", "")).strip().lower()
+
+
 def _linear_team_of(project) -> str:
     return str(project.overlay.get("linear", {}).get("team", "")).strip().upper()
+
+
+def _tasks_team_of(project) -> str:
+    return str(project.overlay.get("tasks", {}).get("team", "")).strip().upper()
 
 
 def _unroutable_id_error(ticket_id: str, projects: list) -> str:
@@ -894,6 +1040,16 @@ def _create_without_repo_error(cfg) -> str:
         how = (
             "  fix: run inside the repo whose `task.yaml` sets `linear.team`, "
             "or set `linear: {team: KEY}` in ~/.config/task-cli/config.yaml."
+        )
+    elif backend == "tasks":
+        how = (
+            "  fix: run inside the repo whose `task.yaml` sets `tasks.url`/`tasks.team`, "
+            "or set `tasks: {url: URL, team: KEY}` in ~/.config/task-cli/config.yaml."
+        )
+    elif backend == "forgejo":
+        how = (
+            "  fix: run inside the target Forgejo repository's checkout (its origin must be on "
+            "`forgejo.url`'s host), or pin `forgejo.repo: owner/name`."
         )
     else:
         how = (
@@ -3441,6 +3597,58 @@ def cmd_change(args: argparse.Namespace) -> int:
 
 
 
+def cmd_comment(args: argparse.Namespace) -> int:
+    """Append a comment to a ticket through its configured backend (UB-25).
+
+    The supported, backend-agnostic way to leave a note on a GitHub/Forgejo/Linear/Tasks ticket
+    — agents use this instead of a raw forge CLI or API write. The text is posted verbatim (it
+    is Markdown, never re-rendered), and never touches the ticket body.
+    """
+    body = _comment_body(args)
+    cfg = _load(args)
+    backend = _backend_for_id(cfg, args.id)
+    from .backends import AmbiguousBackendError, BackendError
+
+    try:
+        backend.comment(args.id, body)
+    except AmbiguousBackendError as exc:
+        print(_err(f"ambiguous: {exc}"))
+        print(_warn(f"  the comment may already be posted — check {args.id} before retrying."))
+        return exc.exit_code
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+    if args.json:
+        import json
+
+        print(json.dumps({"id": args.id, "commented": True}, ensure_ascii=False))
+    else:
+        print(f"commented on {args.id}")
+    return 0
+
+
+def _comment_body(args: argparse.Namespace) -> str:
+    """The comment text from ``--body-file`` (``-`` = stdin) or the positional words; an empty
+    or whitespace-only comment is refused before any backend is built."""
+    if args.body_file and args.text:
+        raise _UserError("pass the comment either as text or with --body-file, not both")
+    if args.body_file:
+        try:
+            if args.body_file == "-":
+                body = sys.stdin.read()
+            else:
+                body = Path(args.body_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise _UserError(f"cannot read --body-file {args.body_file}: {exc}") from exc
+    else:
+        body = " ".join(args.text)
+    if not body.strip():
+        raise _UserError(
+            "the comment is empty\n"
+            "  fix: pass the text (`task comment <id> \"note\"`) or --body-file PATH"
+        )
+    return body
+
+
 def cmd_attach(args: argparse.Namespace) -> int:
     """Attach screenshot path(s) as implementation proof.
 
@@ -3548,6 +3756,11 @@ def cmd_status(args: argparse.Namespace) -> int:
             ticket = backend.get(args.id)
         except BackendError as exc:
             raise _UserError(str(exc)) from exc
+        if args.json:
+            import json
+
+            print(json.dumps(_ticket_dict(ticket), ensure_ascii=False, indent=2))
+            return 0
         print(f"{ticket.id} {_dim('[' + ticket.state.value + ']')} {ticket.title}")
         return 0
 
@@ -3585,6 +3798,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     _record_session_touch(cfg, backend, updated)
     log_event("ticket.transition", ticket_id=updated.id, state=new_state.value)
     _notify_mutation(cfg, updated, "done" if new_state is State.DONE else "changed")
+    if args.json:
+        # --json promises machine-readable stdout: the updated ticket, nothing else
+        import json
+
+        print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
+        return 0
     print(_ok(f"{updated.id} → {new_state.value}"))
     if new_state in _RECENT_PRIORITY_STATES:
         _print_session_attention_after_mutation(
