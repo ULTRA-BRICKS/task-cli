@@ -5342,13 +5342,8 @@ def _classify_one(
     `classify.route_process_to_harness` is disabled, in which case it falls through to the
     normal product-ticket path unchanged.
     """
-    from .classify import (
-        Verdict,
-        build_prompt,
-        default_classification,
-        parse_classification,
-        resolve_chain,
-    )
+    from .classifiers import build_classifier_chain
+    from .classify import Verdict, default_classification
 
     # `actionable` (task-cli#80) is deliberately EXCLUDED from the configurable-bias set (review
     # finding): it's a genuine model-signaled verdict, never a "when confused, assume this"
@@ -5360,21 +5355,34 @@ def _classify_one(
         if cfg.classify_bias in ("change", "justAsk")
         else Verdict.CHANGE
     )
-    resolved = resolve_chain(
+    # task-cli#206: `build_classifier_chain` turns `classify.fallbacks` into an ordered list of
+    # `ClassifierProvider`s (laya entries + one ReviewCliClassifier group per review-cli run —
+    # see `tasklib/classifiers.py`). Walk it and use the first provider that is BOTH available
+    # AND actually produces a classification -- a provider that looks reachable but fails at
+    # runtime (e.g. laya's model download/predict) falls through to the next one, same
+    # graceful-degradation posture as the old single-provider "no reachable provider" path.
+    providers = build_classifier_chain(
         cfg.classify_fallbacks or None, capability=cfg.classify_capability or None
     )
-    if resolved is None:
-        # no provider reachable → bias-decide, still observable. The three new axes have no
-        # model output to read either, so they take classify.py's own fixed safe defaults
-        # (default_classification — the single source of truth, never hand-copied here).
+    classification = None
+    used_label = "none"
+    for provider in providers:
+        if not provider.available():
+            continue
+        classification = provider.classify(args.text, bias)
+        if classification is not None:
+            used_label = provider.label
+            break
+    if classification is None:
+        # no provider reachable (or every reachable one failed at runtime) → bias-decide,
+        # still observable. The three new axes have no model output to read either, so they
+        # take classify.py's own fixed safe defaults (default_classification — the single
+        # source of truth, never hand-copied here).
         classification = default_classification(bias)
         print(
             _warn(f"  no classifier provider available; biasing to {classification.verdict.value}"),
             file=sys.stderr,  # a warning, not the verdict/axes/--json unit stdout callers parse
         )
-    else:
-        output = _run_review_just_ask(resolved.model_arg, build_prompt(args.text))
-        classification = parse_classification(output, bias=bias, message=args.text)
     verdict = classification.verdict
     # `actionable`/`justAsk` never mint a ticket, so their axes are moot — computed once here
     # rather than repeating `verdict is Verdict.CHANGE` at every log_event/`--json`/human site.
@@ -5385,7 +5393,7 @@ def _classify_one(
     log_event(
         "classify",
         verdict=verdict.value,
-        model=(resolved.model_arg if resolved else "none"),
+        model=used_label,
         process_or_product=(axes.process_or_product if axes is not None else None),
         priority=(axes.priority if axes is not None else None),
         story_points=(axes.story_points if axes is not None else None),

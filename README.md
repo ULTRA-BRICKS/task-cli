@@ -602,14 +602,37 @@ The repo you're currently inside is always one of the groups, even if it isn't (
 `task classify "<text>"` decides `change` (→ a ticket), `actionable` (an instruction to
 directly execute an existing command/tool right now — e.g. "run a review on the diff"; no
 ticket, and actually invoking it is out of scope for this repo, see "Out of scope" below), or
-`justAsk` (a pure question) by shelling out to `review just-ask -m <model> --pool 1`. The
-model is the **first available** in a per-provider fallback chain (default head
-`claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google → local ollama), so
-it works with whatever you have — offline via ollama, or on any one key. **Bias is to
-`change` on ambiguity between change/justAsk** — most questions to a dev agent are latent
-change requests; that bias never applies to a genuine `actionable` signal, which is only
-recognized via the model's explicit `VERDICT: actionable` sentinel. `task classify "<text>"
---create` is the entry point the `tg-cli` inbound hook calls.
+`justAsk` (a pure question). Resolution is **pluggable** (`tasklib/classifiers.py`,
+task-cli#206): `classify.fallbacks` is walked in order, and each configured provider is tried
+in turn until one is both AVAILABLE and actually produces a classification. Two provider
+kinds:
+
+- **`review-cli`** (every entry except `laya`) — shells out to `review just-ask -m <model>
+  --pool 1`. The model is the first available provider in that RUN of the chain (default head
+  `claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google → local ollama),
+  so it works with whatever you have — offline via ollama, or on any one key. A subprocess
+  error degrades to the bias default for that run (it never raises out of the shell-out
+  itself), so this provider does not itself fall through to a later one in `fallbacks`.
+- **`laya`** — a REAL, free, fully local classifier: Convai Innovations' Apache-2.0 "laya"
+  PyPI package (an open-weights alternative to the paid cloud "Jev" model). Runs entirely
+  in-process (no subprocess, no API key) once its optional extra is installed:
+  `uv sync --extra laya` (or `pip install task-cli[laya]`). Never a hard dependency and never
+  imported at module top — `task --help` and every other command stay dependency-free whether
+  or not it's installed. Not installed, its first-run HuggingFace model download fails (no
+  network/disk/rate-limit), or the model call itself errors (logged to stderr) → it reports
+  itself unreachable and the chain falls through to the NEXT configured provider — the only
+  provider kind that does. Security: the `{ laya: <value> }` value only decides whether this
+  entry becomes a laya provider at all — it is NEVER used to pick which model loads (always
+  the built-in `convaiinnovations/laya` checkpoint), since `classify.fallbacks` can come from
+  a repo-scoped `task.yaml`/`rig.yaml` that `task classify` — running inside the target repo
+  it's ticketing — must not trust with an arbitrary Hub id to download and execute in-process.
+  Put `laya` first in `fallbacks` (see the config block above) to try the free local model
+  before spending an API call.
+
+**Bias is to `change` on ambiguity between change/justAsk** — most questions to a dev agent
+are latent change requests; that bias never applies to a genuine `actionable` signal, which is
+only recognized via an explicit `actionable` verdict. `task classify "<text>" --create` is the
+entry point the `tg-cli` inbound hook calls.
 
 **Multi-ask detection** (`tasklib/classify.py`'s `detect_multi_ask`) splits a message that
 structurally bundles several distinct asks — a numbered/bulleted list, or clauses joined by an
@@ -720,8 +743,13 @@ classify:
     - { zai:         glm-4.6-flash }
     - { google:      gemini-2.5-flash }
     - { ollama:      qwen2.5:3b }
-    # - { laya: <model> }             # opt-in (config plumbing only — see Classification
-    # - { jev:  <model> }             # section above; unverified, no real endpoint call here)
+    # - { laya: local }               # opt-in: a REAL, free, local classifier (Convai
+    #                                 # Innovations' Apache-2.0 "laya" PyPI package, an
+    #                                 # open-weights alternative to the paid cloud "Jev"
+    #                                 # model) -- see "Classification" below for how it plugs
+    #                                 # into the provider chain and its `laya` extra.
+    # - { jev:  <model> }             # config plumbing only, unverified — no real endpoint
+    #                                 # call exists for jev in this repo yet
   bias: change
   route_process_to_harness: true     # `process`-classified `--create` items file a local
                                      # `harness tasks new` ticket instead of the product
