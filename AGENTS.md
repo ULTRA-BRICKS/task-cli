@@ -102,6 +102,24 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
 - **`render.py` is the single source of truth for the ticket body.** The §5 section template
   (fixed order) is the contract; fields are authoritative, the body is derived. Do not
   hand-format a body anywhere else. `validate_format()` is what the formatting gate calls.
+- **Deploy + follow-up traceability** (`deploy-followup-links`): `task change <id> --deployed
+  "<note>"` records that ACCEPTED work actually reached production — sets `Ticket.deployed`
+  (bool) / `deployed_at` (UTC ISO8601) / `deployed_note`, rendered as the §5 template's
+  `## Deploy` section (a FIXED slot, right after `## Screenshots` and before `## Links` —
+  `render()` always emits it, but `parse()` tolerates a pre-existing body with no `## Deploy`
+  heading at all, defaulting to not-deployed rather than crashing). Refused (clean `error:`,
+  non-zero exit, no backend write) unless the ticket's `state` is already `done` — this is a
+  plain guard in `cmd_change`, NOT a new `transitions.py` `State`: `deployed` is deliberately
+  orthogonal to `state` (a `done` ticket reopened to `in-progress` for a regression fix keeps
+  `deployed=True`, since a deploy DID happen historically). `task link <followup-id>
+  follow-up-of <original-id>` traces a later-discovered bug/regression back to the ticket that
+  shipped it — `tasklib/links.py`'s `follow-up-of`/`followed-up-by` relation pair, structurally
+  identical to `blocks`/`blocked-by` (two entries, asymmetric label strings, both directly
+  invocable) even though the documented workflow only ever calls `follow-up-of` by hand. Both
+  the `## Deploy` fields and the raw `links` dict are in `--json` output (`read`/`change`/
+  `list`) so a caller can walk the full request → ship → deploy → follow-up chain without a
+  second IPC mechanism — `task read <id> --json` IS the integration point (e.g. harness-cli's
+  `harness stats` shells out to it; it never imports `tasklib`).
 - **`task.yaml` is committed by default** (per-repo source of truth) and **overrides** the
   global `~/.config/task-cli/config.yaml`. Scope is by location, never a flag. The tool works
   with **zero config** on any GitHub repo (built-in defaults = github-issues, all gates on).
@@ -133,13 +151,52 @@ fake-backed test; do not special-case a backend anywhere in `cli.py`.
 
 ## Classification
 
-`task classify` resolves the **first available** model in the per-provider fallback chain
-(`classify.resolve_chain`, default head haiku) and shells out to
-`review just-ask "<prompt>" -m <model> --pool 1`. Availability = a provider key in env, or
-(ollama/laya) the daemon on PATH. Bias to `change` on ambiguity. The shell-out is the only
-effect; prompt-building and verdict-parsing are pure and tested without spawning `review`.
-`laya`/`jev` are additional provider-table entries (config plumbing only, unverified — no
-credentials/HTTP call exist for either in this repo; wiring the real call is `review`'s job).
+`task classify` resolution is **pluggable** (`tasklib/classifiers.py`, task-cli#206): a small
+`ClassifierProvider` protocol (`available() -> bool`, `classify(message, bias) ->
+Classification | None`, `label`) with two implementations. `build_classifier_chain` turns
+`classify.fallbacks` (a list of `{provider: model}` pairs) into an ordered list of providers —
+a `laya` entry becomes its own `LayaClassifier`; consecutive non-`laya` entries fold into one
+`ReviewCliClassifier` (so `classify.capability`'s manifest-head preference and
+`resolve_chain`'s own availability-walk apply to that run exactly as before). `_classify_one`
+walks the chain and uses the first provider that is BOTH available AND actually returns a
+`Classification` — a provider that looks reachable but fails at runtime returns `None` and the
+chain falls through to the next one, same as the pre-existing "no reachable provider" path.
+
+- **`ReviewCliClassifier`** — the original path, refactored in place, unchanged behavior:
+  resolves the **first available** model in the per-provider fallback chain
+  (`classify.resolve_chain`, default head haiku) and shells out to `review just-ask
+  "<prompt>" -m <model> --pool 1`. Availability = a provider key in env, or (ollama) the
+  daemon on PATH. The shell-out is the only effect; prompt-building and verdict-parsing are
+  pure and tested without spawning `review`. `resolve_chain`/`_run_review_just_ask` are
+  looked up on their owning module at call time (never cached), so this stays a thin,
+  behavior-preserving wrapper. `jev` is an additional provider-table entry (config plumbing
+  only, unverified — no credentials/HTTP call exist for it in this repo; wiring the real
+  call is `review`'s job).
+- **`LayaClassifier`** — task-cli#206's new backend: Convai Innovations' free, local,
+  Apache-2.0 "laya" PyPI package (an open-weights alternative to the paid cloud "Jev"
+  model). Runs entirely in-process — no subprocess, no API key, no `review` involvement —
+  via `laya.load(model_id).predict(message, questions) -> dict`. Optional dependency
+  (`pyproject.toml`'s `laya` extra, `uv sync --extra laya`), lazily imported inside
+  `_load_agent`/`classify` (never at this module's top — stdlib-only-at-import-time still
+  holds for every `tasklib/*` module). `available()` is `importlib.util.find_spec("laya") is
+  not None` (cheap, no import); `classify()` never raises — package missing, a first-run
+  HuggingFace download failure, or a `predict()`/result-mapping runtime error all yield
+  `None` (fall through, with a stderr diagnostic so a broken local install is observable)
+  instead of a crash or traceback. `laya` is DELIBERATELY ABSENT from `classify.py`'s
+  `_PROVIDER_MODEL_PREFIX`/`_LOCAL_DAEMON_PROVIDERS`/`_PROVIDER_KEY_ENV` tables (unlike
+  `jev`) — it never touches `resolve_chain`/`review` at all. SECURITY (two layers,
+  `tasklib/classifiers.py`): (1) `build_classifier_chain` NEVER threads a `{laya: <value>}`
+  fallback entry's value into `model_id` — that value only decides ROUTING (does this entry
+  become a `LayaClassifier`?). `classify.fallbacks` can come from a repo-scoped
+  `task.yaml`/`rig.yaml`, and `task classify` runs inside the target/foreign repo being
+  ticketed, so honoring an arbitrary configured Hub id would let a malicious checkout make
+  `task classify` download and run attacker-controlled model code in-process. `model_id`
+  always resolves to the fixed `_LAYA_DEFAULT_MODEL_ID`. (2) `_load_agent` ALSO refuses to
+  load whenever that fixed id already exists as a path relative to the current working
+  directory — `laya.load()`'s underlying `model_id_or_path` resolution treats an existing
+  local path as authoritative over the Hub, so an unguarded lookup would let a planted
+  `convaiinnovations/laya/` directory in the target repo shadow the real checkpoint (mirrors
+  `bin/task`'s existing cwd-import-shadowing posture).
 
 **SP / priority / process-vs-product** (`classify.parse_classification` → `Classification`):
 the SAME `review` round-trip that yields the verdict also yields three axes on a `change`
@@ -148,11 +205,13 @@ verdict (never surfaced for `actionable`/`justAsk`, which mint no ticket): `stor
 single-function fix, `3` moderate/single-file, `5` substantial/multi-file or new test infra,
 `8` large/new subsystem or design-heavy, `13` epic/major feature from scratch), `priority`
 (`P0`..`P3`), and `process_or_product` (`process` = a session-local/agent process step vs
-`product` = durable work). Each axis is parsed independently via its own `LABEL: value`
-sentinel regex (mirrors `_VERDICT_RE`); an axis that doesn't cleanly resolve biases to a FIXED
-safe default (`product`/`P2`/`3` — never caller-configurable, unlike the change/justAsk bias).
-`process_or_product` biases to `product` specifically because a mis-routed PROCESS ticket is
-far cheaper to fix than a silently DROPPED product ticket — never write to neither store.
+`product` = durable work). `ReviewCliClassifier` parses each axis independently via its own
+`LABEL: value` sentinel regex (mirrors `_VERDICT_RE`); `LayaClassifier` reads each axis's
+`choice` field off `laya`'s structured `predict()` reply instead. Either way, an axis that
+doesn't cleanly resolve biases to a FIXED safe default (`product`/`P2`/`3` — never
+caller-configurable, unlike the change/justAsk bias). `process_or_product` biases to
+`product` specifically because a mis-routed PROCESS ticket is far cheaper to fix than a
+silently DROPPED product ticket — never write to neither store.
 
 On `--create`, a `process`-classified item shells out to `harness tasks new --title=<derived>
 --body=<message>` (glued `=`-form, not a separate value token — the derived title/message can

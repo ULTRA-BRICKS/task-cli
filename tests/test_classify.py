@@ -840,25 +840,15 @@ def test_classify_prompt_documents_the_new_axes():
     assert "Respond with EXACTLY four lines" in p
 
 
-# ── laya / jev provider table entries (config plumbing only, unverified in this env) ───────
+# ── jev provider table entry (config plumbing only, unverified in this env) ────────────────
+# `laya` used to live here too (a speculative "review -m laya:<model>" daemon-on-PATH
+# provider that was NEVER actually wired to anything real). task-cli#206 replaced that
+# vaporware with a REAL local classifier (the `laya` PyPI package) that never touches
+# `resolve_chain`/`to_model_arg`/`provider_available` at all — see `tests/test_classifiers.py`.
 
 
-def test_to_model_arg_laya_and_jev():
-    assert to_model_arg("laya", "laya-fast-1") == "laya:laya-fast-1"
+def test_to_model_arg_jev():
     assert to_model_arg("jev", "jev-mini") == "jev:jev-mini"
-
-
-def test_provider_available_laya_checks_local_daemon_on_path(monkeypatch):
-    monkeypatch.setattr(
-        "tasklib.classify.shutil.which",
-        lambda name: "/usr/local/bin/laya" if name == "laya" else None,
-    )
-    assert provider_available("laya")
-
-
-def test_provider_available_laya_absent_without_daemon_on_path(monkeypatch):
-    monkeypatch.setattr("tasklib.classify.shutil.which", lambda _name: None)
-    assert not provider_available("laya")
 
 
 def test_provider_available_jev_reads_api_key_env():
@@ -869,28 +859,19 @@ def test_provider_available_jev_absent_without_key():
     assert not provider_available("jev", {})
 
 
-def test_resolve_chain_picks_reachable_laya_over_unreachable_jev(monkeypatch):
-    monkeypatch.setattr(
-        "tasklib.classify.shutil.which",
-        lambda name: "/usr/bin/laya" if name == "laya" else None,
-    )
-    fallbacks = [("jev", "jev-mini"), ("laya", "laya-fast-1")]
-    resolved = resolve_chain(fallbacks, {})
-    assert resolved is not None
-    assert resolved.provider == "laya"
-    assert resolved.model_arg == "laya:laya-fast-1"
-
-
-def test_resolve_chain_picks_reachable_jev_when_laya_daemon_absent(monkeypatch):
-    monkeypatch.setattr("tasklib.classify.shutil.which", lambda _name: None)
-    fallbacks = [("jev", "jev-mini"), ("laya", "laya-fast-1")]
+def test_resolve_chain_picks_reachable_jev():
+    fallbacks = [("anthropic", "claude-haiku-4-5"), ("jev", "jev-mini")]
     resolved = resolve_chain(fallbacks, {"JEV_API_KEY": "x"})
     assert resolved is not None
     assert resolved.provider == "jev"
     assert resolved.model_arg == "jev:jev-mini"
 
 
-def test_resolve_chain_none_when_laya_and_jev_both_unreachable(monkeypatch):
-    monkeypatch.setattr("tasklib.classify.shutil.which", lambda _name: None)
-    fallbacks = [("jev", "jev-mini"), ("laya", "laya-fast-1")]
-    assert resolve_chain(fallbacks, {}) is None
+def test_resolve_chain_laya_is_never_reachable_via_review_cli():
+    # `laya` is deliberately ABSENT from every review-cli provider table (task-cli#206) — a
+    # `classify.fallbacks` entry named `laya` must never resolve through this pure chain-
+    # walker at all (it is handled entirely by `tasklib.classifiers.build_classifier_chain`
+    # instead), even with every conceivable credential present.
+    fallbacks = [("laya", "local")]
+    env = {"JEV_API_KEY": "x", "ANTHROPIC_API_KEY": "x", "LAYA_API_KEY": "x"}
+    assert resolve_chain(fallbacks, env) is None

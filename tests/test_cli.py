@@ -2527,6 +2527,109 @@ def test_create_force_overrides_thin_impact(_inject_fake):
     assert "user-impact-quality" in body and "internal tool" in body
 
 
+
+# ── task change --deployed (deploy-followup-links) ──────────────────────────────────
+
+
+def test_change_deployed_refuses_when_ticket_is_not_done(capsys, _inject_fake):
+    main(_create_argv())
+    capsys.readouterr()
+
+    rc = main(["change", "#1", "--deployed", "shipped in v1.4.0"])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert "error:" in out
+    fetched = _inject_fake.get("#1")
+    assert fetched.deployed is False  # no backend write happened
+    assert fetched.deployed_at == ""
+
+
+def test_change_done_and_deployed_together_refuses_on_a_not_done_ticket(capsys, _inject_fake):
+    # Review finding (coverage gap, not a bug): the `--deployed` guard checks state AS
+    # FETCHED, before this same command's own `--done` mutation applies — so a combined
+    # `--done --deployed` call on a todo/in-progress ticket must refuse exactly like
+    # `--deployed` alone, not silently let `--done`'s own transition satisfy the guard.
+    main(_create_argv())
+    _ready_to_close(_inject_fake)
+    capsys.readouterr()
+
+    rc = main(["change", "#1", "--done", "--deployed", "shipped in v1.4.0"])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert "error:" in out
+    fetched = _inject_fake.get("#1")
+    assert fetched.state.value == "todo"  # --done never applied either
+    assert fetched.deployed is False
+    assert fetched.deployed_at == ""
+
+
+def test_change_deployed_succeeds_on_a_done_ticket(capsys, _inject_fake):
+    main(_create_argv())
+    _ready_to_close(_inject_fake)
+    main(["done", "#1"])
+    capsys.readouterr()
+
+    rc = main(["change", "#1", "--deployed", "shipped in v1.4.0"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "updated #1" in out
+    fetched = _inject_fake.get("#1")
+    assert fetched.deployed is True
+    assert fetched.deployed_at  # a plausible non-empty ISO timestamp
+    assert fetched.deployed_note == "shipped in v1.4.0"
+
+
+def test_change_deployed_json_shows_deployed_fields(capsys, _inject_fake):
+    main(_create_argv())
+    _ready_to_close(_inject_fake)
+    main(["done", "#1"])
+    capsys.readouterr()
+
+    rc = main(["change", "#1", "--deployed", "shipped in v1.4.0", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    import json
+
+    payload = json.loads(out)
+    assert payload["deployed"] is True
+    assert payload["deployed_at"]
+    assert payload["deployed_note"] == "shipped in v1.4.0"
+    from datetime import datetime
+
+    # a plausible ISO8601 UTC timestamp, not just a non-empty string
+    datetime.fromisoformat(payload["deployed_at"].replace("Z", "+00:00"))
+
+
+def test_change_deployed_note_with_newlines_is_collapsed_and_survives_round_trip(capsys, _inject_fake):
+    # Review finding: `## Deploy` renders/parses as a single line. A note carrying a literal
+    # newline used to break `_parse_deploy` on the NEXT fetch (silently reverting to
+    # deployed=False, losing deployed_at/deployed_note with no error) and a note whose second
+    # line started with `## ` forged a phantom section heading that corrupted an unrelated
+    # field on the round-trip `FakeBackend.update` performs. Both are closed by flattening the
+    # note's internal newlines before it's ever rendered.
+    main(_create_argv())
+    _ready_to_close(_inject_fake)
+    main(["done", "#1"])
+    capsys.readouterr()
+
+    rc = main(["change", "#1", "--deployed", "shipped\nsee ## What\nchangelog"])
+    assert rc == 0
+
+    fetched = _inject_fake.get("#1")
+    assert fetched.deployed is True
+    assert fetched.deployed_at
+    assert "\n" not in fetched.deployed_note
+    assert fetched.deployed_note == "shipped see ## What changelog"
+    # the embedded "## What"-shaped text never became a real section boundary: the ticket's
+    # actual `what` field (`_create_argv()`'s default, "the change") is untouched, not
+    # overwritten/dropped by the note's "## What"-looking substring.
+    assert fetched.what == "the change"
+
+
 # ── task link (task-cli#154) ─────────────────────────────────────────────────────────
 
 
@@ -2568,6 +2671,16 @@ def test_link_duplicate_of_is_one_sided(_inject_fake):
     # deliberately NOT mirrored (see tasklib/links.py's module docstring)
     assert "Duplicated by #1" not in _inject_fake.get("#2").links
     assert _inject_fake.get("#2").links == {}
+
+
+def test_link_follow_up_of_writes_asymmetric_mirrored_labels(_inject_fake):
+    main(_create_argv(**{"--title": "original ticket"}))  # #1
+    main(_create_argv(**{"--title": "regression follow-up"}))  # #2
+
+    rc = main(["link", "#2", "follow-up-of", "#1"])
+    assert rc == 0
+    assert _inject_fake.get("#2").links["Follow-up of #1"] == "https://fake/1"
+    assert _inject_fake.get("#1").links["Followed up by #2"] == "https://fake/2"
 
 
 def test_link_is_idempotent_on_rerun(capsys, _inject_fake):
@@ -5137,6 +5250,110 @@ def test_classify_json_output_includes_new_axes_only_on_change(capsys, monkeypat
 
 def test_classify_json_output_omits_new_axes_for_just_ask(capsys, monkeypatch, _inject_fake):
     monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "VERDICT: justAsk")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    rc = main(["classify", "how does this work?", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"verdict": "justAsk"}
+
+
+# ── task-cli#206: pluggable classifier chain, `laya` end-to-end wiring ─────────────────────
+
+
+def test_classify_laya_provider_used_when_available_skips_review_cli(
+    capsys, monkeypatch, _inject_fake
+):
+    # `classify.fallbacks: [{laya: local}, {anthropic: ...}]` -- when laya is reachable AND
+    # produces a classification, review-cli must never even be shelled out to.
+    from tasklib.classify import Classification, Verdict
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("laya", "local"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.LayaClassifier.available", lambda self: True)
+    monkeypatch.setattr(
+        "tasklib.classifiers.LayaClassifier.classify",
+        lambda self, message, bias: Classification(
+            verdict=Verdict.CHANGE,
+            process_or_product="product",
+            priority="P1",
+            story_points=5,
+        ),
+    )
+
+    def _never_called(model, prompt):
+        raise AssertionError("review-cli must not run when laya already classified")
+
+    monkeypatch.setattr(cli, "_run_review_just_ask", _never_called)
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "verdict": "change",
+        "process_or_product": "product",
+        "priority": "P1",
+        "story_points": 5,
+    }
+
+
+def test_classify_laya_unavailable_falls_through_to_review_cli(
+    capsys, monkeypatch, _inject_fake
+):
+    # laya configured but not installed/reachable -> falls through to the review-cli chain,
+    # exactly the graceful-degradation contract task-cli#206 requires.
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("laya", "local"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.LayaClassifier.available", lambda self: False)
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "change"
+
+
+def test_classify_laya_runtime_failure_falls_through_to_review_cli(
+    capsys, monkeypatch, _inject_fake
+):
+    # laya reports itself available (package importable) but fails at RUNTIME (e.g. a model
+    # download error) -- `classify()` returning `None` must fall through to the next provider,
+    # not bias-default straight away while a real review-cli provider is still reachable.
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("laya", "local"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.LayaClassifier.available", lambda self: True)
+    monkeypatch.setattr(
+        "tasklib.classifiers.LayaClassifier.classify", lambda self, message, bias: None
+    )
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "justAsk")
     monkeypatch.setattr(
         "tasklib.classify.resolve_chain",
         lambda fallbacks=None, env=None, **_kw: __import__(

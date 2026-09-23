@@ -3,8 +3,9 @@
 Pure, stdlib-only — no network, no filesystem. Two independent pieces (task-cli#154):
 
 1. **`task link <id> <relation> <other-id>`** writes a structured entry into `ticket.links`
-   (the same dict `## Links` already renders — see `render.py`) for one of `blocks` /
-   `blocked-by` / `relates-to` / `duplicate-of`. `plan_link` decides WHAT to write (on which
+   (the same dict `## Links` already renders — see `render.py`) for one of the relations in
+   `RELATIONS` (`blocks` / `blocked-by` / `relates-to` / `duplicate-of` / `follow-up-of` /
+   `followed-up-by` — see "Mirroring" below). `plan_link` decides WHAT to write (on which
    ticket, under which key, pointing at which URL); `cli.cmd_link` does the actual fetch/update.
 2. **The post-`task new` nudge** does a cheap same-repo relatedness scan (title-keyword and
    label overlap — no embeddings, no fuzzy NLP) over currently-open tickets and suggests
@@ -23,16 +24,21 @@ pair naturally idempotent (same key, same value -> `apply_entry` reports no chan
 
 ## Mirroring
 
-`blocks`/`blocked-by` are inverses (A blocks B implies B is blocked-by A) and `relates-to` is
-symmetric (A relates-to B implies B relates-to A) — `plan_link` returns entries for BOTH tickets
-for those three relations. `duplicate-of` is deliberately NOT mirrored: "A is a duplicate of B"
-names B as the canonical ticket, and auto-adding a reverse "is duplicated by A" onto B has two
-costs neither `blocks` nor `relates-to` carries — it can accumulate many entries on a popular
-canonical ticket every time something gets marked a dupe of it (those two are typically 1:1
-pairs), and a hasty `duplicate-of` call by the wrong party (A is not really a dup of B) writes an
-assertion onto B — a ticket the caller may not even be looking at — that nobody reviewing B would
-think to double-check. The one-sided form (only A's `## Links` gets `Duplicate of` -> B) already
-gives the same audit trail without those costs.
+`blocks`/`blocked-by` are inverses (A blocks B implies B is blocked-by A), `follow-up-of`/
+`followed-up-by` are inverses the same way (A is a follow-up of B implies B is followed up by
+A — deploy-followup-links, tracing a regression found after a ticket shipped back to the
+original), and `relates-to` is symmetric (A relates-to B implies B relates-to A) — `plan_link`
+returns entries for BOTH tickets for all of those relations. Like `blocks`/`blocked-by`, and
+unlike the symmetric `relates-to` (identical `"Relates to #<id>"` string on both sides),
+`follow-up-of`/`followed-up-by` write GENUINELY DIFFERENT label strings on each side
+(`"Follow-up of #<id>"` vs `"Followed up by #<id>"`). `duplicate-of` is deliberately NOT
+mirrored: "A is a duplicate of B" names B as the canonical ticket, and auto-adding a reverse "is
+duplicated by A" onto B has two costs neither `blocks` nor `relates-to` carries — it can
+accumulate many entries on a popular canonical ticket every time something gets marked a dupe of
+it (those two are typically 1:1 pairs), and a hasty `duplicate-of` call by the wrong party (A is
+not really a dup of B) writes an assertion onto B — a ticket the caller may not even be looking
+at — that nobody reviewing B would think to double-check. The one-sided form (only A's `## Links`
+gets `Duplicate of` -> B) already gives the same audit trail without those costs.
 
 Not validated: nothing stops a caller from writing a contradictory pair (`task link A blocks B`
 then `task link B blocks A`), which leaves both tickets claiming to both block and be blocked by
@@ -63,6 +69,12 @@ _LABELS: dict[str, str] = {
     "blocked-by": "Blocked by",
     "relates-to": "Relates to",
     "duplicate-of": "Duplicate of",
+    # Traceability past `done`: a ticket found to regress an already-shipped one links back
+    # `follow-up-of` the original (task-cli deploy-followup-links). Structurally identical to
+    # `blocks`/`blocked-by` — two entries, asymmetric label strings, both directly invocable —
+    # even though the documented workflow only ever calls the `follow-up-of` direction by hand.
+    "follow-up-of": "Follow-up of",
+    "followed-up-by": "Followed up by",
 }
 
 # Derived from _LABELS (review finding, task-cli#154 round 3) so the relation set has exactly
@@ -75,6 +87,8 @@ _INVERSE: dict[str, str] = {
     "blocks": "blocked-by",
     "blocked-by": "blocks",
     "relates-to": "relates-to",
+    "follow-up-of": "followed-up-by",
+    "followed-up-by": "follow-up-of",
 }
 
 

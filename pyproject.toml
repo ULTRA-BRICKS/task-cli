@@ -17,6 +17,11 @@ dependencies = ["pyyaml"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+# task-cli#206: the LayaClassifier backend (tasklib/classifiers.py) — a real, local, free
+# classifier, lazily imported and never a hard dependency (`task --help` never needs it).
+# Upper-bounded: this module hand-parses `Agent.predict()`'s raw dict envelope, which isn't
+# a versioned/stable public contract yet.
+laya = ["laya>=0.3.7,<0.4"]
 
 [project.scripts]
 task = "tasklib.cli:main"

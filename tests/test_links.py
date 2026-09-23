@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tasklib.links import (
+    RELATIONS,
     LinkEntry,
     apply_entry,
     find_related_candidates,
@@ -92,8 +93,14 @@ def test_apply_entry_does_not_mutate_the_input_dict_when_it_does_change():
 
 
 def test_linked_other_ids_extracts_ids_from_structured_keys():
-    links = {"Blocks #2": "https://x/2", "Blocked by HYP-9": "https://x/9", "PR": "https://x/pr"}
-    assert linked_other_ids(links) == {"#2", "HYP-9"}
+    links = {
+        "Blocks #2": "https://x/2",
+        "Blocked by HYP-9": "https://x/9",
+        "Follow-up of #7": "https://x/7",
+        "Followed up by HYP-1": "https://x/1",
+        "PR": "https://x/pr",
+    }
+    assert linked_other_ids(links) == {"#2", "HYP-9", "#7", "HYP-1"}
 
 
 def test_linked_other_ids_empty_when_no_structured_entries():
@@ -182,3 +189,35 @@ def test_results_capped_at_limit_and_ranked_by_overlap():
     ]
     found = find_related_candidates(new, others, limit=2)
     assert [c.ticket.id for c in found] == ["#2", "#3"]
+
+
+# ── follow-up-of (deploy/follow-up traceability, task-cli deploy-followup-links) ────────
+
+
+def test_link_key_follow_up_of_shape():
+    assert link_key("follow-up-of", "#7") == "Follow-up of #7"
+    assert link_key("followed-up-by", "#12") == "Followed up by #12"
+
+
+def test_mirrors_follow_up_of():
+    assert mirrors("follow-up-of") == "followed-up-by"
+    assert mirrors("followed-up-by") == "follow-up-of"
+
+
+def test_plan_link_follow_up_of_writes_asymmetric_mirrored_labels():
+    # A (the follow-up ticket) links follow-up-of B (the original) — the follow-up ticket
+    # gets "Follow-up of #B", the original gets "Followed up by #A" (NOT the same string on
+    # both sides, unlike the symmetric relates-to case).
+    entries = plan_link("#2", "https://x/2", "follow-up-of", "#1", "https://x/1")
+    assert entries == [
+        LinkEntry("#2", "Follow-up of #1", "https://x/1"),
+        LinkEntry("#1", "Followed up by #2", "https://x/2"),
+    ]
+
+
+def test_every_relation_mirrors_except_duplicate_of():
+    # review finding (GLM, deploy-followup-links): pins the mirroring set itself, so a future
+    # relation added to _LABELS with no corresponding _INVERSE entry fails LOUDLY here instead
+    # of silently behaving like duplicate-of (one-sided) with zero test failures.
+    mirrored = {r for r in RELATIONS if mirrors(r) is not None}
+    assert mirrored == set(RELATIONS) - {"duplicate-of"}

@@ -118,7 +118,8 @@ def test_validate_format_flags_missing_section():
 def test_validate_format_flags_out_of_order():
     body = (
         "## Why (motivation)\nx\n\n## What\ny\n\n## User impact\nz\n\n## Cost of inaction\nc\n\n"
-        "## Acceptance criteria\n- [ ] a\n\n## Screenshots\n(none)\n\n## Links\n- (none)\n"
+        "## Acceptance criteria\n- [ ] a\n\n## Screenshots\n(none)\n\n## Deploy\nDeployed: no\n\n"
+        "## Links\n- (none)\n"
     )
     problems = validate_format(body)
     assert any("out of order" in p for p in problems)
@@ -168,6 +169,82 @@ def test_parse_falls_back_to_base_due_when_body_omits_it():
     base = Ticket(id="#1", due="2026-08-15")
     parsed = parse(render(_full_ticket()), base)  # rendered body has no Due section
     assert parsed.due == "2026-08-15"
+
+
+# ── deploy (deploy-followup-links: task past done -> deployed -> follow-up) ─────────
+
+
+def test_deploy_section_is_a_fixed_required_section():
+    body = render(_full_ticket())
+    assert "## Deploy" in body
+    positions = [body.index(f"## {s}") for s in SECTIONS]
+    assert positions == sorted(positions)  # Deploy sits between Screenshots and Links
+    assert body.index("## Screenshots") < body.index("## Deploy") < body.index("## Links")
+
+
+def test_deploy_section_renders_not_deployed_by_default():
+    body = render(_full_ticket())
+    assert "## Deploy\nDeployed: no" in body
+    assert parse(body).deployed is False
+
+
+def test_deploy_section_round_trips_when_deployed():
+    t = replace(
+        _full_ticket(),
+        deployed=True,
+        deployed_at="2026-09-22T10:00:00Z",
+        deployed_note="shipped in v1.4.0",
+    )
+    body = render(t)
+    assert "## Deploy\nDeployed: yes (2026-09-22T10:00:00Z) — shipped in v1.4.0" in body
+    parsed = parse(body)
+    assert parsed.deployed is True
+    assert parsed.deployed_at == "2026-09-22T10:00:00Z"
+    assert parsed.deployed_note == "shipped in v1.4.0"
+
+
+def test_deploy_section_round_trips_deployed_with_no_note():
+    t = replace(_full_ticket(), deployed=True, deployed_at="2026-09-22T10:00:00Z")
+    body = render(t)
+    assert "## Deploy\nDeployed: yes (2026-09-22T10:00:00Z)" in body
+    parsed = parse(body)
+    assert parsed.deployed is True
+    assert parsed.deployed_at == "2026-09-22T10:00:00Z"
+    assert parsed.deployed_note == ""
+
+
+def test_deploy_does_not_break_the_formatting_gate():
+    t = replace(_full_ticket(), deployed=True, deployed_at="2026-09-22T10:00:00Z")
+    assert validate_format(render(t)) == []
+    assert validate_format(render(_full_ticket())) == []
+
+
+def test_parse_tolerates_a_pre_existing_ticket_body_with_no_deploy_section():
+    # every ticket rendered before this field existed has no "## Deploy" heading at all —
+    # parse() must never crash and must default to not-deployed (mirrors the Links/Skipped
+    # gates tolerance-of-absence pattern).
+    body = (
+        "## What\nx\n\n## Why (motivation)\nx\n\n## User impact\nx\n\n"
+        "## Cost of inaction\nx\n\n## Acceptance criteria\n- [ ] a\n\n"
+        "## Screenshots\n(none)\n\n## Links\n- (none)\n"
+    )
+    parsed = parse(body)
+    assert parsed.deployed is False
+    assert parsed.deployed_at == ""
+    assert parsed.deployed_note == ""
+
+
+def test_parse_falls_back_to_base_deploy_fields_when_body_omits_the_section():
+    base = Ticket(id="#1", deployed=True, deployed_at="2026-09-01T00:00:00Z", deployed_note="n")
+    old_body = (
+        "## What\nx\n\n## Why (motivation)\nx\n\n## User impact\nx\n\n"
+        "## Cost of inaction\nx\n\n## Acceptance criteria\n- [ ] a\n\n"
+        "## Screenshots\n(none)\n\n## Links\n- (none)\n"
+    )
+    parsed = parse(old_body, base)
+    assert parsed.deployed is True
+    assert parsed.deployed_at == "2026-09-01T00:00:00Z"
+    assert parsed.deployed_note == "n"
 
 
 # ── Linear's server-side reformatting round-trip (HYP-1355/1356/1398) ───────────────

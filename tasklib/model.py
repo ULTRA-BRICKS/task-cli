@@ -235,6 +235,30 @@ class Ticket:
     # edit, and leaves the native status untouched in the latter case (UB-25).
     backend_read_state: str = ""
 
+    # Also appended last (same reasoning as ``due`` above). Whether this ticket has actually
+    # been deployed to production, PAST the ``done``/accepted state — orthogonal to ``state``
+    # on purpose: a ticket can be ``done`` and later reopened to ``in-progress`` for a
+    # regression fix while ``deployed`` stays ``True``, recording that a deploy DID happen
+    # historically (deploy-followup-links). Set only via ``task change <id> --deployed
+    # "<note>"``, which refuses when ``state`` isn't ``done`` (see ``cli.cmd_change``) — never
+    # a ``transitions.py`` state, so ``LEGAL_TRANSITIONS`` needs no change. Rendered as the
+    # ``## Deploy`` section (``render.py``); "" / ``False`` defaults round-trip cleanly for
+    # every ticket created before this field existed.
+    deployed: bool = False
+
+    # Also appended last (same reasoning as ``due`` above). UTC ISO8601 timestamp of the
+    # ``task change --deployed`` call that set :attr:`deployed`; "" when not deployed.
+    deployed_at: str = ""
+
+    # Also appended last (same reasoning as ``due`` above). The free-text note passed to
+    # ``task change <id> --deployed "<note>"`` (e.g. "shipped in v1.4.0", "rolled out to
+    # prod via gh ship #123"); "" when not deployed or no note was given. Kept as its own
+    # field (not hand-formatted only into the body) so it survives every subsequent
+    # ``render(ticket)`` re-render the same way ``skips`` reasons and ``Criterion.force_reason``
+    # do — render.py is the single source of truth for the body, so anything only ever written
+    # into rendered text and never read back into a field is lost on the next backend update.
+    deployed_note: str = ""
+
     def __post_init__(self) -> None:
         # Coerce plain-string criteria to unchecked Criterion objects. This keeps construction
         # ergonomic (`Ticket(acceptance=["a", "b"])`) while the rest of the code — render, parse,
