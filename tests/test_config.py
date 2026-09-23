@@ -50,6 +50,20 @@ def test_classify_fallbacks_parsed_to_pairs(tmp_path, monkeypatch):
     assert chain[0][0] == "anthropic"  # default head
 
 
+def test_classify_fallbacks_accepts_a_laya_entry(tmp_path, monkeypatch):
+    # task-cli#206: `classify.fallbacks` is provider-name-agnostic (config.py never allowlists
+    # provider names) — a `laya` entry parses to a plain `("laya", <model>)` pair exactly like
+    # every other provider, ready for `tasklib.classifiers.build_classifier_chain` to route.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nclassify:\n  fallbacks:\n    - { laya: local }\n"
+        "    - { anthropic: claude-haiku-4-5 }\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_fallbacks == [("laya", "local"), ("anthropic", "claude-haiku-4-5")]
+
+
 def test_classify_capability_default_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     cfg = load(tmp_path)
