@@ -727,6 +727,37 @@ def _load(args: argparse.Namespace):
         cfg = load(repo_root, explicit_config=explicit)
     except ConfigError as exc:
         raise _UserError(str(exc)) from exc
+
+    # Zero-config Forgejo routing: the built-in default is github-issues, but a
+    # repository whose origin lives on a host already trusted by fj is
+    # unambiguously Forgejo for repo:auto. Any explicitly configured backend (a
+    # `backend:` in any config layer, even `github-issues`), explicit CLI
+    # routing/pins AND an explicitly preconfigured dormant forgejo url/repo win.
+    forgejo_cfg = cfg.section("forgejo")
+    if (
+        not getattr(args, "backend", None)
+        and not getattr(args, "repo", None)
+        and not cfg.explicit_backend
+        and cfg.backend == "github-issues"
+        and str(cfg.section("github").get("repo", "auto")).strip() == "auto"
+        and not str(forgejo_cfg.get("url", "")).strip()
+        and str(forgejo_cfg.get("repo", "auto")).strip() == "auto"
+    ):
+        from .backends.forgejo import autodetect_forgejo_origin
+
+        origin = autodetect_forgejo_origin(repo_root)
+        if origin:
+            cfg.data["backend"] = "forgejo"
+            cfg.data.setdefault("forgejo", {})["url"] = origin
+            cfg.data["forgejo"]["repo"] = "auto"
+            cfg.layers.append(f"autodetect:forgejo:{origin}")
+            try:
+                from .config import validate
+
+                validate(cfg.data)
+            except ConfigError as exc:
+                raise _UserError(str(exc)) from exc
+
     if getattr(args, "backend", None):
         cfg.data["backend"] = args.backend
         try:

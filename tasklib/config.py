@@ -604,6 +604,13 @@ def _global_rig_task_overlay(env: dict[str, str]) -> tuple[dict[str, Any], Path]
     return overlay, path
 
 
+def _merge_layer(base: dict[str, Any], over: dict[str, Any], explicit: dict[str, bool]) -> dict[str, Any]:
+    """:func:`_deep_merge` for one config layer, recording whether it set ``backend``."""
+    if isinstance(over, dict) and "backend" in over:
+        explicit["backend"] = True
+    return _deep_merge(base, over)
+
+
 def _deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for k, v in over.items():
@@ -621,6 +628,9 @@ class LoadedConfig:
     data: dict[str, Any]
     repo_root: Path
     layers: list[str] = field(default_factory=list)
+    # Whether any config layer (not the built-in default) set `backend:`. Zero-config routing
+    # (e.g. the CLI's Forgejo auto-detection) only applies when this is False.
+    explicit_backend: bool = False
 
     @property
     def backend(self) -> str:
@@ -641,7 +651,12 @@ class LoadedConfig:
         import copy
 
         merged = _deep_merge(copy.deepcopy(self.data), overlay)
-        return LoadedConfig(data=merged, repo_root=self.repo_root, layers=list(self.layers))
+        return LoadedConfig(
+            data=merged,
+            repo_root=self.repo_root,
+            layers=list(self.layers),
+            explicit_backend=self.explicit_backend or "backend" in overlay,
+        )
 
     @property
     def enforce(self) -> dict[str, Any]:
@@ -799,6 +814,7 @@ def load(
     # later mutation (e.g. cli `--repo` writing cfg.data["github"]["repo"]) would leak into
     # the module-global DEFAULTS for the whole process (and contaminate across main() calls).
     merged: dict[str, Any] = copy.deepcopy(DEFAULTS)
+    explicit = {"backend": False}  # set by _merge_layer when a real layer names a backend
     layers: list[str] = ["builtin-defaults"]
 
     if include_global:
@@ -808,12 +824,12 @@ def load(
         # outranks a rig-provisioned default), not the reverse.
         rig_global_overlay, rig_global_path = _global_rig_task_overlay(env)
         if rig_global_overlay:
-            merged = _deep_merge(merged, rig_global_overlay)
+            merged = _merge_layer(merged, rig_global_overlay, explicit)
             layers.append(f"rig-global:{rig_global_path}")
 
         gpath = global_config_path(env)
         if gpath.is_file():
-            merged = _deep_merge(merged, _load_yaml(gpath))
+            merged = _merge_layer(merged, _load_yaml(gpath), explicit)
             layers.append(f"global:{gpath}")
 
     # Ancestor rig.yaml task: blocks, outer → inner — folder-level routing defaults (e.g.
@@ -825,7 +841,7 @@ def load(
             ancestor_path, tolerant=False, source_label=str(ancestor_path), strip_code_prefix=True
         )
         if ancestor_overlay:
-            merged = _deep_merge(merged, ancestor_overlay)
+            merged = _merge_layer(merged, ancestor_overlay, explicit)
             layers.append(f"rig-ancestor:{ancestor_path}")
 
     # rig.yaml task: block — the per-repo tracker selector, below the native task.yaml so a
@@ -834,19 +850,19 @@ def load(
     rig_path = rig_config_path(repo_root)
     repo_overlay = _load_rig_task_layer(rig_path, tolerant=True, source_label=RIG_CONFIG_FILENAME)
     if repo_overlay:
-        merged = _deep_merge(merged, repo_overlay)
+        merged = _merge_layer(merged, repo_overlay, explicit)
         layers.append(f"rig:{rig_path}")
 
     if explicit_config is not None:
         rpath = explicit_config.resolve()
         if not rpath.is_file():
             raise ConfigError(f"--config file not found: {rpath}")
-        merged = _deep_merge(merged, _load_yaml(rpath))
+        merged = _merge_layer(merged, _load_yaml(rpath), explicit)
         layers.append(f"config:{rpath}")
     else:
         rpath = repo_config_path(repo_root)
         if rpath.is_file():
-            merged = _deep_merge(merged, _load_yaml(rpath))
+            merged = _merge_layer(merged, _load_yaml(rpath), explicit)
             layers.append(f"repo:{rpath}")
 
     # Highest-precedence layer: a personal, per-machine override for the attachment strategy
@@ -883,7 +899,9 @@ def load(
         layers.append(f"env:{ATTACHMENT_MODE_ENV_VAR}={override}")
 
     validate(merged)
-    return LoadedConfig(data=merged, repo_root=repo_root, layers=layers)
+    return LoadedConfig(
+        data=merged, repo_root=repo_root, layers=layers, explicit_backend=explicit["backend"]
+    )
 
 
 def validate(data: dict[str, Any]) -> None:

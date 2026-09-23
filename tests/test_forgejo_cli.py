@@ -3,11 +3,13 @@ routing through the cwd / ``projects:`` registry. Hermetic — ``get_backend`` i
 
 from __future__ import annotations
 
+import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
-from tasklib.cli import main
+from tasklib.cli import _load, main
 from tasklib.model import State, Ticket
 
 
@@ -218,6 +220,195 @@ def test_github_default_with_forgejo_origin_suggests_the_forgejo_backend(tmp_pat
     out = capsys.readouterr().out
     assert rc == 2
     assert "backend: forgejo" in out
+
+
+def test_github_default_auto_routes_a_known_forgejo_origin_via_fj_credentials(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    _write_fj_key(home, "git.hyperide.ai")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "remote",
+            "add",
+            "origin",
+            "https://alex-mextner@git.hyperide.ai/ultrabricks/x.git",
+        ],
+        check=True,
+    )
+
+    rec = _Recorder(_Commentable())
+    monkeypatch.setattr("tasklib.backends.get_backend", rec)
+    assert main(["read", "#4", "-C", str(repo)]) == 0
+
+    (cfg,) = rec.configs
+    assert cfg.backend == "forgejo"
+    assert cfg.section("forgejo")["url"] == "https://git.hyperide.ai"
+    assert cfg.section("forgejo")["repo"] == "auto"
+    assert any(layer == "autodetect:forgejo:https://git.hyperide.ai" for layer in cfg.layers)
+
+
+def _write_fj_key(home, host):
+    keys = home / "Library" / "Application Support" / "forgejo-cli.forgejo-cli" / "keys.json"
+    keys.parent.mkdir(parents=True, exist_ok=True)
+    keys.write_text(json.dumps({"hosts": {host: {"token": "test-token"}}}), encoding="utf-8")
+
+
+def test_auto_route_preserves_nonstandard_forgejo_https_port(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    _write_fj_key(home, "git.hyperide.ai:3000")
+
+    repo = tmp_path / "repo-port"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://git.hyperide.ai:3000/ultrabricks/x.git"],
+        check=True,
+    )
+    rec = _Recorder(_Commentable())
+    monkeypatch.setattr("tasklib.backends.get_backend", rec)
+
+    assert main(["read", "#4", "-C", str(repo)]) == 0
+    assert rec.configs[0].backend == "forgejo"
+    assert rec.configs[0].section("forgejo")["url"] == "https://git.hyperide.ai:3000"
+
+
+def test_auto_route_supports_scp_style_ssh_origin(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    _write_fj_key(home, "git.hyperide.ai")
+
+    repo = tmp_path / "repo-ssh"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "git@git.hyperide.ai:ultrabricks/x.git"],
+        check=True,
+    )
+    rec = _Recorder(_Commentable())
+    monkeypatch.setattr("tasklib.backends.get_backend", rec)
+
+    assert main(["read", "#4", "-C", str(repo)]) == 0
+    assert rec.configs[0].backend == "forgejo"
+    assert rec.configs[0].section("forgejo")["url"] == "https://git.hyperide.ai"
+
+
+def test_auto_route_ignores_a_non_github_host_without_fj_credentials(tmp_path, monkeypatch):
+    # Only a host fj already holds a key for is treated as Forgejo; an arbitrary git server
+    # (GitLab, Bitbucket, a key for a different host) keeps the github-issues default.
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    monkeypatch.delenv("FORGEJO_TOKEN", raising=False)
+    monkeypatch.delenv("FORGEJO_URL", raising=False)
+    _write_fj_key(home, "git.hyperide.ai")
+    repo = tmp_path / "repo-gitlab"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://gitlab.example.com/team/x.git"],
+        check=True,
+    )
+    rec = _Recorder(_Commentable())
+    monkeypatch.setattr("tasklib.backends.get_backend", rec)
+    main(["read", "#4", "-C", str(repo)])
+    assert rec.configs == [] or rec.configs[0].backend == "github-issues"
+    assert all(cfg.section("forgejo").get("url", "") == "" for cfg in rec.configs)
+
+
+@pytest.mark.parametrize(
+    "remote",
+    ["https://git.hyperide.ai:70000/ultrabricks/x.git", "https://git.hyperide.ai:abc/ultrabricks/x.git"],
+)
+def test_auto_route_survives_a_malformed_origin_port(remote, tmp_path, monkeypatch):
+    # Auto-detection runs on every command; a typo'd origin port must degrade to "no
+    # detection", never abort unrelated commands.
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    _write_fj_key(home, "git.hyperide.ai")
+    repo = tmp_path / "repo-badport"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", remote], check=True)
+    cfg = _load(SimpleNamespace(cwd=str(repo), config=None, backend=None, repo=None))
+    assert cfg.backend == "github-issues"
+
+
+def test_auto_route_does_not_carry_a_plain_http_port_into_https(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    _write_fj_key(home, "git.hyperide.ai")
+    repo = tmp_path / "repo-http"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "http://git.hyperide.ai:80/ultrabricks/x.git"],
+        check=True,
+    )
+    cfg = _load(SimpleNamespace(cwd=str(repo), config=None, backend=None, repo=None))
+    assert cfg.backend == "forgejo"
+    assert cfg.section("forgejo")["url"] == "https://git.hyperide.ai"
+
+
+def test_auto_route_never_overrides_an_explicitly_configured_backend(tmp_path, monkeypatch):
+    # An explicit `backend: github-issues` (e.g. a repo that deliberately files on its GitHub
+    # mirror) wins over zero-config Forgejo detection, even when fj holds a token for the host.
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    _write_fj_key(home, "git.hyperide.ai")
+    repo = tmp_path / "repo-explicit"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://git.hyperide.ai/ultrabricks/x.git"],
+        check=True,
+    )
+    (repo / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\ngithub: {repo: auto}\n", encoding="utf-8"
+    )
+    rec = _Recorder(_Commentable())
+    monkeypatch.setattr("tasklib.backends.get_backend", rec)
+    main(["read", "#4", "-C", str(repo)])
+    assert rec.configs == [] or rec.configs[0].backend == "github-issues"
+    assert all("autodetect" not in layer for cfg in rec.configs for layer in cfg.layers)
+
+
+def test_auto_route_does_not_overwrite_explicit_dormant_forgejo_pin(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    _write_fj_key(home, "git.hyperide.ai")
+
+    repo = tmp_path / "repo-pinned"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://git.hyperide.ai/ultrabricks/x.git"],
+        check=True,
+    )
+    (repo / "task.yaml").write_text(
+        "version: 1\n"
+        "backend: github-issues\n"
+        "forgejo:\n"
+        "  url: https://other-forgejo.example\n"
+        "  repo: pinned/team\n",
+        encoding="utf-8",
+    )
+    cfg = _load(SimpleNamespace(cwd=str(repo), config=None, backend=None, repo=None))
+    assert cfg.backend == "github-issues"
+    assert cfg.section("forgejo")["url"] == "https://other-forgejo.example"
+    assert cfg.section("forgejo")["repo"] == "pinned/team"
 
 
 def test_comment_body_from_stdin(tmp_path, monkeypatch):

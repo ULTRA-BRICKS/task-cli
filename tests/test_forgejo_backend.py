@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from tasklib.backends import BackendError, TicketBackend, backend_coordinate, get_backend
-from tasklib.backends.forgejo import ForgejoBackend
+from tasklib.backends.forgejo import ForgejoBackend, _git_origin_url_from_config
 from tasklib.config import ConfigError, load, validate
 from tasklib.credentials import CredentialError, forgejo_token
 from tasklib.model import State, Ticket
@@ -816,3 +816,26 @@ def test_forgejo_body_change_on_ui_spaced_managed_body_is_accepted(forge):
     b.update(t)
     patch = next(c for c in forge.calls if c[0] == "PATCH")
     assert "## Skipped gates" in patch[2]["body"]
+
+def test_git_origin_config_reader_handles_linked_worktree_commondir(tmp_path):
+    repo = tmp_path / "repo"
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://git.hyperide.ai/ultrabricks/task-cli.git"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+         "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "seed"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-qb", "linked-test", str(wt)],
+        check=True,
+    )
+
+    assert _git_origin_url_from_config(wt) == (
+        "https://git.hyperide.ai/ultrabricks/task-cli.git"
+    )

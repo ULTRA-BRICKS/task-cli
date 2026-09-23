@@ -37,6 +37,7 @@ Invariants (verified against the live Forgejo 16.0.3 Swagger, not memory):
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import re
@@ -44,6 +45,7 @@ import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from ..model import State, Ticket
@@ -629,6 +631,94 @@ def _asset_url(raw: bytes) -> str:
 
 
 # ── repository resolution ───────────────────────────────────────────────────────────────
+
+
+def autodetect_forgejo_origin(repo_root, env: dict[str, str] | None = None) -> str | None:
+    """Return the repo's Forgejo HTTPS origin when the git origin host is already trusted by
+    the user's fj credentials; otherwise return None.
+
+    This is credential-backed rather than treating every non-github.com remote as Forgejo:
+    GitLab, Bitbucket and arbitrary git servers must not be reclassified. No network call is
+    made; forgejo_token only checks the origin-bound env pair / fj key store.
+    """
+    from ..credentials import CredentialError, forgejo_token
+
+    remote = _git_origin_url_from_config(repo_root)
+    if not remote:
+        return None
+    cleaned = remote.strip().removesuffix("/").removesuffix(".git")
+    host = ""
+    api_port = ""
+    if "://" in cleaned:
+        parsed = safe_urlparse(cleaned)
+        if parsed is None or not parsed.hostname:
+            return None
+        host = parsed.hostname.lower()
+        # Preserve an HTTPS remote's non-default Forgejo web/API port. An ssh:// port is
+        # the SSH transport port and a plain http:// port is not an HTTPS port, so
+        # neither is reused.
+        if parsed.scheme.lower() == "https" and parsed.port and parsed.port != 443:
+            api_port = f":{parsed.port}"
+    else:
+        host, _path = _split_remote(cleaned)
+    if not host or host == "github.com":
+        return None
+    origin = f"https://{host}{api_port}"
+    try:
+        forgejo_token(origin, env)
+    except CredentialError:
+        return None
+    return origin
+
+
+def _git_origin_url_from_config(repo_root) -> str | None:
+    """Read the origin URL without spawning git.
+
+    Auto-detection runs during generic CLI setup (including process-only `task classify`),
+    so it must be observational: no extra subprocesses and no dependency on git being on PATH.
+    A linked worktree's .git file points at its per-worktree gitdir; `commondir` then points
+    back to the shared git directory that owns config.
+    """
+    root = Path(repo_root)
+    dotgit = root / ".git"
+    git_dir: Path
+    if dotgit.is_dir():
+        git_dir = dotgit
+    elif dotgit.is_file():
+        try:
+            marker = dotgit.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        prefix = "gitdir:"
+        if not marker.lower().startswith(prefix):
+            return None
+        raw = marker[len(prefix):].strip()
+        git_dir = Path(raw)
+        if not git_dir.is_absolute():
+            git_dir = (root / git_dir).resolve()
+    else:
+        return None
+
+    common_dir = git_dir
+    commondir = git_dir / "commondir"
+    if commondir.is_file():
+        try:
+            raw_common = commondir.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if raw_common:
+            candidate = Path(raw_common)
+            common_dir = candidate if candidate.is_absolute() else (git_dir / candidate).resolve()
+
+    config_path = common_dir / "config"
+    try:
+        with config_path.open("r", encoding="utf-8", errors="replace") as fh:
+            parser = configparser.RawConfigParser(strict=False)
+            parser.read_file(fh)
+        value = parser.get('remote "origin"', "url", fallback="").strip()
+    except (OSError, configparser.Error):
+        return None
+    return value or None
 
 
 def resolve_repo(repo_spec: str, repo_root, origin: str) -> tuple[str, str]:
