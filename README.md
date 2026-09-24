@@ -627,7 +627,13 @@ kinds:
   a repo-scoped `task.yaml`/`rig.yaml` that `task classify` — running inside the target repo
   it's ticketing — must not trust with an arbitrary Hub id to download and execute in-process.
   Put `laya` first in `fallbacks` (see the config block above) to try the free local model
-  before spending an API call.
+  before spending an API call. Its `priority` criteria are calibrated around concrete
+  observables (production down / data loss / active security breach / blocks other
+  engineers or most customers) rather than `CLASSIFY_PROMPT`'s abstract "drop everything ..
+  low" framing (see the `priority` axis bullet below): that abstract framing showed zero
+  discrimination on this local model against real, professionally-worded tickets, and the
+  observable-based wording is a real, measured fix for it — see the CALIBRATION comment in
+  `tasklib/classifiers.py` for the evidence.
 
 **Bias is to `change` on ambiguity between change/justAsk** — most questions to a dev agent
 are latent change requests; that bias never applies to a genuine `actionable` signal, which is

@@ -132,10 +132,62 @@ class ReviewCliClassifier:
         return resolved.model_arg if resolved is not None else "none"
 
 
-# The `laya` question schema (matches `CLASSIFY_PROMPT`'s wording/tone). All four axes are
-# modeled as `choice` questions -- `laya`'s real, live-verified `predict()` return shape
-# gives each `choice` question a `choice: <winning label>` field, which this module reads
-# back off `criteria`'s own string keys (see `LayaClassifier._map_result`).
+# The `laya` question schema mirrors `CLASSIFY_PROMPT`'s axes and labels -- all four axes are
+# modeled as `choice` questions -- `laya`'s real, live-verified `predict()` return shape gives
+# each `choice` question a `choice: <winning label>` field, which this module reads back off
+# `criteria`'s own string keys (see `LayaClassifier._map_result`). ONE exception: `priority`'s
+# wording below deliberately diverges from `CLASSIFY_PROMPT`'s (see CALIBRATION). Do not
+# "resync" it back to `CLASSIFY_PROMPT`'s abstract-urgency framing -- that framing is the
+# regression this calibration fixed. `CLASSIFY_PROMPT` itself is untouched on purpose: its
+# evidence doesn't transfer -- it prompts frontier cloud LLMs via `review just-ask`
+# (`ReviewCliClassifier`), not this small local `laya` model, and those models did not show
+# the discrimination problem documented below.
+#
+# CALIBRATION (task-cli#206 follow-up): the ORIGINAL `priority` wording -- `instructions:
+# "How urgently should this work be picked up?"`, criteria phrased as an abstract urgency
+# scale ("drop everything", "urgent", "normal priority", "low priority, no rush") -- showed
+# ZERO discrimination on real, professionally-worded engineering tickets (What/Why/
+# Acceptance-criteria prose that states impact/urgency implicitly rather than with
+# alarm-style language).
+# Measured live against a 20-ticket sample pulled from a real Forgejo `tasks-app` tracker (5
+# tickets each at human-assigned Urgent/High/Medium/Low, mapped 1:1 to P0..P3): `choice`
+# landed on P2 for 19/20 tickets (the 20th got P1) at an average `confidence` of 0.11 (range
+# 0.026-0.232) -- the model was clearly reading SOME signal (the per-ticket confidence
+# varied) but that signal never moved the winning `choice`. A control message written in
+# alarm-style language ("P0: production is down, users cannot log in at all, revenue impact
+# right now") DID correctly resolve to `choice: P0` on this same ORIGINAL wording, at
+# P(P0)=0.87 (the model's own `confidence` field, a separate entropy-based calibration score,
+# reads 0.64 for that same answer) -- proving the model CAN discriminate, the wording just
+# gave it nothing to key on in calmer, formally-worded prose.
+#
+# FIX: reworded `criteria` around concrete, checkable OBSERVABLES instead of an abstract
+# urgency label -- the same signals a human uses to infer priority from ticket prose (is
+# production down / is data being lost / is there an active security breach -> P0; does this
+# block other engineers or most customers -> P1; a normal-shaped bug/feature -> P2; text that
+# explicitly reads as exploratory/deferred/nice-to-have -> P3). Re-run against the identical
+# 20-ticket sample: `choice` now spans all four labels (P0:1, P1:6, P2:8, P3:5 -- no longer
+# collapsed onto one value) at an average confidence of 0.11 (range 0.022-0.198), the control
+# message still resolves correctly (`choice: P0` at P(P0)=0.70), and exact-label agreement
+# with the human-assigned tier rose from 5/20 (trivially -- only because the flat-P2 baseline
+# happened to match the 5 truly-P2 tickets) to 7/20, with every remaining miss landing on the
+# ADJACENT tier (e.g. a true P0 landing on P1), never a 2+ tier miss.
+#
+# Considered and rejected: (1) longer, keyword-dense criteria ("production/outage/down,
+# active data loss, an exploitable security hole... means P0") -- overshot into a NEW flat
+# collapse (15/20 P0) at LOWER confidence, so more verbose criteria hurt more than it helped;
+# (2) `laya`'s `score` question type (an ordinal 0-3 scale instead of `choice`) -- gave a
+# much higher, better-calibrated `answer_confidence` (avg 0.51 vs 0.11), but that is a
+# by-construction property of `score`'s probability mass concentrating around its weighted
+# mean, not evidence of better discrimination, and adopting it would need a second,
+# incompatible result shape (`score`/`probabilities` keyed by level index, no `choice` field)
+# for this one axis alone -- not adopted, to keep a uniform result shape across all four axes;
+# (3) a companion `noul` (yes/no) "severe impact" question in the SAME `predict()` call to
+# condition `priority` on -- `laya.Agent.predict`'s own docstring states every question in one
+# call runs an INDEPENDENT parallel forward pass over the same input (no cross-question
+# conditioning inside the model), and empirically the noul signal only weakly separated
+# true-P0/P1 tickets (mean p(severe impact)=0.73) from true-P2/P3 tickets (mean
+# p(severe impact)=0.64) -- not a strong enough signal to justify combining two questions'
+# outputs in `_map_result` for a marginal gain.
 _LAYA_QUESTIONS: dict[str, dict] = {
     "verdict": {
         "type": "choice",
@@ -172,12 +224,18 @@ _LAYA_QUESTIONS: dict[str, dict] = {
     },
     "priority": {
         "type": "choice",
-        "instructions": "How urgently should this work be picked up?",
+        "instructions": (
+            "What priority should this ticket be given, based on its concrete impact, not "
+            "its tone?"
+        ),
         "criteria": {
-            "P0": "drop everything -- critical, blocking",
-            "P1": "urgent -- should be picked up soon",
-            "P2": "normal priority",
-            "P3": "low priority, no rush",
+            "P0": (
+                "production is down, data is being lost, or there is an active security "
+                "breach right now"
+            ),
+            "P1": "this blocks other engineers from shipping, or it affects most customers",
+            "P2": "a normal bug or feature, no special urgency",
+            "P3": "exploratory, research, deferred, or a nice-to-have cleanup",
         },
     },
     "story_points": {

@@ -11,12 +11,14 @@ dict` boundary — see this module's docstrings for the REAL raw shape observed 
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 
 import pytest
 
 from tasklib.classify import Classification, ResolvedModel, Verdict
 from tasklib.classifiers import (
+    _LAYA_QUESTIONS,
     LayaClassifier,
     ReviewCliClassifier,
     build_classifier_chain,
@@ -263,6 +265,27 @@ def test_build_classifier_chain_laya_never_honors_a_configured_model_id():
         assert providers[0].model_id == "convaiinnovations/laya"
 
 
+def test_laya_priority_question_criteria_are_observable_impact_not_abstract_urgency():
+    # Regression guard for task-cli#206's calibration fix: `criteria` must stay phrased as
+    # concrete observable impact, not the old abstract urgency scale that showed zero
+    # discrimination on real tickets (see the CALIBRATION comment above `_LAYA_QUESTIONS`
+    # in tasklib/classifiers.py for the full before/after evidence).
+    priority = _LAYA_QUESTIONS["priority"]
+    assert set(priority["criteria"]) == {"P0", "P1", "P2", "P3"}  # mapping contract unchanged
+
+    combined = " ".join(priority["criteria"].values()).lower()
+    # the old abstract urgency-tier framing this replaced -- must be gone. Pins the STALE
+    # framing's absence (a real regression guard), not the current wording verbatim (which
+    # is free to keep being tuned without editing this test).
+    for stale in ("drop everything", "should be picked up soon", "normal priority", "no rush", "low priority"):
+        assert stale not in combined
+    # `\burgent\w*\b` matches "urgent"/"urgently" (the old tier-label vocabulary) but NOT
+    # "urgency" (no "t") -- P2's "no special urgency" is a negated description of the
+    # residual/default bucket, not a resurrected P0-P3 label, so it's deliberately allowed.
+    assert not re.search(r"\burgent\w*\b", combined)
+    assert not re.search(r"\burgent\w*\b", priority["instructions"].lower())
+
+
 def test_laya_classifier_available_true_when_package_importable(monkeypatch):
     monkeypatch.setattr(
         importlib.util, "find_spec", lambda name: object() if name == "laya" else None
@@ -315,6 +338,27 @@ def test_laya_classifier_classify_maps_real_observed_result_shape():
         priority="P1",
         story_points=3,
     )
+
+
+def test_laya_classifier_classify_sends_the_real_question_schema_to_predict():
+    # `classify()` must hand the real, live `_LAYA_QUESTIONS` schema (the calibrated
+    # wording) to `predict()` at the call site -- not a filtered/rebuilt substitute. Prior
+    # tests only covered `_LAYA_QUESTIONS`'s content and `_map_result`'s handling of a
+    # canned raw reply; this pins the delivery step between them. Equality (not identity) is
+    # asserted so a defensive copy at the call site still passes -- only content drift fails.
+    seen = {}
+
+    class _RecordingAgent:
+        def predict(self, state, questions):
+            seen["state"] = state
+            seen["questions"] = questions
+            return _REAL_LAYA_RAW_RESULT
+
+    provider = LayaClassifier()
+    provider._load_agent = lambda: _RecordingAgent()
+    provider.classify("fix the login page crash on mobile Safari", Verdict.CHANGE)
+    assert seen["questions"] == _LAYA_QUESTIONS
+    assert seen["state"] == "fix the login page crash on mobile Safari"
 
 
 def test_laya_classifier_classify_defaults_axis_on_malformed_choice():
