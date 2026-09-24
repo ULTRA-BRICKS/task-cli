@@ -74,6 +74,9 @@ task classify "<text>" [--create]  # change|actionable|justAsk (+ SP/priority/pr
                                     # on `change`) via review; --create makes/dedups a product
                                     # ticket, or files a local `harness task` for a `process` item
 task session [show|bind <id>]      # show/bind the current session and its tickets
+task module list [--json]         # show the repo's configured product-module taxonomy
+task module add <name> --description "..."  # print the task.yaml snippet to add by hand
+task module assign <id> <name>    # tag an existing ticket module:<name> (see below)
 task daemon start|stop|status|run  # the due-date reminder watcher (see Daemon below)
 task audit [<id>] [--revert]       # reconciliation backstop — flags a Done ticket that never
 #   passed the close gates (see Audit below)
@@ -389,6 +392,38 @@ no embeddings, no fuzzy matching) checks currently-open tickets for plausible re
 prints a nudge with the exact `task link` command for each candidate. It only ever *suggests* —
 nothing is auto-linked, and a scan hiccup never fails the create.
 
+### Product modules — `task module`
+
+A **module** is a named, durable subsystem/area of the product a ticket belongs to (e.g. for
+task-cli itself: `classify`, `backends`, `links`, `render`) — a small, per-repo TAXONOMY a
+team defines once, not a free-text label. A repo opts in by adding a `modules:` list to its
+`task.yaml`:
+
+```yaml
+modules:
+  - name: classify
+    description: message classification, SP/priority axes, the classifier-provider chain
+  - name: backends
+    description: GitHub Issues / Linear adapters
+```
+
+```
+task module list [--json]                 # show the configured taxonomy, or a clear "none
+                                            #   configured" message when the repo has none
+task module add <name> --description "..."  # task.yaml is committed/human-edited (task-cli
+                                            #   never writes it) — prints the exact YAML
+                                            #   snippet to add by hand
+task module assign <id> <name>             # tags <id> with a `module:<name>` label (the same
+                                            #   mechanism `sp:<n>`/`priority:<Pn>` use) —
+                                            #   REFUSES cleanly (no backend write) for a name
+                                            #   outside the configured taxonomy
+```
+
+With `classify.infer_module: true` in `task.yaml` (default `false` — opt-in), `task classify
+--create` also tries to infer a module from the taxonomy via a cheap keyword-overlap heuristic
+against each module's name/description — a best-effort nudge, not a guarantee, and it never
+applies a label when the signal is empty or ambiguous (a tie).
+
 ### Deploy + follow-up traceability — `task change --deployed` + `follow-up-of`
 
 A ticket's lifecycle can be traced past `done` (accepted) through to an actual production
@@ -603,31 +638,89 @@ The repo you're currently inside is always one of the groups, even if it isn't (
 directly execute an existing command/tool right now — e.g. "run a review on the diff"; no
 ticket, and actually invoking it is out of scope for this repo, see "Out of scope" below), or
 `justAsk` (a pure question). Resolution is **pluggable** (`tasklib/classifiers.py`,
-task-cli#206): `classify.fallbacks` is walked in order, and each configured provider is tried
-in turn until one is both AVAILABLE and actually produces a classification. Two provider
-kinds:
+task-cli#206/#217): `classify.fallbacks` is walked in order, and each configured provider is
+tried in turn until one is both AVAILABLE and actually produces a classification. Three
+provider kinds:
 
-- **`review-cli`** (every entry except `laya`) — shells out to `review just-ask -m <model>
-  --pool 1`. The model is the first available provider in that RUN of the chain (default head
-  `claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google → local ollama),
-  so it works with whatever you have — offline via ollama, or on any one key. A subprocess
-  error degrades to the bias default for that run (it never raises out of the shell-out
-  itself), so this provider does not itself fall through to a later one in `fallbacks`.
+- **`review-cli`** (every entry except `laya`/`jev`) — shells out to `review just-ask -m
+  <model> --pool 1`. The model is the first available provider in that RUN of the chain
+  (default head `claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google →
+  local ollama), so it works with whatever you have — offline via ollama, or on any one key.
+  A subprocess error degrades to the bias default for that run (it never raises out of the
+  shell-out itself), so this provider does not itself fall through to a later one in
+  `fallbacks`.
 - **`laya`** — a REAL, free, fully local classifier: Convai Innovations' Apache-2.0 "laya"
   PyPI package (an open-weights alternative to the paid cloud "Jev" model). Runs entirely
-  in-process (no subprocess, no API key) once its optional extra is installed:
-  `uv sync --extra laya` (or `pip install task-cli[laya]`). Never a hard dependency and never
-  imported at module top — `task --help` and every other command stay dependency-free whether
-  or not it's installed. Not installed, its first-run HuggingFace model download fails (no
-  network/disk/rate-limit), or the model call itself errors (logged to stderr) → it reports
-  itself unreachable and the chain falls through to the NEXT configured provider — the only
-  provider kind that does. Security: the `{ laya: <value> }` value only decides whether this
-  entry becomes a laya provider at all — it is NEVER used to pick which model loads (always
-  the built-in `convaiinnovations/laya` checkpoint), since `classify.fallbacks` can come from
-  a repo-scoped `task.yaml`/`rig.yaml` that `task classify` — running inside the target repo
+  in-process (no subprocess, no API key). **The zero-config DEFAULT (task-cli#208):** a repo
+  with no committed `classify.fallbacks` tries `laya` FIRST, ahead of the hardcoded
+  `review-cli` chain above. The real mechanism is `config.py`'s built-in `DEFAULTS` (the
+  layer-0 config every repo starts from) listing `{laya: local}` first — the cascade merge
+  replaces a `fallbacks:` list WHOLESALE, never item-by-item, so a repo's own committed
+  `classify.fallbacks` (even one that never mentions `laya`) fully replaces this default and
+  is never silently altered. `tasklib/classifiers.py`'s `build_classifier_chain` itself is
+  UNCHANGED from before task-cli#208 (a `None` input still uses the plain, laya-free
+  `classify.DEFAULT_FALLBACKS`) — it only groups whatever chain it's handed.
+
+  **Auto-install.** `laya` is never a hard dependency and never imported at module top —
+  `task --help` and every other command stay dependency-free whether or not it's installed.
+  The first time `task classify` actually reaches the `laya` step and finds the package not
+  importable, it auto-installs it once (`tasklib/laya_autoinstall.py`) before falling through
+  to the next provider:
+  1. `python3 -m pip install --user laya>=0.3.7,<0.4` (`python3` = `sys.executable`, i.e. the
+     exact interpreter `task classify` is already running under; the pin matches
+     `pyproject.toml`'s `laya` extra exactly — an unpinned install could pull a breaking
+     release `LayaClassifier`'s hand-parsed result shape can no longer read). Inside an
+     activated virtualenv, `--user` is dropped entirely (pip refuses it there outright) —
+     the venv's own site-packages is already an isolated, user-writable location.
+  2. If that fails specifically with pip's PEP 668 `externally-managed-environment` error
+     (a Homebrew/distro-managed Python — verified on real machines), retries ONCE with
+     `--user --break-system-packages` — the fix pip's own error message recommends. `--user`
+     confines the install to your OWN site-packages, never a Homebrew-managed or system file,
+     which is what makes auto-appending that flag safe without asking first. A different
+     failure (no network, disk full, ...) never gets this retry, and neither does a venv.
+
+  On success, the SAME `task classify` invocation retries and proceeds with `laya`
+  immediately — no re-exec, no second run needed. On failure, it falls through to the next
+  provider exactly like an already-uninstalled `laya` always has, and caches the failure
+  under `~/.local/state/task-cli/laya_autoinstall/` for 24h
+  (`$TASK_LAYA_AUTOINSTALL_COOLDOWN_S` to override) so a subsequent call on an offline machine
+  skips the network attempt entirely instead of paying a pip-timeout tax on every invocation.
+  A corrupted/unreadable cache file fails OPEN (treated as "never attempted") rather than
+  wedging auto-install off permanently. `install.sh` also attempts this same two-step install,
+  best-effort, when you first install `task` — so on most machines `laya` is already present
+  before you ever run `task classify`.
+
+  Not installed (and auto-install also failed/was skipped), its first-run HuggingFace model
+  download fails (no network/disk/rate-limit), or the model call itself errors (logged to
+  stderr) → it reports itself unreachable and the chain falls through to the NEXT configured
+  provider — the only provider kind that does (besides `jev`, below). Security: the
+  `{ laya: <value> }` value only decides whether this entry becomes a laya provider at all —
+  it is NEVER used to pick which model loads (always the built-in
+  `convaiinnovations/laya` checkpoint), since `classify.fallbacks` can come from a
+  repo-scoped `task.yaml`/`rig.yaml` that `task classify` — running inside the target repo
   it's ticketing — must not trust with an arbitrary Hub id to download and execute in-process.
-  Put `laya` first in `fallbacks` (see the config block above) to try the free local model
-  before spending an API call.
+  To opt back INTO an explicit chain (e.g. to reorder it, or to drop `laya` entirely),
+  configure `classify.fallbacks` yourself — see the config block below. Its `priority`
+  criteria are calibrated around concrete observables (production down / data loss / active
+  security breach / blocks other engineers or most customers) rather than `CLASSIFY_PROMPT`'s
+  abstract "drop everything .. low" framing (see the `priority` axis bullet below): that
+  abstract framing showed zero discrimination on this local model against real,
+  professionally-worded tickets, and the observable-based wording is a real, measured fix for
+  it — see the CALIBRATION comment in `tasklib/classifiers.py` for the evidence.
+- **`jev`** (task-cli#217) — a REAL, paid, cloud classifier: TypeSafe AI's "Jev" evaluation
+  model, called directly over Vercel AI Gateway's `POST https://ai-gateway.vercel.sh/v1/
+  evaluate` HTTP endpoint (model id `typesafe-ai/jev`) via stdlib `urllib` — no `review`, no
+  subprocess, no extra dependency. Needs `AI_GATEWAY_API_KEY` in the environment; set
+  `TASK_JEV_ENV_FILE=/path/to/.env` to ALSO read that one `AI_GATEWAY_API_KEY=<value>` line
+  from a `.env`-shaped file when the env var itself is absent — an explicit, per-machine
+  opt-in (unset by default, never a hardcoded path). Never a zero-config default — opt-in only, since it costs
+  money and needs network. Missing key, a network/timeout error, ANY non-2xx HTTP status
+  (including Vercel's documented `customer_verification_required` "no card on file" billing
+  block), or a malformed response body all report unreachable/fail → the chain falls through
+  to the NEXT configured provider, same graceful-degradation contract as `laya`. Security:
+  same posture as `laya` — the `{ jev: <value> }` value only decides routing, never which
+  endpoint/model gets called (both fixed), so a repo-scoped config can't redirect the call
+  (and your API key) to an attacker-controlled host.
 
 **Bias is to `change` on ambiguity between change/justAsk** — most questions to a dev agent
 are latent change requests; that bias never applies to a genuine `actionable` signal, which is
@@ -743,13 +836,19 @@ classify:
     - { zai:         glm-4.6-flash }
     - { google:      gemini-2.5-flash }
     - { ollama:      qwen2.5:3b }
-    # - { laya: local }               # opt-in: a REAL, free, local classifier (Convai
-    #                                 # Innovations' Apache-2.0 "laya" PyPI package, an
-    #                                 # open-weights alternative to the paid cloud "Jev"
-    #                                 # model) -- see "Classification" below for how it plugs
-    #                                 # into the provider chain and its `laya` extra.
-    # - { jev:  <model> }             # config plumbing only, unverified — no real endpoint
-    #                                 # call exists for jev in this repo yet
+    # - { laya: local }               # explicit opt-in equivalent to the IMPLICIT zero-
+    #                                 # config default (task-cli#208 -- an unconfigured
+    #                                 # `fallbacks:` already tries `laya` first automatically;
+    #                                 # only list it here to pin its position when the rest of
+    #                                 # this chain is also explicitly configured, e.g. to try
+    #                                 # it AFTER a paid provider instead of first). See
+    #                                 # "Classification" above for auto-install + the extra.
+    # - { jev: cloud }                # opt-in: a REAL, paid, cloud classifier -- TypeSafe
+    #                                 # AI's "Jev" model over Vercel AI Gateway's
+    #                                 # /v1/evaluate endpoint. Needs $AI_GATEWAY_API_KEY; the
+    #                                 # value here (`cloud`) is a free-form label only -- see
+    #                                 # "Classification" below, `jev` never lets a configured
+    #                                 # value pick the endpoint/model.
   bias: change
   route_process_to_harness: true     # `process`-classified `--create` items file a local
                                      # `harness tasks new` ticket instead of the product
@@ -767,7 +866,9 @@ daemon:                              # the due-date reminder watcher (all keys o
 ```
 
 Config is committed by default and scoped by location, never a flag. With no config at all the
-tool defaults to `github-issues` with every gate on (and the daemon's built-in defaults above).
+tool defaults to `github-issues` with every gate on, `classify.fallbacks` trying `laya` first
+(task-cli#208, auto-installed on demand — see "Classification" above), and the daemon's
+built-in defaults above.
 
 **`trusted_attachment_hosts` — what it does and does not protect against.** Entries are
 validated as bare hostnames: no scheme/path/port/userinfo, no IP literal (canonical or any

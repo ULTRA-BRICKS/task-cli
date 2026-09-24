@@ -270,7 +270,17 @@ DEFAULTS: dict[str, Any] = {
         "escape_hatch": "explain",
     },
     "classify": {
+        # task-cli#208: `laya` (tasklib/classifiers.py's `LayaClassifier` — a real, free,
+        # local classifier) is the ZERO-CONFIG default head, auto-installed on demand if
+        # missing (tasklib/laya_autoinstall.py) before falling through to the LLM chain
+        # below. This list is a plain scalar VALUE in the cascade merge (`_deep_merge`
+        # replaces a list wholesale, never merges item-by-item) -- a repo's own committed
+        # `classify.fallbacks` (task.yaml / rig.yaml `task:` block), even one that omits
+        # `laya` entirely, REPLACES this list completely and is never silently altered.
+        # The routing-only security note on the `{laya: <value>}` value lives in
+        # `tasklib/classifiers.py`'s module docstring.
         "fallbacks": [
+            {"laya": "local"},
             {"anthropic": "claude-haiku-4-5"},
             {"openai": "gpt-5-mini"},
             {"commandcode": "deepseek/deepseek-v4-flash"},
@@ -284,6 +294,11 @@ DEFAULTS: dict[str, Any] = {
         # sets this False to keep every classified item on the normal product-ticket path
         # regardless of that axis (e.g. a repo with no `harness` binary on its agents' PATH).
         "route_process_to_harness": True,
+        # Opt-in (default False, unlike route_process_to_harness's opt-out): whether
+        # `_classify_create` infers a `module:<name>` label from the repo's configured
+        # `modules:` taxonomy (tasklib/modules.py) via a cheap keyword heuristic. See
+        # `LoadedConfig.classify_infer_module`.
+        "infer_module": False,
     },
     "session": {
         "detect": ["env:TASK_SESSION", "tmux-pane", "git-branch"],
@@ -407,25 +422,44 @@ class LoadedConfig:
         """Whether a `process`-classified message (`classify.py`'s process/product axis)
         routes to `harness tasks new` instead of the configured product ticket backend.
         Default True (opt-out, not opt-in). Read from `classify.route_process_to_harness`.
-
-        NOT a bare `bool()` coercion (review finding): a real YAML boolean scalar
-        (`false`/`0`/unquoted) already parses to Python `False`/`0` and `bool()` handles
-        those correctly, but a QUOTED string value (`route_process_to_harness: "false"`)
-        parses to the Python string `"false"`, and `bool("false")` is `True` — the opt-out
-        would silently fail to opt out, leaving every process-classified item still routed
-        to `harness` even though the operator's config says not to. `_FALSY_STRINGS` (the
-        same falsy-string-spelling set the shared `require-ticket-before-commit` hook's
-        `REQUIRE_TICKET_STRICT` dial already uses) makes a quoted falsy value behave
-        exactly like its unquoted equivalent. A BLANK key (`route_process_to_harness:` with
-        nothing after the colon, parsing to YAML ``null``/Python ``None``) and an explicit
-        empty string (`route_process_to_harness: ""`) are both treated as UNSET — i.e. the
-        documented `True` default — rather than disagreeing with each other (review finding,
-        round 2: `bool(None)` is `False` while `"" not in _FALSY_STRINGS` is `True`, so the
-        two "nothing was really said here" spellings silently gave OPPOSITE answers).
+        See `_classify_bool_flag`'s docstring for the falsy-string/blank-key coercion rules.
         """
-        value = self.section("classify").get("route_process_to_harness", True)
+        return self._classify_bool_flag("route_process_to_harness", default=True)
+
+    @property
+    def classify_infer_module(self) -> bool:
+        """Whether `_classify_create` infers a `module:<name>` label from the repo's
+        configured module taxonomy (`tasklib.modules.ModuleTaxonomy`) via a cheap keyword
+        heuristic, on a freshly-CREATED ticket. Default False — OPT-IN, unlike
+        `classify_route_process_to_harness`'s opt-out: inference is heuristic, not a
+        guarantee (see `tasklib.modules.infer_module`'s docstring), and must never silently
+        start relabeling tickets for a repo that hasn't asked for it. Read from
+        `classify.infer_module`; see `_classify_bool_flag`'s docstring for the coercion rules.
+        """
+        return self._classify_bool_flag("infer_module", default=False)
+
+    def _classify_bool_flag(self, key: str, *, default: bool) -> bool:
+        """Shared boolean-ish coercion for a `classify.<key>` flag — `classify_route_process_
+        to_harness` and `classify_infer_module` differ only in their key/default, so this is
+        their single home (review finding: an earlier version copy-pasted the coercion body
+        into each property).
+
+        NOT a bare `bool()` coercion: a real YAML boolean scalar (`false`/`0`/unquoted)
+        already parses to Python `False`/`0` and `bool()` handles those correctly, but a
+        QUOTED string value (e.g. `"false"`) parses to the Python string `"false"`, and
+        `bool("false")` is `True` — an opt-out/opt-in would silently fail to take effect for
+        an operator who quotes the value. `_FALSY_STRINGS` (the same falsy-string-spelling set
+        the shared `require-ticket-before-commit` hook's `REQUIRE_TICKET_STRICT` dial already
+        uses) makes a quoted falsy value behave exactly like its unquoted equivalent. A BLANK
+        key (nothing after the colon, parsing to YAML `null`/Python `None`) and an explicit
+        empty string are both treated as UNSET — i.e. `default` — rather than disagreeing with
+        each other (`bool(None)` is `False` while `"" not in _FALSY_STRINGS` is `True`, so the
+        two "nothing was really said here" spellings would otherwise silently give OPPOSITE
+        answers).
+        """
+        value = self.section("classify").get(key, default)
         if value is None or value == "":
-            return True
+            return default
         if isinstance(value, str):
             return value.strip().lower() not in _FALSY_STRINGS
         return bool(value)
@@ -605,6 +639,14 @@ def validate(data: dict[str, Any]) -> None:
     for key in ("github", "linear", "enforce", "classify", "session"):
         if key in data and not isinstance(data[key], dict):
             raise ConfigError(f"'{key}' must be a mapping")
+
+    if "modules" in data:
+        # tasklib/modules.py owns the shape (single source of truth); lazy import avoids a
+        # load-time cycle — modules.py imports `config.ConfigError` at its own top, so this
+        # dependency only ever runs the one direction at import time.
+        from .modules import validate_modules_config
+
+        validate_modules_config(data["modules"])
 
     linear = data.get("linear")
     if isinstance(linear, dict) and "attachment_mode" in linear:

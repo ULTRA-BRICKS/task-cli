@@ -28,6 +28,51 @@ def _no_ambient_attachment_mode_override(monkeypatch):
     monkeypatch.delenv(ATTACHMENT_MODE_ENV_VAR, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_laya_autoinstall(monkeypatch):
+    """task-cli#208 review finding: `laya` is now the zero-config DEFAULT `classify.fallbacks`
+    head (`config.DEFAULTS`), and `LayaClassifier.available()` auto-installs the real package
+    (a real `pip`/network subprocess, `tasklib/laya_autoinstall.py`) the first time it finds
+    the package genuinely not importable. Today every `classify` test in this suite stays
+    hermetic only INCIDENTALLY -- because this repo's own committed `task.yaml` pins an
+    explicit `classify.fallbacks` (no `laya` entry), and pytest's cwd is always this repo's
+    root. That is an accident of THIS repo's config, not a guarantee any future test can rely
+    on (a test that runs from a `task.yaml`-less `tmp_path` cwd, or one that legitimately
+    clears the pin, would otherwise hit a REAL pip subprocess).
+
+    Guards BOTH directions: `ensure_installed` is forced `False` (never a real pip/network
+    call), and `importlib.util.find_spec("laya")` is forced `None` regardless of whether
+    `laya` genuinely happens to be importable in the interpreter running this suite (e.g. a
+    developer who followed the README's `uv sync --extra laya`, or reused the venv this
+    ticket's own live end-to-end verification installed `laya` into) -- without this second
+    guard, an unmocked classify test would silently route through a REAL loaded local model
+    (a ~400M-param HuggingFace download) instead of the expected review-cli mock, on THAT
+    specific machine only, the exact "passes here, breaks on your machine" failure mode this
+    fixture exists to rule out entirely. Every OTHER `find_spec` lookup (any name but `laya`)
+    passes straight through to the real implementation, unaffected.
+
+    Autouse (unlike `isolated_state`) so it protects every test file, not just ones that ask
+    for it -- mirrors `_no_ambient_attachment_mode_override` above. `tests/test_laya_
+    autoinstall.py` (which tests `ensure_installed` ITSELF, with `subprocess`/`install` mocked
+    at a lower level) overrides this fixture locally to a no-op; `tests/test_classifiers.py`'s
+    own auto-install wiring tests explicitly re-monkeypatch `ensure_installed`/`find_spec`
+    per-test, which still wins (same `monkeypatch` instance, applied after this fixture) over
+    this default.
+    """
+    monkeypatch.setattr("tasklib.laya_autoinstall.ensure_installed", lambda **_kw: False)
+
+    import importlib.util as _importlib_util
+
+    real_find_spec = _importlib_util.find_spec
+
+    def _find_spec_never_finds_laya(name, *args, **kwargs):
+        if name == "laya":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(_importlib_util, "find_spec", _find_spec_never_finds_laya)
+
+
 class FakeBackend:
     """An in-memory ``TicketBackend`` — round-trips through render/parse like a real one.
 
