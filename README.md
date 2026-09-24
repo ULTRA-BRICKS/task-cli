@@ -5,8 +5,8 @@ well-formed ticket the moment it arrives — `task` enforces ticket *quality* (a
 criteria, motivation, user-impact, cost-of-inaction, screenshots, formatting) in the tool
 itself, not by convention. A ticket and its PR speak one shape.
 
-A standalone Python CLI, peer to [`review-cli`](https://github.com/alex-mextner/rig-cli),
-[`rig-cli`](https://github.com/alex-mextner/rig-cli), and `tg-cli`. Backends: **GitHub Issues
+A standalone Python CLI, peer to [`review-cli`](https://git.hyperide.ai/ultrabricks/rig-cli),
+[`rig-cli`](https://git.hyperide.ai/ultrabricks/rig-cli), and `tg-cli`. Backends: **GitHub Issues
 (default)** and **Linear** (per-repo). Stdlib-first; the backends call the provider API
 directly (no `requests`, no per-call subprocess), and credentials are harvested from the CLIs
 you already authed — zero extra setup.
@@ -18,7 +18,7 @@ you already authed — zero extra setup.
 ## Install
 
 ```bash
-git clone https://github.com/alex-mextner/task-cli && cd task-cli && ./install.sh
+git clone https://git.hyperide.ai/ultrabricks/task-cli && cd task-cli && ./install.sh
 # or, one-liner:
 curl -fsSL https://raw.githubusercontent.com/alex-mextner/task-cli/main/install.sh | bash
 ```
@@ -923,13 +923,13 @@ v1 is the usable core: `new`/`create`, `list`, `read`, `find`, `change`, `done`,
 `classify`, `session` against GitHub Issues (default) and Linear, with the enforcement gates.
 Deferred to follow-up issues:
 
-- **Dependency system + Gantt rendering** — [#1](https://github.com/alex-mextner/task-cli/issues/1).
+- **Dependency system + Gantt rendering** — [#1](https://git.hyperide.ai/ultrabricks/task-cli/issues/1).
 - **Daemon service + webhooks** (adapter-based trackers, survives restarts) —
-  [#2](https://github.com/alex-mextner/task-cli/issues/2).
+  [#2](https://git.hyperide.ai/ultrabricks/task-cli/issues/2).
 - **Completion + due-date notifications** (tmux-inject into the agent pane) —
-  [#3](https://github.com/alex-mextner/task-cli/issues/3).
+  [#3](https://git.hyperide.ai/ultrabricks/task-cli/issues/3).
 - **Integrations** — tg classify-on-inbound hook, the agent-tools `require-ticket-before-commit`
-  guard, and rig cross-repo provisioning — [#4](https://github.com/alex-mextner/task-cli/issues/4).
+  guard, and rig cross-repo provisioning — [#4](https://git.hyperide.ai/ultrabricks/task-cli/issues/4).
 
 ## License
 
