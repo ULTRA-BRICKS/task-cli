@@ -5639,6 +5639,111 @@ def test_classify_laya_runtime_failure_falls_through_to_review_cli(
     assert payload == {"verdict": "justAsk"}
 
 
+# ── task-cli#217: pluggable classifier chain, `jev` end-to-end wiring ──────────────────────
+
+
+def test_classify_jev_provider_used_when_available_skips_review_cli(
+    capsys, monkeypatch, _inject_fake
+):
+    # `classify.fallbacks: [{jev: cloud}, {anthropic: ...}]` -- when jev is reachable AND
+    # produces a classification, review-cli must never even be shelled out to.
+    from tasklib.classify import Classification, Verdict
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.JevClassifier.available", lambda self: True)
+    monkeypatch.setattr(
+        "tasklib.classifiers.JevClassifier.classify",
+        lambda self, message, bias: Classification(
+            verdict=Verdict.CHANGE,
+            process_or_product="product",
+            priority="P1",
+            story_points=5,
+        ),
+    )
+
+    def _never_called(model, prompt):
+        raise AssertionError("review-cli must not run when jev already classified")
+
+    monkeypatch.setattr(cli, "_run_review_just_ask", _never_called)
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "verdict": "change",
+        "process_or_product": "product",
+        "priority": "P1",
+        "story_points": 5,
+    }
+
+
+def test_classify_jev_unavailable_falls_through_to_review_cli(capsys, monkeypatch, _inject_fake):
+    # jev configured but no API key resolvable -> falls through to the review-cli chain,
+    # exactly the graceful-degradation contract task-cli#206/#217 requires.
+    from tasklib.classify import ResolvedModel
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.JevClassifier.available", lambda self: False)
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: ResolvedModel(
+            "anthropic", "claude:claude-haiku-4-5"
+        ),
+    )
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "change"
+
+
+def test_classify_jev_runtime_failure_falls_through_to_review_cli(
+    capsys, monkeypatch, _inject_fake
+):
+    # jev reports itself available (a key is resolvable) but fails at RUNTIME (e.g. the
+    # documented billing block) -- `classify()` returning `None` must fall through to the
+    # next provider, not bias-default straight away while a real review-cli provider is
+    # still reachable.
+    from tasklib.classify import ResolvedModel
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.JevClassifier.available", lambda self: True)
+    monkeypatch.setattr(
+        "tasklib.classifiers.JevClassifier.classify", lambda self, message, bias: None
+    )
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "justAsk")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: ResolvedModel(
+            "anthropic", "claude:claude-haiku-4-5"
+        ),
+    )
+    rc = main(["classify", "how does this work?", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"verdict": "justAsk"}
+
+
 # ── session ──────────────────────────────────────────────────────────────────────────
 
 

@@ -638,16 +638,17 @@ The repo you're currently inside is always one of the groups, even if it isn't (
 directly execute an existing command/tool right now — e.g. "run a review on the diff"; no
 ticket, and actually invoking it is out of scope for this repo, see "Out of scope" below), or
 `justAsk` (a pure question). Resolution is **pluggable** (`tasklib/classifiers.py`,
-task-cli#206): `classify.fallbacks` is walked in order, and each configured provider is tried
-in turn until one is both AVAILABLE and actually produces a classification. Two provider
-kinds:
+task-cli#206/#217): `classify.fallbacks` is walked in order, and each configured provider is
+tried in turn until one is both AVAILABLE and actually produces a classification. Three
+provider kinds:
 
-- **`review-cli`** (every entry except `laya`) — shells out to `review just-ask -m <model>
-  --pool 1`. The model is the first available provider in that RUN of the chain (default head
-  `claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google → local ollama),
-  so it works with whatever you have — offline via ollama, or on any one key. A subprocess
-  error degrades to the bias default for that run (it never raises out of the shell-out
-  itself), so this provider does not itself fall through to a later one in `fallbacks`.
+- **`review-cli`** (every entry except `laya`/`jev`) — shells out to `review just-ask -m
+  <model> --pool 1`. The model is the first available provider in that RUN of the chain
+  (default head `claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google →
+  local ollama), so it works with whatever you have — offline via ollama, or on any one key.
+  A subprocess error degrades to the bias default for that run (it never raises out of the
+  shell-out itself), so this provider does not itself fall through to a later one in
+  `fallbacks`.
 - **`laya`** — a REAL, free, fully local classifier: Convai Innovations' Apache-2.0 "laya"
   PyPI package (an open-weights alternative to the paid cloud "Jev" model). Runs entirely
   in-process (no subprocess, no API key) once its optional extra is installed:
@@ -669,6 +670,20 @@ kinds:
   discrimination on this local model against real, professionally-worded tickets, and the
   observable-based wording is a real, measured fix for it — see the CALIBRATION comment in
   `tasklib/classifiers.py` for the evidence.
+- **`jev`** (task-cli#217) — a REAL, paid, cloud classifier: TypeSafe AI's "Jev" evaluation
+  model, called directly over Vercel AI Gateway's `POST https://ai-gateway.vercel.sh/v1/
+  evaluate` HTTP endpoint (model id `typesafe-ai/jev`) via stdlib `urllib` — no `review`, no
+  subprocess, no extra dependency. Needs `AI_GATEWAY_API_KEY` in the environment; set
+  `TASK_JEV_ENV_FILE=/path/to/.env` to ALSO read that one `AI_GATEWAY_API_KEY=<value>` line
+  from a `.env`-shaped file when the env var itself is absent — an explicit, per-machine
+  opt-in (unset by default, never a hardcoded path). Never a zero-config default — opt-in only, since it costs
+  money and needs network. Missing key, a network/timeout error, ANY non-2xx HTTP status
+  (including Vercel's documented `customer_verification_required` "no card on file" billing
+  block), or a malformed response body all report unreachable/fail → the chain falls through
+  to the NEXT configured provider, same graceful-degradation contract as `laya`. Security:
+  same posture as `laya` — the `{ jev: <value> }` value only decides routing, never which
+  endpoint/model gets called (both fixed), so a repo-scoped config can't redirect the call
+  (and your API key) to an attacker-controlled host.
 
 **Bias is to `change` on ambiguity between change/justAsk** — most questions to a dev agent
 are latent change requests; that bias never applies to a genuine `actionable` signal, which is
@@ -789,8 +804,12 @@ classify:
     #                                 # open-weights alternative to the paid cloud "Jev"
     #                                 # model) -- see "Classification" below for how it plugs
     #                                 # into the provider chain and its `laya` extra.
-    # - { jev:  <model> }             # config plumbing only, unverified — no real endpoint
-    #                                 # call exists for jev in this repo yet
+    # - { jev: cloud }                # opt-in: a REAL, paid, cloud classifier -- TypeSafe
+    #                                 # AI's "Jev" model over Vercel AI Gateway's
+    #                                 # /v1/evaluate endpoint. Needs $AI_GATEWAY_API_KEY; the
+    #                                 # value here (`cloud`) is a free-form label only -- see
+    #                                 # "Classification" below, `jev` never lets a configured
+    #                                 # value pick the endpoint/model.
   bias: change
   route_process_to_harness: true     # `process`-classified `--create` items file a local
                                      # `harness tasks new` ticket instead of the product
