@@ -12,7 +12,8 @@ blocks/blocked-by/relates-to/duplicate-of/follow-up-of/followed-up-by
 relationship between two tickets) · audit (reconciliation backstop — flags/reverts a Done ticket
 that never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close)
 · mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
-session · daemon (the due-date reminder watcher: start/stop/status/run).
+module (list/add/assign the repo's product-module taxonomy) · session · daemon (the
+due-date reminder watcher: start/stop/status/run).
 Global flags: --backend, --repo, --config, --json, --yes, and per-gate --skip-<gate>.
 """
 
@@ -490,6 +491,26 @@ def build_parser() -> argparse.ArgumentParser:
     lkp.add_argument("relation", choices=list(RELATIONS), help="relation type")
     lkp.add_argument("other_id", metavar="other-id", help="the other ticket id")
 
+    # module — the repo's product-module taxonomy: list/add/assign (task-cli#218)
+    mdp = sub.add_parser(
+        "module",
+        parents=[common],
+        help="manage the repo's product-module taxonomy (list|add|assign)",
+    )
+    mdp.add_argument("action", choices=["list", "add", "assign"], help="list | add | assign")
+    mdp.add_argument(
+        "arg1",
+        nargs="?",
+        metavar="NAME-OR-ID",
+        help="add: module name | assign: ticket id (#123 or HYP-456)",
+    )
+    mdp.add_argument(
+        "arg2", nargs="?", metavar="MODULE-NAME", help="assign: module name"
+    )
+    mdp.add_argument(
+        "--description", metavar="TEXT", help="module description (add only)"
+    )
+
     # gate — the read-only ship-time verdict (agent-tools ci/ship/ship.sh calls this pre-merge)
     gtp = sub.add_parser(
         "gate",
@@ -627,6 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         "check": cmd_check,
         "accept": cmd_accept,
         "link": cmd_link,
+        "module": cmd_module,
         "gate": cmd_gate,
         "audit": cmd_audit,
         "mark-shipped": cmd_mark_shipped,
@@ -5088,6 +5110,187 @@ def cmd_link(args: argparse.Namespace) -> int:
     return 2 if any(o.status == "failed" for o in outcomes) else 0
 
 
+def cmd_module(args: argparse.Namespace) -> int:
+    """`task module list/add/assign` — the repo's product-module taxonomy (task-cli#218).
+
+    A module is a NAMED, durable subsystem/area (`tasklib.modules.ProductModule`) a repo
+    defines once in `task.yaml`'s `modules:` list; `list` shows it (or a clear "none
+    configured" message — a taxonomy is never required), `add` prints the exact YAML snippet
+    to append by hand (`task.yaml` has no config-WRITING precedent anywhere in this repo — see
+    `tasklib.modules`'s module docstring — it is a committed, human-edited file), and `assign`
+    stamps a `module:<name>` label onto an existing ticket via `backend.update()`, the exact
+    same label mechanism `sp:<n>`/`priority:<Pn>` already use. `assign` FAILS CLOSED (a clean
+    `error:`, no backend write) on a module name outside the configured taxonomy — it never
+    invents a new label on the fly.
+    """
+    cfg = _load(args)
+    if args.action == "list":
+        return _cmd_module_list(cfg, args)
+    if args.action == "add":
+        return _cmd_module_add(cfg, args)
+    return _cmd_module_assign(cfg, args)
+
+
+def _cmd_module_list(cfg, args: argparse.Namespace) -> int:
+    from .modules import load_taxonomy
+
+    taxonomy = load_taxonomy(cfg)
+    if args.json:
+        import json
+
+        print(
+            json.dumps(
+                [{"name": m.name, "description": m.description} for m in taxonomy.modules],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if not taxonomy.configured:
+        print(
+            "no module taxonomy configured for this repo — add one with "
+            '`task module add <name> --description "..."`'
+        )
+        return 0
+    for m in taxonomy.modules:
+        print(f"{m.name}  —  {m.description}" if m.description else m.name)
+    return 0
+
+
+def _cmd_module_add(cfg, args: argparse.Namespace) -> int:
+    from .modules import NAME_RE, load_taxonomy
+
+    name = (args.arg1 or "").strip()
+    if not name:
+        raise _UserError('usage: task module add <name> --description "TEXT"')
+    if not NAME_RE.match(name):
+        raise _UserError(
+            f"invalid module name {name!r} — lowercase letters, digits, hyphens only, "
+            "starting with a letter or digit"
+        )
+    taxonomy = load_taxonomy(cfg)
+    if name in taxonomy.names():
+        raise _UserError(f"module {name!r} is already configured")
+    description = (args.description or "").strip()
+    # No config-WRITING precedent exists anywhere in this repo (tasklib.modules's module
+    # docstring) — task.yaml is committed and human-edited, so this prints the snippet to add
+    # by hand rather than silently rewriting a file a repo owner reviews and commits. Target
+    # path mirrors `_load`'s own `--config` resolution (review finding) — an explicit
+    # `--config` file replaces the `task.yaml` layer, so the printed path must too, or the
+    # guidance points at a file the loader never reads.
+    explicit = getattr(args, "config", None)
+    target = (
+        (cfg.repo_root / explicit if not Path(explicit).is_absolute() else Path(explicit))
+        if explicit
+        else cfg.repo_root / "task.yaml"
+    )
+    import json
+
+    print(
+        f"{target} is human-edited (task-cli never writes it) — add this entry to its "
+        "`modules:` list:\n"
+    )
+    if not taxonomy.configured:
+        # Only emit the `modules:` header when the taxonomy is empty/absent — printing it
+        # unconditionally would create a SECOND top-level `modules:` key once pasted under an
+        # already-populated one, and PyYAML silently keeps only the last one, dropping every
+        # existing entry (review finding).
+        print("modules:")
+    # `json.dumps` on both the name and the description produces YAML-safe double-quoted
+    # scalars (valid under both JSON and YAML flow-scalar syntax) — a raw, unquoted name like
+    # `on`/`null`/`42` parses back as a bool/null/int under YAML 1.1's implicit typing, and an
+    # unquoted description breaks on an embedded colon or `#` (review finding: either one,
+    # pasted verbatim, corrupts task.yaml for every subsequent `task` command in the repo).
+    print(f"  - name: {json.dumps(name, ensure_ascii=False)}")
+    if description:
+        print(f"    description: {json.dumps(description, ensure_ascii=False)}")
+    return 0
+
+
+def _cmd_module_assign(cfg, args: argparse.Namespace) -> int:
+    from .backends import AmbiguousBackendError, BackendError
+    from .modules import assigned_module_names, label_for, load_taxonomy
+
+    ticket_id = (args.arg1 or "").strip()
+    name = (args.arg2 or "").strip()
+    if not ticket_id or not name:
+        raise _UserError("usage: task module assign <ticket-id> <module-name>")
+    taxonomy = load_taxonomy(cfg)
+    if not taxonomy.configured:
+        raise _UserError(
+            "no module taxonomy configured for this repo — add one with "
+            '`task module add <name> --description "..."` first'
+        )
+    if taxonomy.get(name) is None:
+        raise _UserError(
+            f"{name!r} is not a configured module — known modules: "
+            f"{', '.join(taxonomy.names())}"
+        )
+    backend = _backend_for_id(cfg, ticket_id)
+    try:
+        # A plain read with no side effects — an ambiguous outcome is as harmless as a clean
+        # one here, matching `_resolve_ticket_for_link`'s identical convention for its own
+        # `backend.get()` (review finding: an earlier version caught only `BackendError`,
+        # letting `AmbiguousBackendError` escape as a raw traceback).
+        ticket = backend.get(ticket_id)
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(str(exc)) from exc
+    label = label_for(name)
+    if label in ticket.labels:
+        # A `--json` caller (e.g. a script re-running an idempotent assign) must get the same
+        # JSON shape on every branch, not a human-readable ANSI line on the no-op path
+        # (review finding).
+        if args.json:
+            import json
+
+            print(json.dumps(_ticket_dict(ticket), ensure_ascii=False, indent=2))
+        else:
+            print(_ok(f"{ticket.id} is already assigned to module {name!r}"))
+        return 0
+    # Same reopen/re-close hazard `cmd_link` guards against before every `backend.update()`
+    # (review finding: a stale managed-state label vs. the backend's real open/closed flag
+    # would otherwise be silently flipped by this metadata-only write, since `update()`
+    # unconditionally PATCHes state from `ticket.state`) — see `_reopen_hazard_reason`'s
+    # docstring for the full rationale.
+    hazard = _reopen_hazard_reason(ticket)
+    if hazard:
+        raise _UserError(hazard)
+    existing_modules = assigned_module_names(ticket.labels)
+    ticket.labels.append(label)
+    try:
+        updated = backend.update(ticket)
+    except AmbiguousBackendError as exc:
+        # The write may have already landed server-side before the connection dropped — same
+        # ambiguity `cmd_link`/`_classify_create` handle explicitly for their own
+        # `backend.update()` calls (review finding: this path previously let it propagate as
+        # an unhandled traceback instead of a clean, actionable exit).
+        print(_err(f"ambiguous: {exc}"))
+        print(
+            _warn(
+                f"  the module:{name} label on {ticket.id} may have already been written — "
+                "check the backend before retrying, to avoid a duplicate/partial write."
+            ),
+            file=sys.stderr,
+        )
+        return exc.exit_code
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+    if args.json:
+        import json
+
+        print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
+    elif existing_modules:
+        print(
+            _ok(
+                f"assigned {updated.id} to module {name!r} "
+                f"(modules: {', '.join(sorted(existing_modules | {name}))})"
+            )
+        )
+    else:
+        print(_ok(f"assigned {updated.id} to module {name!r}"))
+    return 0
+
+
 def _reopen_hazard_reason(ticket: Ticket) -> str:
     """`""` when `ticket` is safe to `backend.update()`; otherwise the refusal reason.
 
@@ -5452,6 +5655,23 @@ def _classify_one(
     return 0
 
 
+def _inferred_module_labels(cfg, text: str) -> list[str]:
+    """`classify.infer_module` opt-in (`cfg.classify_infer_module`, default False): a cheap
+    keyword-overlap heuristic (`tasklib.modules.infer_module`) against the repo's configured
+    `modules:` taxonomy, applied as a single `module:<name>` label on a freshly-CREATED ticket
+    only — never on a dedup-fold-in comment, mirroring `sp:<n>`/`priority:<Pn>`'s same scoping.
+    Returns `[]` (no-op) for a repo with no taxonomy configured or the opt-in left at its
+    default False — this must never change existing behavior for a repo that hasn't opted in.
+    """
+    if not cfg.classify_infer_module:
+        return []
+    from .modules import infer_module, label_for, load_taxonomy
+
+    taxonomy = load_taxonomy(cfg)
+    name = infer_module(taxonomy, text)
+    return [label_for(name)] if name else []
+
+
 def _classify_create(
     args: argparse.Namespace,
     cfg,
@@ -5603,6 +5823,7 @@ def _classify_create(
                     "needs-triage",
                     f"sp:{classification.story_points}",
                     f"priority:{classification.priority}",
+                    *_inferred_module_labels(cfg, args.text),
                 ]
             )
         ),
