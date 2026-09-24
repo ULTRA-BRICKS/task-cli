@@ -19,7 +19,17 @@ identical shape:
     package not being installed, the first-run HuggingFace model download failing, or the
     `predict()` call itself raising all make this provider report itself unavailable / return
     `None`, so `build_classifier_chain`'s caller (`cli._classify_one`) falls through to the
-    NEXT configured provider — never a crash, never a traceback.
+    NEXT configured provider — never a crash, never a traceback. task-cli#208: `available()`
+    auto-installs the `laya` package the first time it's found genuinely not importable (once
+    per instance, cooldown-cached on failure — see `tasklib.laya_autoinstall`'s module
+    docstring) and, on success, re-checks importability in the SAME call so a fresh checkout
+    with no `laya` extra installed still classifies with it on the very first `task classify`.
+
+task-cli#208: `laya` is now the zero-config DEFAULT `classify.fallbacks` head. That policy
+lives entirely in `config.py`'s `DEFAULTS["classify"]["fallbacks"]` (which now lists `laya`
+first) -- NOT in `build_classifier_chain` itself, which keeps its pre-#208 grouping-only
+contract unchanged (see its own docstring). An explicit, repo-configured `classify.fallbacks`
+(even one that omits `laya`) is never altered by either mechanism.
 
 `build_classifier_chain` turns a `classify.fallbacks` config list (e.g.
 `[{"laya": "local"}, {"anthropic": "claude-haiku-4-5"}, ...]`) into an ordered list of
@@ -70,6 +80,11 @@ class ClassifierProvider(Protocol):
     asks for. `ReviewCliClassifier` never returns `None` once available — its underlying
     `parse_classification` already defends a malformed/empty model reply with its own
     per-axis safe defaults, so that pre-existing single-shot behavior is preserved unchanged.
+
+    `available()` is USUALLY a cheap, side-effect-free reachability probe (an env-key check,
+    `shutil.which`, `find_spec`) — the one exception is `LayaClassifier.available()`
+    (task-cli#208), which may run a real `pip install` (bounded, at most once per instance)
+    the first time it finds the package genuinely not installed. Never raises either way.
     """
 
     def available(self) -> bool: ...
@@ -237,15 +252,44 @@ class LayaClassifier:
 
     model_id: str = _LAYA_DEFAULT_MODEL_ID
     _agent: object | None = field(default=None, init=False, repr=False, compare=False)
+    # task-cli#208: at most one auto-install attempt per INSTANCE (`build_classifier_chain`
+    # mints a fresh `LayaClassifier` per `task classify` invocation), matching the "one time
+    # per invocation" requirement without needing a separate call counter.
+    _autoinstall_attempted: bool = field(default=False, init=False, repr=False, compare=False)
 
     def available(self) -> bool:
         try:
-            return importlib.util.find_spec("laya") is not None
+            found = importlib.util.find_spec("laya") is not None
         except Exception:
             # `find_spec` is documented to be able to raise on a broken/partial install
             # (corrupted `.pth` entries, malformed namespace-package metadata) rather than
             # just returning `None` -- treat that the same as "not installed" so `available()`
-            # keeps its own "never raises" promise, matching `classify()`.
+            # keeps its own "never raises" promise, matching `classify()`. Deliberately NOT
+            # routed into the auto-installer below: a broken/partial install is a different,
+            # weirder failure than "never installed", and blindly reinstalling over it risks
+            # masking the real problem rather than fixing it.
+            return False
+        if found:
+            return True
+        if self._autoinstall_attempted:
+            return False
+        self._autoinstall_attempted = True
+        # task-cli#208: laya is now the zero-config DEFAULT provider (see `build_classifier_
+        # chain`), so a fresh checkout with the `laya` extra never installed must still get to
+        # use it on the very first `task classify` -- attempt exactly once here, specifically
+        # on the "package genuinely not importable" path (a model-load/predict failure is a
+        # SEPARATE runtime path, handled entirely inside `classify()`, and never reaches here).
+        # `ensure_installed` already re-verifies importability (and marks the cooldown on
+        # either a pip failure OR a "succeeded but still unimportable" outcome) before
+        # returning -- its return value IS the ground truth, no second find_spec probe needed.
+        # `ensure_installed` itself never raises (its own try/except), but the import AND the
+        # call are ALSO wrapped here so `available()` keeps its documented "never raises"
+        # promise even against a hypothetical import-time failure in that module.
+        try:
+            from . import laya_autoinstall
+
+            return laya_autoinstall.ensure_installed()
+        except Exception:
             return False
 
     def classify(self, message: str, bias: "Verdict") -> "Classification | None":
@@ -343,9 +387,15 @@ def build_classifier_chain(
 
     See the module docstring for the laya-vs-review-cli grouping rule and the SECURITY note
     on why a `{laya: <value>}` entry's value only decides routing, never which Hub id loads.
-    A `None` `fallbacks` (no `classify.fallbacks` configured) uses `classify.DEFAULT_FALLBACKS`,
-    exactly matching `resolve_chain`'s own default -- the pre-#206 default config (no `laya`
-    entry) still resolves to a single `ReviewCliClassifier`, byte-for-byte the old behavior.
+
+    A `None` `fallbacks` uses `classify.DEFAULT_FALLBACKS` (pre-#206 behavior, unchanged) --
+    task-cli#208's zero-config "`laya` first" default is implemented entirely in `config.py`'s
+    `DEFAULTS["classify"]["fallbacks"]` (which now lists `laya` first), NOT here: `cli.
+    _classify_one`'s one real caller always passes `cfg.classify_fallbacks` (never bare
+    `None`), so this function only ever groups whatever chain it's handed -- see `config.py`'s
+    `DEFAULTS` comment for the actual default-construction mechanism and why keeping that
+    policy in exactly one place (rather than also duplicating it here) was a deliberate,
+    review-driven simplification.
     """
     from .classify import DEFAULT_FALLBACKS
 

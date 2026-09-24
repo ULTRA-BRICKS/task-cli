@@ -615,19 +615,56 @@ kinds:
   itself), so this provider does not itself fall through to a later one in `fallbacks`.
 - **`laya`** — a REAL, free, fully local classifier: Convai Innovations' Apache-2.0 "laya"
   PyPI package (an open-weights alternative to the paid cloud "Jev" model). Runs entirely
-  in-process (no subprocess, no API key) once its optional extra is installed:
-  `uv sync --extra laya` (or `pip install task-cli[laya]`). Never a hard dependency and never
-  imported at module top — `task --help` and every other command stay dependency-free whether
-  or not it's installed. Not installed, its first-run HuggingFace model download fails (no
-  network/disk/rate-limit), or the model call itself errors (logged to stderr) → it reports
-  itself unreachable and the chain falls through to the NEXT configured provider — the only
-  provider kind that does. Security: the `{ laya: <value> }` value only decides whether this
-  entry becomes a laya provider at all — it is NEVER used to pick which model loads (always
-  the built-in `convaiinnovations/laya` checkpoint), since `classify.fallbacks` can come from
-  a repo-scoped `task.yaml`/`rig.yaml` that `task classify` — running inside the target repo
-  it's ticketing — must not trust with an arbitrary Hub id to download and execute in-process.
-  Put `laya` first in `fallbacks` (see the config block above) to try the free local model
-  before spending an API call.
+  in-process (no subprocess, no API key). **The zero-config DEFAULT (task-cli#208):** a repo
+  with no committed `classify.fallbacks` tries `laya` FIRST, ahead of the hardcoded
+  `review-cli` chain above. The real mechanism is `config.py`'s built-in `DEFAULTS` (the
+  layer-0 config every repo starts from) listing `{laya: local}` first — the cascade merge
+  replaces a `fallbacks:` list WHOLESALE, never item-by-item, so a repo's own committed
+  `classify.fallbacks` (even one that never mentions `laya`) fully replaces this default and
+  is never silently altered. `tasklib/classifiers.py`'s `build_classifier_chain` itself is
+  UNCHANGED from before task-cli#208 (a `None` input still uses the plain, laya-free
+  `classify.DEFAULT_FALLBACKS`) — it only groups whatever chain it's handed.
+
+  **Auto-install.** `laya` is never a hard dependency and never imported at module top —
+  `task --help` and every other command stay dependency-free whether or not it's installed.
+  The first time `task classify` actually reaches the `laya` step and finds the package not
+  importable, it auto-installs it once (`tasklib/laya_autoinstall.py`) before falling through
+  to the next provider:
+  1. `python3 -m pip install --user laya>=0.3.7,<0.4` (`python3` = `sys.executable`, i.e. the
+     exact interpreter `task classify` is already running under; the pin matches
+     `pyproject.toml`'s `laya` extra exactly — an unpinned install could pull a breaking
+     release `LayaClassifier`'s hand-parsed result shape can no longer read). Inside an
+     activated virtualenv, `--user` is dropped entirely (pip refuses it there outright) —
+     the venv's own site-packages is already an isolated, user-writable location.
+  2. If that fails specifically with pip's PEP 668 `externally-managed-environment` error
+     (a Homebrew/distro-managed Python — verified on real machines), retries ONCE with
+     `--user --break-system-packages` — the fix pip's own error message recommends. `--user`
+     confines the install to your OWN site-packages, never a Homebrew-managed or system file,
+     which is what makes auto-appending that flag safe without asking first. A different
+     failure (no network, disk full, ...) never gets this retry, and neither does a venv.
+
+  On success, the SAME `task classify` invocation retries and proceeds with `laya`
+  immediately — no re-exec, no second run needed. On failure, it falls through to the next
+  provider exactly like an already-uninstalled `laya` always has, and caches the failure
+  under `~/.local/state/task-cli/laya_autoinstall/` for 24h
+  (`$TASK_LAYA_AUTOINSTALL_COOLDOWN_S` to override) so a subsequent call on an offline machine
+  skips the network attempt entirely instead of paying a pip-timeout tax on every invocation.
+  A corrupted/unreadable cache file fails OPEN (treated as "never attempted") rather than
+  wedging auto-install off permanently. `install.sh` also attempts this same two-step install,
+  best-effort, when you first install `task` — so on most machines `laya` is already present
+  before you ever run `task classify`.
+
+  Not installed (and auto-install also failed/was skipped), its first-run HuggingFace model
+  download fails (no network/disk/rate-limit), or the model call itself errors (logged to
+  stderr) → it reports itself unreachable and the chain falls through to the NEXT configured
+  provider — the only provider kind that does. Security: the `{ laya: <value> }` value only
+  decides whether this entry becomes a laya provider at all — it is NEVER used to pick which
+  model loads (always the built-in `convaiinnovations/laya` checkpoint), since
+  `classify.fallbacks` can come from a repo-scoped `task.yaml`/`rig.yaml` that `task classify`
+  — running inside the target repo it's ticketing — must not trust with an arbitrary Hub id to
+  download and execute in-process. To opt back INTO an explicit chain (e.g. to reorder it, or
+  to drop `laya` entirely), configure `classify.fallbacks` yourself — see the config block
+  below.
 
 **Bias is to `change` on ambiguity between change/justAsk** — most questions to a dev agent
 are latent change requests; that bias never applies to a genuine `actionable` signal, which is
@@ -743,11 +780,13 @@ classify:
     - { zai:         glm-4.6-flash }
     - { google:      gemini-2.5-flash }
     - { ollama:      qwen2.5:3b }
-    # - { laya: local }               # opt-in: a REAL, free, local classifier (Convai
-    #                                 # Innovations' Apache-2.0 "laya" PyPI package, an
-    #                                 # open-weights alternative to the paid cloud "Jev"
-    #                                 # model) -- see "Classification" below for how it plugs
-    #                                 # into the provider chain and its `laya` extra.
+    # - { laya: local }               # explicit opt-in equivalent to the IMPLICIT zero-
+    #                                 # config default (task-cli#208 -- an unconfigured
+    #                                 # `fallbacks:` already tries `laya` first automatically;
+    #                                 # only list it here to pin its position when the rest of
+    #                                 # this chain is also explicitly configured, e.g. to try
+    #                                 # it AFTER a paid provider instead of first). See
+    #                                 # "Classification" above for auto-install + the extra.
     # - { jev:  <model> }             # config plumbing only, unverified — no real endpoint
     #                                 # call exists for jev in this repo yet
   bias: change
@@ -767,7 +806,9 @@ daemon:                              # the due-date reminder watcher (all keys o
 ```
 
 Config is committed by default and scoped by location, never a flag. With no config at all the
-tool defaults to `github-issues` with every gate on (and the daemon's built-in defaults above).
+tool defaults to `github-issues` with every gate on, `classify.fallbacks` trying `laya` first
+(task-cli#208, auto-installed on demand — see "Classification" above), and the daemon's
+built-in defaults above.
 
 **`trusted_attachment_hosts` — what it does and does not protect against.** Entries are
 validated as bare hostnames: no scheme/path/port/userinfo, no IP literal (canonical or any

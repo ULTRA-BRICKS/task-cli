@@ -162,6 +162,31 @@ walks the chain and uses the first provider that is BOTH available AND actually 
 `Classification` — a provider that looks reachable but fails at runtime returns `None` and the
 chain falls through to the next one, same as the pre-existing "no reachable provider" path.
 
+**task-cli#208: `laya` is the zero-config DEFAULT, auto-installed on demand.** The default
+lives entirely in `config.DEFAULTS["classify"]["fallbacks"]`, which now lists `{laya: local}`
+FIRST -- `cli._classify_one` passes `cfg.classify_fallbacks` straight through (never coalesced
+to `None`), and the cascade merge replaces a `fallbacks:` list WHOLESALE, so any repo's own
+committed `classify.fallbacks` (even one omitting `laya`) fully overrides this default and is
+never silently altered (verified live against this repo's own laya-free `task.yaml` pin).
+`build_classifier_chain` itself is UNCHANGED from pre-#208 (`None` -> `classify.
+DEFAULT_FALLBACKS`, no laya) -- it only groups whatever chain it's handed; see its own
+docstring, and `test_build_classifier_chain_default_fallbacks_is_a_single_review_cli_group`.
+
+`LayaClassifier.available()` auto-installs the package (once per instance, i.e. once per
+`task classify` invocation) the first time it's found genuinely not importable: see
+`tasklib/laya_autoinstall.py`'s module docstring for the full pip PEP-668/
+`--break-system-packages`/24h-cooldown-cache design (live-verified end to end: a real PEP 668
+externally-managed-environment failure on the first attempt, an automatic
+`--break-system-packages` retry, a real install, and a real loaded `laya` model producing a
+live classification, all in one `task classify` invocation). `available()` deliberately
+routes ONLY the `find_spec() is None` branch into the auto-installer -- a `find_spec`
+exception (broken/partial install metadata) is a different, weirder failure and is left
+alone, matching the pre-#208 "treat as not installed, don't reinstall over it" posture.
+`install.sh` also attempts this same best-effort, non-fatal install
+(`scripts/lib/install_laya.sh`) against `command -v python3` (the interpreter `bin/task`'s
+shebang resolves to) when `task` itself is installed, so on most machines the runtime
+auto-install path is never even needed.
+
 - **`ReviewCliClassifier`** — the original path, refactored in place, unchanged behavior:
   resolves the **first available** model in the per-provider fallback chain
   (`classify.resolve_chain`, default head haiku) and shells out to `review just-ask
@@ -176,12 +201,15 @@ chain falls through to the next one, same as the pre-existing "no reachable prov
   Apache-2.0 "laya" PyPI package (an open-weights alternative to the paid cloud "Jev"
   model). Runs entirely in-process — no subprocess, no API key, no `review` involvement —
   via `laya.load(model_id).predict(message, questions) -> dict`. Optional dependency
-  (`pyproject.toml`'s `laya` extra, `uv sync --extra laya`), lazily imported inside
-  `_load_agent`/`classify` (never at this module's top — stdlib-only-at-import-time still
-  holds for every `tasklib/*` module). `available()` is `importlib.util.find_spec("laya") is
-  not None` (cheap, no import); `classify()` never raises — package missing, a first-run
-  HuggingFace download failure, or a `predict()`/result-mapping runtime error all yield
-  `None` (fall through, with a stderr diagnostic so a broken local install is observable)
+  (`pyproject.toml`'s `laya` extra, `uv sync --extra laya` — or auto-installed at runtime,
+  see the task-cli#208 note above), lazily imported inside `_load_agent`/`classify` (never at
+  this module's top — stdlib-only-at-import-time still holds for every `tasklib/*` module).
+  `available()` starts with a cheap `importlib.util.find_spec("laya") is not None` check --
+  when that's `False`, it also drives the task-cli#208 auto-install (`ensure_installed`
+  above) before returning, so it is NO LONGER guaranteed cheap/import-free on that path.
+  `classify()` never raises — package missing, a first-run HuggingFace download failure, or a
+  `predict()`/result-mapping runtime error all yield `None` (fall through, with a stderr
+  diagnostic so a broken local install is observable)
   instead of a crash or traceback. `laya` is DELIBERATELY ABSENT from `classify.py`'s
   `_PROVIDER_MODEL_PREFIX`/`_LOCAL_DAEMON_PROVIDERS`/`_PROVIDER_KEY_ENV` tables (unlike
   `jev`) — it never touches `resolve_chain`/`review` at all. SECURITY (two layers,

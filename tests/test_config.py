@@ -47,7 +47,8 @@ def test_classify_fallbacks_parsed_to_pairs(tmp_path, monkeypatch):
     cfg = load(tmp_path)
     chain = cfg.classify_fallbacks
     assert ("anthropic", "claude-haiku-4-5") in chain
-    assert chain[0][0] == "anthropic"  # default head
+    assert chain[0][0] == "laya"  # task-cli#208: laya is the new zero-config default head
+    assert chain[1][0] == "anthropic"  # the pre-#208 default head, now second
 
 
 def test_classify_fallbacks_accepts_a_laya_entry(tmp_path, monkeypatch):

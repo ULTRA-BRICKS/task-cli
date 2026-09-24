@@ -270,7 +270,17 @@ DEFAULTS: dict[str, Any] = {
         "escape_hatch": "explain",
     },
     "classify": {
+        # task-cli#208: `laya` (tasklib/classifiers.py's `LayaClassifier` — a real, free,
+        # local classifier) is the ZERO-CONFIG default head, auto-installed on demand if
+        # missing (tasklib/laya_autoinstall.py) before falling through to the LLM chain
+        # below. This list is a plain scalar VALUE in the cascade merge (`_deep_merge`
+        # replaces a list wholesale, never merges item-by-item) -- a repo's own committed
+        # `classify.fallbacks` (task.yaml / rig.yaml `task:` block), even one that omits
+        # `laya` entirely, REPLACES this list completely and is never silently altered.
+        # The routing-only security note on the `{laya: <value>}` value lives in
+        # `tasklib/classifiers.py`'s module docstring.
         "fallbacks": [
+            {"laya": "local"},
             {"anthropic": "claude-haiku-4-5"},
             {"openai": "gpt-5-mini"},
             {"commandcode": "deepseek/deepseek-v4-flash"},

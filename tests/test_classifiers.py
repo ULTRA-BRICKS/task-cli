@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from tasklib.classify import Classification, ResolvedModel, Verdict
+from tasklib.classify import Classification, DEFAULT_FALLBACKS, ResolvedModel, Verdict
 from tasklib.classifiers import (
     LayaClassifier,
     ReviewCliClassifier,
@@ -195,9 +195,14 @@ def test_review_cli_classifier_label_is_none_when_unresolved(monkeypatch):
 
 
 def test_build_classifier_chain_default_fallbacks_is_a_single_review_cli_group():
+    # task-cli#208 review finding: `build_classifier_chain`'s own `None` handling stays
+    # pre-#208 (no laya prepend) -- the zero-config "laya first" policy lives entirely in
+    # `config.py`'s `DEFAULTS["classify"]["fallbacks"]`, the one real caller (`cli.
+    # _classify_one`) never passes bare `None`. See `test_config.py` for the real default.
     providers = build_classifier_chain(None)
     assert len(providers) == 1
     assert isinstance(providers[0], ReviewCliClassifier)
+    assert providers[0].fallbacks == list(DEFAULT_FALLBACKS)
 
 
 def test_build_classifier_chain_no_laya_stays_one_group():
@@ -270,9 +275,62 @@ def test_laya_classifier_available_true_when_package_importable(monkeypatch):
     assert LayaClassifier().available() is True
 
 
-def test_laya_classifier_available_false_when_package_missing(monkeypatch):
+def test_laya_classifier_available_false_when_package_missing_and_autoinstall_declines(monkeypatch):
+    # `laya_autoinstall.ensure_installed` is mocked here (never a real subprocess/network call
+    # in the hermetic suite) -- returning `False` (cooldown-skipped or a failed attempt) means
+    # `available()` must still resolve to `False`, exactly like the pre-#208 behavior.
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr("tasklib.laya_autoinstall.ensure_installed", lambda **k: False)
     assert LayaClassifier().available() is False
+
+
+def test_laya_classifier_available_attempts_autoinstall_when_missing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(
+        "tasklib.laya_autoinstall.ensure_installed", lambda **k: calls.append(1) or False
+    )
+    LayaClassifier().available()
+    assert calls == [1]
+
+
+def test_laya_classifier_available_true_after_successful_autoinstall(monkeypatch):
+    # `ensure_installed()` itself re-verifies importability (see its own docstring) before
+    # returning `True` -- `available()` trusts that return value directly, with no second
+    # `find_spec` probe of its own (same-invocation recovery, no re-exec, no double-check).
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr("tasklib.laya_autoinstall.ensure_installed", lambda **k: True)
+    assert LayaClassifier().available() is True
+
+
+def test_laya_classifier_available_only_attempts_autoinstall_once_per_instance(monkeypatch):
+    # Two `available()` calls on the SAME instance (still missing both times) must only ever
+    # trigger ONE auto-install attempt -- the "one time per invocation" requirement.
+    attempts = []
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(
+        "tasklib.laya_autoinstall.ensure_installed", lambda **k: attempts.append(1) or False
+    )
+    provider = LayaClassifier()
+    assert provider.available() is False
+    assert provider.available() is False
+    assert attempts == [1]
+
+
+def test_laya_classifier_available_broken_install_never_triggers_autoinstall(monkeypatch):
+    # A `find_spec` raise (corrupted/partial install) must NOT trigger the auto-installer --
+    # that's a different, weirder failure than "never installed" (see `available()`'s docstring).
+    calls = []
+    monkeypatch.setattr(
+        "tasklib.laya_autoinstall.ensure_installed", lambda **k: calls.append(1) or True
+    )
+
+    def _boom(name):
+        raise ImportError("simulated broken install metadata")
+
+    monkeypatch.setattr(importlib.util, "find_spec", _boom)
+    assert LayaClassifier().available() is False
+    assert calls == []
 
 
 def test_laya_classifier_available_never_raises_even_if_find_spec_does(monkeypatch):
