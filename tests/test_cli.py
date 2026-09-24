@@ -692,7 +692,10 @@ def test_create_recent_tickets_absent_when_session_undetected(
         "default", "#99", "Unrelated project's ticket", int(time.time()) - 60
     )
 
-    rc = main(_create_argv(**{"-C": str(tmp_path)}))
+    # UB-25: an explicit non-repo -C is refused for writes, so the non-git session context is
+    # the process cwd instead.
+    monkeypatch.chdir(tmp_path)
+    rc = main(_create_argv())
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -1821,6 +1824,43 @@ def test_change_metadata_does_not_emit_priority_attention(capsys, _inject_fake):
     assert rc == 0
     assert "updated #2" in out
     assert "active tasks in this session" not in out
+
+
+def test_status_transition_json_prints_only_the_ticket_json(capsys, _inject_fake):
+    import json
+
+    _inject_fake.create(Ticket(title="Move me", state=cli.State.TODO))
+    rc = main(["status", "#1", "in-progress", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    data = json.loads(out)  # the whole stdout must parse (automation pipes it through jq)
+    assert data["id"] == "#1" and data["state"] == "in-progress"
+
+
+def test_status_read_json_prints_the_ticket_json(capsys, _inject_fake):
+    import json
+
+    _inject_fake.create(Ticket(title="Read me", state=cli.State.TODO))
+    assert main(["status", "#1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "todo"
+
+
+def test_fixture_cwd_is_an_owned_repo_with_a_fixed_github_origin(tmp_path):
+    # UB-25: the suite must not depend on the developer checkout's own origin (a Forgejo host
+    # here) — `isolated_state` runs every test from an owned throwaway repo instead.
+    import os
+    import subprocess
+    from pathlib import Path
+
+    cwd = Path(os.getcwd()).resolve()
+    assert cwd.is_relative_to(tmp_path.resolve())
+    origin = subprocess.run(
+        ["git", "remote", "get-url", "origin"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert origin == "https://github.com/acme/widgets"
+    assert cli._current_project_overlay(cli._load(cli.build_parser().parse_args(["list"])))[0] == (
+        "acme/widgets"
+    )
 
 
 def test_status_transition_refreshes_session_touch(capsys, _inject_fake):

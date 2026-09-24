@@ -1,7 +1,8 @@
 """Backend abstraction — the ``TicketBackend`` protocol + the adapter selector.
 
 Adapters call the provider API **directly** (stdlib ``urllib``, no per-call subprocess):
-``github_issues`` → GitHub REST, ``linear`` → Linear GraphQL. The rest of the tool never
+``github_issues`` → GitHub REST, ``linear`` → Linear GraphQL, ``tasks`` → tasks-app REST,
+``forgejo`` → Forgejo REST. The rest of the tool never
 touches a provider; it speaks only this protocol, so a fake backend (tests) is a drop-in.
 """
 
@@ -131,6 +132,17 @@ def backend_coordinate(backend) -> str:
         team = str(getattr(backend, "team_key", "") or "").strip().upper()
         project = str(getattr(backend, "project", "") or "").strip()
         return f"linear:{team}/{project}" if project else f"linear:{team}"
+    if backend.name == "tasks":
+        url = str(getattr(backend, "url", "") or "").strip()
+        team = str(getattr(backend, "team_key", "") or "").strip().upper()
+        return f"tasks:{url}/{team}" if team else f"tasks:{url}"
+    if backend.name == "forgejo":
+        # The origin is part of the identity: issue numbers are per-repository, and two forges
+        # can both host an `acme/web`.
+        url = str(getattr(backend, "url", "") or "").strip().lower()
+        owner = str(getattr(backend, "owner", "") or "").strip().lower()
+        repo = str(getattr(backend, "repo", "") or "").strip().lower()
+        return f"forgejo:{url}/{owner}/{repo}"
     owner = str(getattr(backend, "owner", "") or "").strip().lower()
     repo = str(getattr(backend, "repo", "") or "").strip().lower()
     return f"github-issues:{owner}/{repo}"
@@ -189,4 +201,12 @@ def get_backend(config, *, env: dict | None = None):
         from .linear import LinearBackend
 
         return LinearBackend.from_config(config, env=env)
+    if backend == "tasks":
+        from .tasks import TasksBackend
+
+        return TasksBackend.from_config(config, env=env)
+    if backend == "forgejo":
+        from .forgejo import ForgejoBackend
+
+        return ForgejoBackend.from_config(config, env=env)
     raise BackendError(f"unknown backend {backend!r}")

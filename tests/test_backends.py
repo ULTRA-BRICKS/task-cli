@@ -2632,3 +2632,336 @@ def test_verified_ticket_coordinate_matches_between_linear_create_and_get_respon
     create_coord = verified_ticket_coordinate(cfg, backend, create_response_ticket)
     get_coord = verified_ticket_coordinate(cfg, backend, get_response_ticket)
     assert create_coord == get_coord == backend_coordinate(backend)
+
+
+# ── Tasks backend — transport errors, redirects, credential origin binding, stale versions,
+# aliases, body preservation (tests/test_tasks_backend.py is the hermetic red-first spec this
+# supplements, not duplicates — see that file for the primary protocol/pagination/transition
+# contract tests).
+
+_TASKS_ORIGIN = "https://tasks.example.test"
+_TASKS_TOKEN = "synthetic-test-token"
+_TASKS_CATALOG = {
+    "teams": [{"id": "team-1", "key": "GL"}],
+    "statuses": [
+        {"id": "todo", "team_id": "team-1", "category": "unstarted", "name": "Todo"},
+        {"id": "doing", "team_id": "team-1", "category": "started", "name": "In progress"},
+        {"id": "review", "team_id": "team-1", "category": "started", "name": "In Review"},
+        {"id": "done", "team_id": "team-1", "category": "completed", "name": "Done"},
+        {"id": "cancelled", "team_id": "team-1", "category": "canceled", "name": "Cancelled"},
+    ],
+    "labels": [],
+}
+_TASKS_ROW = {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "key": "GL-1",
+    "title": "Original title",
+    "description": "Original body.",
+    "version": 3,
+    "team_id": "team-1",
+    "status_id": "todo",
+    "status_category": "unstarted",
+    "status_name": "Todo",
+    "labels": [],
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-02T00:00:00Z",
+}
+
+
+def _tasks_backend():
+    from tasklib.backends.tasks import TasksBackend
+
+    return TasksBackend(url=_TASKS_ORIGIN, token=_TASKS_TOKEN, team_key="GL")
+
+
+def test_tasks_transport_error_wraps_as_backend_error(monkeypatch):
+    from tasklib.backends.http import HttpError
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        raise HttpError(503, f"HTTP 503 for {method} {url}", "team offline")
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    with pytest.raises(BackendError, match="503"):
+        _tasks_backend().get("GL-1")
+
+
+def test_tasks_stale_version_conflict_surfaces_backend_error(monkeypatch):
+    # a PATCH racing a concurrent editor gets a real 409 from the server — must surface as a
+    # clean BackendError (not crash raw), naming the conflict so a caller can re-read and retry.
+    #
+    # Starts from a REAL get() snapshot (the read-once contract's own precondition), not a
+    # synthetic Ticket() with the default backend_version=0 — update() now refuses that before
+    # any network call at all (see tests/test_tasks_update_safety.py's
+    # test_missing_backend_version_raises), so a version-0 ticket would never even reach the
+    # PATCH this test needs to exercise. This test proves the SERVER-SIDE conflict path
+    # specifically: a correctly-versioned write that still 409s because someone else committed
+    # an edit in between.
+    import json as _json
+    from dataclasses import replace
+
+    from tasklib.backends.http import HttpError
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        if method == "PATCH":
+            raise HttpError(409, f"HTTP 409 for {method} {url}", '{"error":{"code":"conflict"}}')
+        if url.endswith("/catalog"):
+            return _json.dumps(_TASKS_CATALOG).encode()
+        return _json.dumps(_TASKS_ROW).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    snapshot = _tasks_backend().get("GL-1")
+    with pytest.raises(BackendError, match="409"):
+        _tasks_backend().update(replace(snapshot, title="new title"))
+
+
+def test_tasks_update_uses_original_read_version_without_re_reading(monkeypatch):
+    # optimistic concurrency: update() must send the version THIS caller's own get() saw, and
+    # must never re-read the issue row itself before writing — a re-read would silently widen
+    # the race window a version check exists to close (see tests/test_tasks_update_safety.py for
+    # the hermetic, exhaustive version of this contract; this proves the same property through
+    # this file's own request-mock shape/fixtures). A metadata-only edit (title) is used here
+    # deliberately, so this test is about the READ-ONCE/version property in isolation — see
+    # test_tasks_update_managed_body_edit_persists_change right below for the body-edit case.
+    import json as _json
+    from dataclasses import replace
+
+    calls = []
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        payload = _json.loads(data) if data else None
+        calls.append((method, url, payload))
+        if method == "PATCH":
+            return _json.dumps({**_TASKS_ROW, **payload, "version": _TASKS_ROW["version"] + 1}).encode()
+        if url.endswith("/catalog"):
+            return _json.dumps(_TASKS_CATALOG).encode()
+        return _json.dumps(_TASKS_ROW).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    snapshot = _tasks_backend().get("GL-1")
+    assert snapshot.backend_version == _TASKS_ROW["version"]
+
+    updated = _tasks_backend().update(replace(snapshot, title="Updated title"))
+
+    issue_get_calls = [c for c in calls if c[0] == "GET" and "/issues/" in c[1]]
+    assert len(issue_get_calls) == 1  # only the ORIGINAL get() above — update() re-read nothing
+    patch_call = next(c for c in calls if c[0] == "PATCH")
+    assert patch_call[2]["version"] == _TASKS_ROW["version"]  # the version the original read saw
+    assert "description" not in patch_call[2]  # metadata-only edit — body untouched, not resent
+    assert updated.backend_version == _TASKS_ROW["version"] + 1
+
+
+def test_tasks_update_managed_body_edit_persists_change(monkeypatch):
+    # a legitimate content edit (a field task-cli's own §5 template owns) is detected and sent —
+    # tested in isolation from the read-once/metadata-only case above, so the two properties
+    # ("update never re-reads" and "a real body edit is actually persisted") aren't conflated
+    # into one assertion each could pass or fail independently of the other.
+    import json as _json
+    from dataclasses import replace
+
+    from tasklib.render import render
+
+    original_ticket = Ticket(id="GL-1", title="Original title", what="original what")
+    managed_row = {**_TASKS_ROW, "description": render(original_ticket)}
+    calls = []
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        payload = _json.loads(data) if data else None
+        calls.append((method, url, payload))
+        if method == "PATCH":
+            return _json.dumps({**managed_row, **payload, "version": managed_row["version"] + 1}).encode()
+        if url.endswith("/catalog"):
+            return _json.dumps(_TASKS_CATALOG).encode()
+        return _json.dumps(managed_row).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    snapshot = _tasks_backend().get("GL-1")
+    edited = replace(snapshot, what="a body task-cli owns")
+
+    updated = _tasks_backend().update(edited)
+
+    patch_call = next(c for c in calls if c[0] == "PATCH")
+    assert patch_call[2]["version"] == managed_row["version"]  # still the original read's version
+    assert "a body task-cli owns" in patch_call[2]["description"]  # the real edit was sent
+    assert updated.backend_version == managed_row["version"] + 1
+
+
+def test_tasks_ambiguous_read_not_catchable_as_backend_error(monkeypatch):
+    from tasklib.backends.http import AmbiguousHttpError
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        raise AmbiguousHttpError(f"connection dropped after 200 for {method} {url}")
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    try:
+        _tasks_backend().get("GL-1")
+    except BackendError:
+        pytest.fail("AmbiguousBackendError must not be catchable as BackendError")
+    except AmbiguousBackendError:
+        pass
+
+
+def test_tasks_all_calls_pass_same_host_redirects_only(monkeypatch):
+    # every request carries the bearer token — a redirect off the requested host must never be
+    # followed (credential exfiltration), same discipline as Linear's/GitHub's native uploads.
+    import json as _json
+
+    seen = []
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        seen.append(same_host_redirects_only)
+        return _json.dumps(_TASKS_ROW).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    _tasks_backend().get("GL-1")
+    assert seen == [True]
+
+
+def test_tasks_alias_normalizes_team_prefix_case(monkeypatch):
+    import json as _json
+
+    calls = []
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        calls.append(url)
+        return _json.dumps(_TASKS_ROW).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    _tasks_backend().get("gl-1")
+    assert calls == [_TASKS_ORIGIN + "/api/v1/issues/GL-1"]
+
+
+def test_tasks_alias_leaves_non_matching_code_untouched(monkeypatch):
+    # a UUID (or any code not shaped like THIS team's TEAM-N key) is passed through verbatim —
+    # it's still a legitimate /issues/{id} lookup, not necessarily a typo.
+    import json as _json
+
+    calls = []
+    uuid = "22222222-2222-4222-8222-222222222222"
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        calls.append(url)
+        return _json.dumps(_TASKS_ROW).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    _tasks_backend().get(uuid)
+    assert calls == [_TASKS_ORIGIN + "/api/v1/issues/" + uuid]
+
+
+# test_tasks_update_preserves_body_and_uses_freshly_read_version was removed here (UB-23 review
+# integration): it encoded the OLD, unsafe update() contract — calling update() on a synthetic
+# Ticket() that was never read via get() (backend_version=0, now refused before any network
+# call), and asserting update() always resends the full rendered body regardless of whether the
+# body actually changed (the opposite of the new metadata-only-edit omission rule). Replaced by
+# test_tasks_update_uses_original_read_version_without_re_reading (the read-once/version
+# property) and test_tasks_update_managed_body_edit_persists_change (a real body edit, tested in
+# isolation) above.
+
+
+def test_tasks_status_resolution_prefers_non_review_started_status_for_in_progress(monkeypatch):
+    # a team whose catalog has BOTH a plain "In progress" and a separate "In Review" started
+    # status must not collide them onto the same status id.
+    import json as _json
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        return _json.dumps(_TASKS_CATALOG).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    be = _tasks_backend()
+    assert be._status_id_for(State.IN_PROGRESS) == "doing"
+    assert be._status_id_for(State.IN_REVIEW) == "review"
+
+
+def test_tasks_attachment_upload_reserves_then_puts_same_origin_bytes(tmp_path, monkeypatch):
+    import json as _json
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG fake bytes")
+    calls = []
+
+    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
+        calls.append((method, url, data, dict(headers or {}), same_host_redirects_only))
+        if method == "POST" and url.endswith("/attachments"):
+            return _json.dumps({"id": "att-1"}).encode()
+        if method == "PUT":
+            return b""
+        return _json.dumps(_TASKS_ROW).encode()
+
+    monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
+    ref = _tasks_backend().attach("GL-1", str(png))
+    assert ref == _TASKS_ORIGIN + "/api/v1/attachments/att-1/content"
+    put_calls = [c for c in calls if c[0] == "PUT"]
+    assert len(put_calls) == 1
+    _, put_url, put_data, put_headers, put_redirects_guarded = put_calls[0]
+    assert put_url == ref
+    assert put_data == png.read_bytes()
+    assert put_headers["Authorization"] == f"Bearer {_TASKS_TOKEN}"
+    assert put_redirects_guarded is True
+
+
+def test_tasks_fetch_attachment_bytes_rejects_non_http_scheme(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "tasklib.backends.tasks.request_bytes",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    with pytest.raises(BackendError):
+        _tasks_backend().fetch_attachment_bytes("file:///etc/passwd")
+    assert calls == []  # never even reaches the network layer for an unusable scheme
+
+
+def test_tasks_credential_origin_mismatch_not_reused(tmp_path):
+    import json as _json
+
+    from tasklib.credentials import CredentialError, tasks_token
+
+    cfg_dir = tmp_path / "tickets-app"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(
+        _json.dumps({"url": "https://other-workspace.example.test", "token": "leaked-token"})
+    )
+    env = {"HOME": str(tmp_path), "TICKETS_CONFIG_DIR": str(cfg_dir)}
+    with pytest.raises(CredentialError):
+        tasks_token(_TASKS_ORIGIN, env)
+
+
+def test_tasks_credential_same_origin_reused(tmp_path):
+    import json as _json
+
+    from tasklib.credentials import tasks_token
+
+    cfg_dir = tmp_path / "tickets-app"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(_json.dumps({"url": _TASKS_ORIGIN, "token": "cli-token"}))
+    env = {"HOME": str(tmp_path), "TICKETS_CONFIG_DIR": str(cfg_dir)}
+    creds = tasks_token(_TASKS_ORIGIN, env)
+    assert creds.token == "cli-token"
+
+
+def test_tasks_from_config_missing_url_raises():
+    from types import SimpleNamespace
+
+    from tasklib.backends.tasks import TasksBackend
+
+    cfg = SimpleNamespace(backend="tasks", section=lambda name: {"team": "GL"})
+    with pytest.raises(BackendError, match="url"):
+        TasksBackend.from_config(cfg, env={"TASKS_TOKEN": "t"})
+
+
+def test_tasks_from_config_missing_team_raises():
+    from types import SimpleNamespace
+
+    from tasklib.backends.tasks import TasksBackend
+
+    cfg = SimpleNamespace(backend="tasks", section=lambda name: {"url": _TASKS_ORIGIN})
+    with pytest.raises(BackendError, match="team"):
+        TasksBackend.from_config(cfg, env={"TASKS_TOKEN": "t"})
+
+
+def test_tasks_backend_coordinate_distinct_per_team():
+    from tasklib.backends import backend_coordinate
+    from tasklib.backends.tasks import TasksBackend
+
+    gl = TasksBackend(url=_TASKS_ORIGIN, token=_TASKS_TOKEN, team_key="GL")
+    hyp = TasksBackend(url=_TASKS_ORIGIN, token=_TASKS_TOKEN, team_key="HYP")
+    assert backend_coordinate(gl) != backend_coordinate(hyp)
+    assert backend_coordinate(gl) == f"tasks:{_TASKS_ORIGIN}/GL"

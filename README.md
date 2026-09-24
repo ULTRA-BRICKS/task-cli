@@ -33,8 +33,9 @@ gh auth login      # GitHub Issues (the default backend)
 linear auth        # Linear (per-repo, via the rig.yaml task: block)
 ```
 
-`task` reads `gh auth token` / `~/.config/linear/credentials.toml` (or `$GITHUB_TOKEN` /
-`$LINEAR_API_KEY`) and calls the API directly. Tokens are never logged or persisted.
+`task` reads `gh auth token` / `~/.config/linear/credentials.toml` / the `fj` CLI's stored
+Forgejo token (or `$GITHUB_TOKEN` / `$LINEAR_API_KEY` / `$FORGEJO_TOKEN`) and calls the API
+directly. Tokens are never logged or persisted.
 
 ## Commands
 
@@ -63,6 +64,10 @@ task mark-shipped <id> --pr <url> [--commit <sha>]  # record a merged PR; NEVER 
 #   TODO/IN_PROGRESS to in-review, posts a durable comment, and prints what's still needed
 #   before a genuine `task done`.
 task attach <id> <path> [path...]  # add implementation screenshot(s) (Playwright/agent-browser capture, not screencapture)
+task comment <id> "text"           # add a comment (Markdown posted as-is; never touches the body)
+task comment <id> --body-file F    # the same, body read from a file (`-` = stdin)
+#   `task comment` is the supported way to comment on any backend's ticket — use it instead of
+#   a raw forge CLI or API call
 task done <id>    [--screenshot p] # close a ticket — runs the on-done gates (all criteria checked)
 task change <id>  [--due ...] [--done] [--deployed "<note>"]  # update; --due sets/clears the
 #   due date; --done closes (gates); --deployed records a production deploy (state must
@@ -84,6 +89,12 @@ task audit [<id>] [--revert]       # reconciliation backstop — flags a Done ti
 
 Global flags: `-C/--cwd`, `--backend`, `--repo`, `--config`, `--json`, and the per-gate escape
 hatch `--skip-<gate> "<reason>"`.
+
+Normal use needs no `-C`: run `task` inside the repository. An **explicit** `-C`/`--cwd` must
+point inside a git repository — for every command, reads included. A non-repository path is
+refused before any config, credential or network access, because it would otherwise fall back
+to a global/registry route that may be a different project. The cross-project registry views
+(`list`, `find`, `read` outside a repo) work from a non-repository shell cwd **without** `-C`.
 
 ### Due-date reminders (the daemon)
 
@@ -593,10 +604,14 @@ A tool's *read* and *global* operations should not demand you stand inside a git
   session**, or a session with **no tickets**, it falls back to *all* of that repo's tickets
   and says so. **`task list --all`** gives the cross-project grouped view from anywhere.
 - **`task read` / `task status` / `task find`** work outside a repo too. An id is routed to a
-  registered project (a Linear `HYP-3` by its team; a `#123` when exactly one GitHub project
-  is registered); an ambiguous id fails with a clear, actionable error.
+  registered project (a Linear/Tasks `HYP-3` by its team; `owner/repo#123` to the registered
+  GitHub/Forgejo project with that repo; a bare `#123` only when exactly ONE GitHub/Forgejo
+  project is registered — issue numbers are per repository); an ambiguous id fails with a
+  clear, actionable error.
 - **Only `task new`/`create` is repo-bound** — it writes a ticket into one specific project, so
   it needs a repo (or `--repo owner/name`). Outside one it fails with a 3-part WHAT/WHY/HOW error.
+  Id-routed reads and writes work from a non-repository shell cwd, never through an explicit
+  non-repository `-C` (see Global flags).
 - A project whose backend errors (auth, offline, unknown team) is shown as a **degraded
   group** — it never aborts the whole cross-project listing.
 
@@ -628,6 +643,7 @@ projects:
   - { repo: acme/frontend }                       # GitHub shorthand → group "acme/frontend"
   - { name: Backend, github: { repo: acme/api } }  # explicit block + display name
   - { name: HYP, backend: linear, team: HYP }      # a Linear team/project
+  - { name: rig, forgejo: { url: https://git.hyperide.ai, repo: ultrabricks/rig-cli } }  # Forgejo (nested only)
 ```
 
 The repo you're currently inside is always one of the groups, even if it isn't (yet) listed.
@@ -772,7 +788,7 @@ source of truth for the whole agent toolchain (rig provisions it). Drop a `task:
 ```yaml
 # rig.yaml (repo root) — selects the tracker backend for this repo
 task:
-  backend: linear      # or github-issues (the default for every other repo)
+  backend: linear      # or github-issues (the default), tasks, forgejo
   team: HYP            # → linear.team (Linear coordinate)
   # project: ""        # → linear.project
   # repo: owner/name   # → github.repo (for the github-issues backend)
@@ -791,9 +807,10 @@ The full native shape (also accepted as `task.yaml`, or nested under `rig.yaml` 
 
 ```yaml
 version: 1
-backend: github-issues            # or: linear
+backend: github-issues            # or: linear | tasks | forgejo
 github:   { repo: auto, default_labels: [agent], attachment_mode: native }  # repo: auto = origin owner/name
-linear:   { team: HYP, project: "", attachment_mode: native }  # attachment_mode: native|link — same knob, both backends
+linear:   { team: HYP, project: "", attachment_mode: native }  # attachment_mode: native|link — same knob, every backend
+forgejo:  { url: https://git.hyperide.ai, repo: owner/name, attachment_mode: native }  # see "Forgejo backend"
 trusted_attachment_hosts: []      # extra hosts `task read --save-attachments` may auto-fetch
                                    # from beyond the tracker's own asset domain (e.g. your own
                                    # GitHub Pages host) — fetched WITHOUT the tracker's auth
@@ -897,6 +914,79 @@ per-machine convenience override, meant to win over anything file-based), and is
 endpoint (see `backends/github_issues.py`'s module docstring); set `attachment_mode: link` for
 that backend if you'd rather not depend on it.
 
+### Forgejo backend
+
+`backend: forgejo` files tickets as native issues of a Forgejo repository (Forgejo REST API,
+`<url>/api/v1`) — not a GitHub alias and not a shared tracker for many repositories: every
+repository keeps its own issues. Put the route in the repository's own `rig.yaml`:
+
+```yaml
+task:
+  backend: forgejo
+  forgejo:
+    url: https://git.hyperide.ai   # the forge origin; https, no path (/api/v1 is appended)
+    repo: owner/name               # explicit in committed config
+    attachment_mode: native        # native = upload as an issue attachment; link = URLs only
+```
+
+- **`repo`** must be explicit in committed/published config. At runtime `repo: auto` (or an
+  absent `repo`) resolves the git `origin` remote, and only when that remote is on `url`'s host —
+  a GitHub (or other-host) origin is an error, never a silent fallback. A `projects:` registry
+  entry always needs an explicit `repo`. The flat `repo:` shorthand in `rig.yaml` `task:` stays
+  GitHub's; Forgejo uses the nested `forgejo:` block.
+- **Precedence** is the normal cascade (defaults → rig-global → task-cli global → ancestor
+  `rig.yaml` `task:` blocks, outer to inner → the repo's `rig.yaml` → `task.yaml` → `--config`):
+  a nearer layer wins key by key. An ancestor `rig.yaml` that is not owned by you, or that
+  (or whose directory) is writable by other users — for example one planted in `/tmp` — is
+  skipped with a warning. **Inheritance** (a cross-repo contract shared with rig-cli, so
+  `rig` and `task` read an inherited block the same way): a folder-level `rig.yaml` (for
+  example `~/work/rig.yaml`) passes every `task:` key down to the repositories below it,
+  `forgejo.repo` included — only `code_prefix` is never inherited. A folder-wide default should
+  therefore say `forgejo.repo: auto` (each repository resolves its own origin), while an
+  explicit `owner/name` in a repository's own `rig.yaml` also carries into its nested
+  worktrees.
+- **Stale overrides:** a repository hosted on a Forgejo forge but still routed to
+  `github-issues` fails with `unrecognized github remote URL` plus a pointer at this block.
+  A leftover `task.yaml` `backend:`/`github:`/`linear:` override beats `rig.yaml`, so remove it
+  when moving a repository to Forgejo.
+- **Credentials:** `$FORGEJO_TOKEN` (honored only when `$FORGEJO_URL` names the same origin,
+  so a repository's config cannot aim an ambient token at another host), else the `fj` CLI's
+  own store (`keys.json`, macOS:
+  `~/Library/Application Support/forgejo-cli.forgejo-cli/`; Linux, best effort:
+  `$XDG_DATA_HOME/forgejo-cli/`) — only the entry for exactly `url`'s host. `fj` host aliases
+  are never followed. Log in once with `fj -H <host> auth login` (or `auth add-token`).
+- **Transport:** every request goes to `url` + `/api/v1` with the token, and a redirect to
+  another host (or from https to http) is refused, so the token cannot leave that origin.
+  Attachment downloads send the token only to the same origin.
+- **Ids:** `#N`, `N`, `owner/repo#N`, or the issue's full URL (the qualified forms only for the
+  current repository on the configured origin).
+  Issue numbers are per repository; the project coordinate is `forgejo:<url>/<owner>/<repo>`.
+  Pull requests share the number space and are never treated as issues.
+- **Due dates** are Forgejo's native issue due date. When the issue has one, it wins over a
+  `## Due` line in the body; setting or clearing a due date never rewrites the body.
+- **Minimal writes:** an update sends only the fields that changed since `task` read the issue,
+  and replaces labels only when the label set changed. It first re-reads the issue and refuses,
+  before writing anything, if the issue changed on the server since that read.
+- **Attachments** (`native`): the file is uploaded as an issue attachment and its bytes are
+  downloaded back (same origin, with the token) and compared before it counts as proof. If the
+  follow-up comment linking it fails, the attachment still exists: `task` reports the partial
+  success and does not upload it again.
+- **Body safety:** label/state/due changes and comments never rewrite the issue body. A body edit
+  is refused when the stored Markdown holds content outside task-cli's section template
+  (rewriting it would lose that content) — edit such an issue in Forgejo or use
+  `task comment`. That includes `task attach` on such an issue: the upload and its comment
+  succeed, the body's Screenshots section update is refused.
+
+**API limitations (Forgejo 16):** issues have no version, ETag or `If-Match` support
+(`EditIssueOption.updated_at` only overrides the timestamp; it is not a concurrency check). The
+stale-read refusal above narrows the window but is not an atomic compare-and-set: an edit that
+lands between `task`'s re-read and its write is still overwritten (last write wins). An update
+can also take two requests (the issue `PATCH`, then the labels `PUT`, because the issue edit
+endpoint has no labels field), so a failure between them can leave the new title/state with
+the old labels. The issue-list `limit` is capped server-side (50 by default), so `task` pages
+until it has enough matches or the list ends; a listing that hits the 200-page safety cap
+prints a `truncated` warning instead of passing a short result off as complete.
+
 ## Architecture
 
 - `bin/task` — thin shim → `tasklib.cli:main`.
@@ -905,8 +995,9 @@ that backend if you'd rather not depend on it.
 - Pure core (no provider I/O): `model.py` (the `Ticket`), `render.py` (template ↔ Ticket),
   `policy.py` (the gates), `classify.py` (chain resolution + verdict parse), `session.py`
   (detection + sidecar), `config.py` (cascade loader).
-- `tasklib/backends/` — the `TicketBackend` protocol + `github_issues.py` (REST) and
-  `linear.py` (GraphQL), each calling the API directly via the tiny `http.py` urllib helper.
+- `tasklib/backends/` — the `TicketBackend` protocol + `github_issues.py` (REST),
+  `linear.py` (GraphQL), `tasks.py` (tasks-app REST) and `forgejo.py` (Forgejo REST), each
+  calling the API directly via the tiny `http.py` urllib helper.
 - `tasklib/credentials.py` — harvest tokens from existing CLI configs.
 - `tasklib/logging.py` — structured JSONL in the `agenttools_log` shape, with secret redaction.
 

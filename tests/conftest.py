@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -177,6 +178,21 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.delenv("TASK_SESSION", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.delenv("TMUX", raising=False)
+    # Hermetic repo context (UB-25): run every command from an owned throwaway git repo with a
+    # deterministic GitHub origin, never the developer's own checkout — whose origin (a Forgejo
+    # host here) the `github.repo: auto` default would otherwise try to resolve before the fake
+    # backend is ever reached. Tests about repo-vs-non-repo behavior pass their own `-C` or
+    # `chdir`, which still wins.
+    repo = tmp_path / "_hermetic_cwd_repo"
+    repo.mkdir()
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/acme/widgets"],
+        check=True,
+    )
+    monkeypatch.chdir(repo)
     return tmp_path
 
 

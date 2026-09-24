@@ -89,6 +89,34 @@ def github_issue_number(code: str) -> str:
     )
 
 
+def forgejo_issue_number(code: str, owner: str, repo: str) -> str:
+    """Return the issue digits for the Forgejo repository ``owner/repo``, or raise TaskRefError.
+
+    Accepts ``N``, ``#N`` and ``owner/repo#N`` — the qualified form ONLY when it names this same
+    repository (case-insensitive, Forgejo names are). Forgejo issue numbers are per-repository,
+    so a qualified id for another repository is refused instead of being collapsed onto this
+    repository's issue with the same number.
+    """
+    text = str(code).strip()
+    cross = _GITHUB_CROSS.fullmatch(text)
+    if cross is not None:
+        named = f"{cross.group(1)}/{cross.group(2)}"
+        if named.lower() != f"{owner}/{repo}".lower():
+            raise TaskRefError(
+                f"{_shown(code)!r} names repository {named}, but this command targets "
+                f"{owner}/{repo}. Run it in {named}'s checkout (or register that repository "
+                f"under projects:). {_FIX}"
+            )
+        return cross.group(3)
+    try:
+        return github_issue_number(text)
+    except TaskRefError:
+        raise TaskRefError(
+            f"{_shown(code)!r} is not a Forgejo issue number for {owner}/{repo}. "
+            f"Codes are #N, N or {owner}/{repo}#N. {_FIX}"
+        ) from None
+
+
 def linear_identifier(code: str, team: str) -> str:
     """Return TEAM-N for ``team``, or raise TaskRefError."""
     team = str(team).strip()
@@ -102,6 +130,29 @@ def linear_identifier(code: str, team: str) -> str:
     if match is None or match.group(1).upper() != team.upper():
         raise TaskRefError(
             f"{_shown(code)!r} is not a Linear identifier for team {team.upper()}. "
+            f"Codes must look like {team.upper()}-<n>. {_FIX}"
+        )
+    return f"{team.upper()}-{match.group(2)}"
+
+
+def tasks_identifier(code: str, team: str) -> str:
+    """Return TEAM-N for ``team``, or raise TaskRefError.
+
+    Same ``TEAM-<n>`` shape as :func:`linear_identifier` (the Tasks backend's human-readable
+    issue keys use the identical convention) — reuses the same ``_LINEAR`` shape regex rather
+    than duplicating it under a Tasks-specific name.
+    """
+    team = str(team).strip()
+    text = str(code).strip()
+    if not team:
+        raise TaskRefError(
+            f"{_shown(code)!r} cannot be validated as a Tasks identifier because no team is configured. "
+            f"{_FIX}"
+        )
+    match = _LINEAR.fullmatch(text)
+    if match is None or match.group(1).upper() != team.upper():
+        raise TaskRefError(
+            f"{_shown(code)!r} is not a Tasks identifier for team {team.upper()}. "
             f"Codes must look like {team.upper()}-<n>. {_FIX}"
         )
     return f"{team.upper()}-{match.group(2)}"
@@ -146,14 +197,15 @@ def validate(code, repo_root=None, *, backend=None, linear_team="", github_repo=
     # github_repo is accepted for API parity; this library is shape-only.
     _ = github_repo
 
-    if resolved_backend == "github-issues":
+    if resolved_backend in ("github-issues", "forgejo"):
         canonical = _github_canonical(text)
         if canonical is None:
+            kind = "GitHub" if resolved_backend == "github-issues" else "Forgejo"
             return _fail(
                 text,
                 resolved_backend,
-                f"{_shown(text)!r} is not a GitHub issue number.",
-                "This repo uses github-issues, which only accepts #N, N, or owner/repo#N.",
+                f"{_shown(text)!r} is not a {kind} issue number.",
+                f"This repo uses {resolved_backend}, which only accepts #N, N, or owner/repo#N.",
             )
         return _ok(text, canonical, resolved_backend)
 
@@ -181,5 +233,5 @@ def validate(code, repo_root=None, *, backend=None, linear_team="", github_repo=
         text,
         str(resolved_backend),
         f"{_shown(text)!r} cannot be validated.",
-        f"Unknown backend {resolved_backend!r}; expected github-issues or linear.",
+        f"Unknown backend {resolved_backend!r}; expected github-issues, forgejo or linear.",
     )
