@@ -5,8 +5,8 @@ well-formed ticket the moment it arrives — `task` enforces ticket *quality* (a
 criteria, motivation, user-impact, cost-of-inaction, screenshots, formatting) in the tool
 itself, not by convention. A ticket and its PR speak one shape.
 
-A standalone Python CLI, peer to [`review-cli`](https://git.hyperide.ai/ultrabricks/rig-cli),
-[`rig-cli`](https://git.hyperide.ai/ultrabricks/rig-cli), and `tg-cli`. Backends: **GitHub Issues
+A standalone Python CLI, peer to [`review-cli`](https://git.hyperide.ai/ultrabricks/review-cli),
+[`rig-cli`](https://git.hyperide.ai/ultrabricks/rig-cli), and [`tg-cli`](https://git.hyperide.ai/ultrabricks/tg-cli). Backends: **GitHub Issues
 (default)** and **Linear** (per-repo). Stdlib-first; the backends call the provider API
 directly (no `requests`, no per-call subprocess), and credentials are harvested from the CLIs
 you already authed — zero extra setup.
@@ -20,7 +20,7 @@ you already authed — zero extra setup.
 ```bash
 git clone https://git.hyperide.ai/ultrabricks/task-cli && cd task-cli && ./install.sh
 # or, one-liner:
-curl -fsSL https://raw.githubusercontent.com/alex-mextner/task-cli/main/install.sh | bash
+curl -fsSL https://git.hyperide.ai/ultrabricks/task-cli/raw/branch/main/install.sh | bash
 ```
 
 The installer symlinks `bin/task` into `~/.local/bin` and registers the agent skill. The only
@@ -1031,14 +1031,14 @@ MIT.
 
 Part of the [HyperIDE.ai](https://hyperide.ai) agent toolchain:
 
-- **[tg-cli](https://github.com/alex-mextner/tg-cli)** — simple Telegram CLI to send messages, photos & files, and a two-way agent bridge (reports, Q→buttons, voice/rich)
-- **[review-cli](https://github.com/alex-mextner/review-cli)** — multi-model read-only code review from one command: diff review, cited quorum, brainstorm, visual review, and interactive spec-review tooling. Read-only, CLI-first, harness-agnostic.
-- **[agent-tools](https://github.com/alex-mextner/agent-tools)** — the shared catalog `rig` applies: portable agent skills, agent-hooks, the global git-hook dispatcher, CI gates, and MCP servers
-- **[draw-cli](https://github.com/alex-mextner/draw-cli)** — text-to-image via Hugging Face
-- **[3d-cli](https://github.com/alex-mextner/3d-cli)** — scriptable CLI for the full 3D FDM lifecycle: modeling, mesh repair, slicing, and print monitoring
-- **[dev-cli](https://github.com/alex-mextner/dev-cli)** — project-scoped dev/e2e process runner (start/list/stop dev servers and e2e jobs); rig validates the `scripts:` / `dev:` config shape and provisions `dev:*` / `Bash(dev:*)` as the harness permission surface, without granting raw process/git/package-manager tools
-- **[research-cli](https://github.com/alex-mextner/research-cli)** — multi-provider research / panel CLI: puts a question to a panel of models, each through a research lens, then synthesizes one attributed, fact-checked note
-- **[pm-cli](https://github.com/alex-mextner/pm-cli)** — autonomous project-manager coordinator over the task/tg/rig ecosystem: keeps a work queue as a deterministic projection of an append-only event log, reconciling on unforgeable evidence rather than dispatching or editing code itself
-- **[rig-cli](https://github.com/alex-mextner/rig-cli)** — sets up a repo (and a dev machine) from a committed `rig.yaml`: skills, agent-hooks, git-hook dispatcher, CI gates, MCP, and the personal CLI ecosystem itself
+- **[tg-cli](https://git.hyperide.ai/ultrabricks/tg-cli)** — simple Telegram CLI to send messages, photos & files, and a two-way agent bridge (reports, Q→buttons, voice/rich)
+- **[review-cli](https://git.hyperide.ai/ultrabricks/review-cli)** — multi-model read-only code review from one command: diff review, cited quorum, brainstorm, visual review, and interactive spec-review tooling. Read-only, CLI-first, harness-agnostic.
+- **[agent-tools](https://git.hyperide.ai/ultrabricks/agent-tools)** — the shared catalog `rig` applies: portable agent skills, agent-hooks, the global git-hook dispatcher, CI gates, and MCP servers
+- **[draw-cli](https://git.hyperide.ai/ultrabricks/draw-cli)** — text-to-image via Hugging Face
+- **[3d-cli](https://git.hyperide.ai/ultrabricks/3d-cli)** — scriptable CLI for the full 3D FDM lifecycle: modeling, mesh repair, slicing, and print monitoring
+- **[dev-cli](https://git.hyperide.ai/ultrabricks/dev-cli)** — project-scoped dev/e2e process runner (start/list/stop dev servers and e2e jobs); rig validates the `scripts:` / `dev:` config shape and provisions `dev:*` / `Bash(dev:*)` as the harness permission surface, without granting raw process/git/package-manager tools
+- **[research-cli](https://git.hyperide.ai/ultrabricks/research-cli)** — multi-provider research / panel CLI: puts a question to a panel of models, each through a research lens, then synthesizes one attributed, fact-checked note
+- **[pm-cli](https://git.hyperide.ai/ultrabricks/pm-cli)** — autonomous project-manager coordinator over the task/tg/rig ecosystem: keeps a work queue as a deterministic projection of an append-only event log, reconciling on unforgeable evidence rather than dispatching or editing code itself
+- **[rig-cli](https://git.hyperide.ai/ultrabricks/rig-cli)** — sets up a repo (and a dev machine) from a committed `rig.yaml`: skills, agent-hooks, git-hook dispatcher, CI gates, MCP, and the personal CLI ecosystem itself
 - **[hyperide.ai](https://hyperide.ai)** — Figma replacement inside VS Code. Edit React components directly through AST/LSP without AI hallucinations, token waste, or context-window limits. Works for indie vibe-coding and for enterprise teams with split design/dev roles.
 <!-- /rig:ecosystem-block -->

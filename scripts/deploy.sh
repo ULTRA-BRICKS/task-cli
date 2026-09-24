@@ -18,7 +18,7 @@
 #
 #   rig-cli 0.8.0+ runs `bash scripts/deploy.sh` (cwd = this repo) on every `rig apply`
 #   so the installed tool never silently drifts stale behind origin/main
-#   (alex-mextner/task-cli#43). The script owns ALL its own safety: it refuses a dirty
+#   (ultrabricks/task-cli#43). The script owns ALL its own safety: it refuses a dirty
 #   tree, a detached HEAD, and a diverged branch; rig just invokes it and downgrades a
 #   non-zero exit to a warning.
 #
