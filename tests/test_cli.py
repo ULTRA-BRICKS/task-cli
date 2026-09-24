@@ -5744,6 +5744,38 @@ def test_classify_jev_runtime_failure_falls_through_to_review_cli(
     assert payload == {"verdict": "justAsk"}
 
 
+def test_classify_explicit_empty_fallbacks_is_never_upgraded_to_the_default_chain(
+    capsys, monkeypatch, _inject_fake
+):
+    # task-cli#208 review finding: a repo that explicitly writes `classify: {fallbacks: []}`
+    # (deliberately disabling every classifier) must get ZERO providers, not the zero-config
+    # default chain (laya + the six-provider review-cli fallback) -- `cli._classify_one` must
+    # never coalesce an explicit empty list into "unconfigured".
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(LoadedConfig, "classify_fallbacks", property(lambda self: []))
+
+    def _laya_available_never_called(self):
+        raise AssertionError("an explicit empty fallbacks list must try NO provider at all")
+
+    monkeypatch.setattr(
+        "tasklib.classifiers.LayaClassifier.available", _laya_available_never_called
+    )
+
+    def _review_cli_never_called(model, prompt):
+        raise AssertionError("an explicit empty fallbacks list must try NO provider at all")
+
+    monkeypatch.setattr(cli, "_run_review_just_ask", _review_cli_never_called)
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "no classifier provider available" in captured.err
+    import json
+
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "change"  # the bias default, not a real classification
+
+
 # ── session ──────────────────────────────────────────────────────────────────────────
 
 

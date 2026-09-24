@@ -5564,8 +5564,25 @@ def _classify_one(
     # AND actually produces a classification -- a provider that looks reachable but fails at
     # runtime (e.g. laya's model download/predict) falls through to the next one, same
     # graceful-degradation posture as the old single-provider "no reachable provider" path.
+    #
+    # `cfg.classify_fallbacks` is passed through AS-IS (task-cli#208 review finding) -- never
+    # coalesced to `None` on an empty list. `config.py`'s cascade always supplies SOME
+    # fallbacks list (`DEFAULTS` at minimum), so `[]` here means either a repo explicitly
+    # wrote `classify: {fallbacks: []}`/`fallbacks: null` (deliberately disabling every
+    # classifier, falling straight to the bias default), OR every configured entry was
+    # malformed and silently dropped (`config.LoadedConfig.classify_fallbacks` only keeps
+    # single-key `{provider: model}` maps). Coalescing `[]` to `None` would silently
+    # reinterpret EITHER case as "unconfigured" and hand it the FULL zero-config default
+    # chain instead, the exact "explicit config is never altered" invariant this ticket's own
+    # docs promise. A malformed-entries-only config (a typo, not an intentional opt-out) now
+    # gets the SAME zero-providers outcome instead of silently falling back to a working LLM
+    # chain (the pre-#208 `or None` coalescing papered over that case too) -- a deliberate,
+    # explicit-empty-list-respecting tradeoff, not a case this ticket set out to distinguish
+    # from a genuine intentional opt-out; a malformed config silently degrading to the bias
+    # default is a pre-existing class of gap (`classify_fallbacks` already dropped malformed
+    # entries with no warning before this ticket) that this ticket does not newly fix.
     providers = build_classifier_chain(
-        cfg.classify_fallbacks or None, capability=cfg.classify_capability or None
+        cfg.classify_fallbacks, capability=cfg.classify_capability or None
     )
     classification = None
     used_label = "none"
