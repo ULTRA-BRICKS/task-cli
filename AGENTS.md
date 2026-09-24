@@ -120,6 +120,25 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   `list`) so a caller can walk the full request → ship → deploy → follow-up chain without a
   second IPC mechanism — `task read <id> --json` IS the integration point (e.g. harness-cli's
   `harness stats` shells out to it; it never imports `tasklib`).
+- **Product modules** (`tasklib/modules.py`, task-cli#218): a **module** is a named, durable
+  subsystem/area of the product (e.g. for task-cli itself: `classify`/`backends`/`links`) — a
+  small, per-repo TAXONOMY a team defines ONCE in `task.yaml`'s `modules:` list
+  (`[{name, description}, ...]`), not a free-text label. `ModuleTaxonomy` is loaded via the
+  SAME config-cascade pattern as every other `task.yaml` key (`config.py`); absent → an empty,
+  fail-SOFT taxonomy (never required), present-but-malformed → `ConfigError`, fail-CLOSED
+  (`validate_modules_config` is the single source of truth for the shape, called from both
+  `config.validate()` and `load_taxonomy()`). A ticket is tagged into a module via a plain
+  `module:<name>` label — the EXACT same mechanism `sp:<n>`/`priority:<Pn>` (#203) already
+  use, so it needed zero backend-adapter changes. `task module list` shows the taxonomy (or
+  "none configured"); `task module add <name> --description "..."` never writes `task.yaml`
+  itself (no config-WRITING precedent exists anywhere in this repo — it is committed and
+  human-edited) and instead prints the exact YAML snippet to add by hand; `task module assign
+  <id> <name>` stamps the label via `backend.update()` and FAILS CLOSED — a clean `error:`, no
+  backend write — on a name outside the configured taxonomy, never inventing a new one.
+  `classify.infer_module` (default `false`, opt-in) lets `_classify_create` additionally try a
+  cheap keyword-overlap heuristic (`tasklib.modules.infer_module`) against the taxonomy on a
+  freshly-CREATED ticket only — never a guarantee, an ambiguous/tied score or an empty
+  taxonomy both yield no label, and a repo that hasn't opted in sees zero behavior change.
 - **`task.yaml` is committed by default** (per-repo source of truth) and **overrides** the
   global `~/.config/task-cli/config.yaml`. Scope is by location, never a flag. The tool works
   with **zero config** on any GitHub repo (built-in defaults = github-issues, all gates on).

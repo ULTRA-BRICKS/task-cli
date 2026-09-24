@@ -132,6 +132,63 @@ def test_classify_route_process_to_harness_empty_string_defaults_true(tmp_path, 
     assert cfg.classify_route_process_to_harness is True
 
 
+def test_classify_infer_module_default_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    cfg = load(tmp_path)
+    assert cfg.classify_infer_module is False
+
+
+def test_classify_infer_module_opt_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\nclassify: {infer_module: true}\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_infer_module is True
+
+
+def test_classify_infer_module_opt_in_via_quoted_yaml_string_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        'version: 1\nbackend: github-issues\nclassify: {infer_module: "false"}\n',
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_infer_module is False
+
+
+def test_modules_taxonomy_loads_from_task_yaml(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\nmodules:\n"
+        "  - name: classify\n    description: message classification\n"
+        "  - name: backends\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.data["modules"] == [
+        {"name": "classify", "description": "message classification"},
+        {"name": "backends"},
+    ]
+
+
+def test_modules_absent_loads_with_zero_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    cfg = load(tmp_path)
+    assert "modules" not in cfg.data
+
+
+def test_modules_malformed_fails_closed_at_load(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nbackend: github-issues\nmodules:\n  - description: no name here\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError):
+        load(tmp_path)
+
+
 def test_session_detect_default(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     cfg = load(tmp_path)

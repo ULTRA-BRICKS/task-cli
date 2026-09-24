@@ -74,6 +74,9 @@ task classify "<text>" [--create]  # change|actionable|justAsk (+ SP/priority/pr
                                     # on `change`) via review; --create makes/dedups a product
                                     # ticket, or files a local `harness task` for a `process` item
 task session [show|bind <id>]      # show/bind the current session and its tickets
+task module list [--json]         # show the repo's configured product-module taxonomy
+task module add <name> --description "..."  # print the task.yaml snippet to add by hand
+task module assign <id> <name>    # tag an existing ticket module:<name> (see below)
 task daemon start|stop|status|run  # the due-date reminder watcher (see Daemon below)
 task audit [<id>] [--revert]       # reconciliation backstop — flags a Done ticket that never
 #   passed the close gates (see Audit below)
@@ -388,6 +391,38 @@ After a successful `task new`/`create`, a cheap same-repo scan (title/label keyw
 no embeddings, no fuzzy matching) checks currently-open tickets for plausible relatives and
 prints a nudge with the exact `task link` command for each candidate. It only ever *suggests* —
 nothing is auto-linked, and a scan hiccup never fails the create.
+
+### Product modules — `task module`
+
+A **module** is a named, durable subsystem/area of the product a ticket belongs to (e.g. for
+task-cli itself: `classify`, `backends`, `links`, `render`) — a small, per-repo TAXONOMY a
+team defines once, not a free-text label. A repo opts in by adding a `modules:` list to its
+`task.yaml`:
+
+```yaml
+modules:
+  - name: classify
+    description: message classification, SP/priority axes, the classifier-provider chain
+  - name: backends
+    description: GitHub Issues / Linear adapters
+```
+
+```
+task module list [--json]                 # show the configured taxonomy, or a clear "none
+                                            #   configured" message when the repo has none
+task module add <name> --description "..."  # task.yaml is committed/human-edited (task-cli
+                                            #   never writes it) — prints the exact YAML
+                                            #   snippet to add by hand
+task module assign <id> <name>             # tags <id> with a `module:<name>` label (the same
+                                            #   mechanism `sp:<n>`/`priority:<Pn>` use) —
+                                            #   REFUSES cleanly (no backend write) for a name
+                                            #   outside the configured taxonomy
+```
+
+With `classify.infer_module: true` in `task.yaml` (default `false` — opt-in), `task classify
+--create` also tries to infer a module from the taxonomy via a cheap keyword-overlap heuristic
+against each module's name/description — a best-effort nudge, not a guarantee, and it never
+applies a label when the signal is empty or ambiguous (a tie).
 
 ### Deploy + follow-up traceability — `task change --deployed` + `follow-up-of`
 
