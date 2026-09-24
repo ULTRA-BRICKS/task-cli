@@ -1,11 +1,13 @@
-"""tasklib.classifiers — the pluggable ClassifierProvider architecture (task-cli#206).
+"""tasklib.classifiers — the pluggable ClassifierProvider architecture (task-cli#206/#217).
 
 Covers `ReviewCliClassifier` (the pre-#206 `review just-ask` shell-out path, refactored in
 place — behavior-preserving, so `tests/test_cli.py`'s existing `tasklib.classify.resolve_chain`
-/ `cli._run_review_just_ask` monkeypatches need zero changes), `LayaClassifier` (the new local
+/ `cli._run_review_just_ask` monkeypatches need zero changes), `LayaClassifier` (the local
 `laya`-package backend, mocked at its documented `laya.load(...).predict(state, questions) ->
-dict` boundary — see this module's docstrings for the REAL raw shape observed live), and
-`build_classifier_chain` (turns a `classify.fallbacks` list into an ordered provider chain).
+dict` boundary), `JevClassifier` (the #217 direct-HTTP Vercel AI Gateway backend, mocked at
+`tasklib.backends.http.request_json` — the shared stdlib-urllib helper every backend uses,
+never a real network call), and `build_classifier_chain` (turns a `classify.fallbacks` list
+into an ordered provider chain).
 """
 
 from __future__ import annotations
@@ -15,8 +17,10 @@ import sys
 
 import pytest
 
+import tasklib.classifiers as classifiers
 from tasklib.classify import Classification, ResolvedModel, Verdict
 from tasklib.classifiers import (
+    JevClassifier,
     LayaClassifier,
     ReviewCliClassifier,
     build_classifier_chain,
@@ -42,9 +46,10 @@ def fake_laya_module(monkeypatch):
 
 # The REAL raw dict observed from a live `agent.predict(message, questions)` call against
 # `laya==0.3.7` / `convaiinnovations/laya` (task-cli#206 live-verification; captured verbatim,
-# only the message/criteria differ from the shipped `_LAYA_QUESTIONS` schema in shape, not in
-# envelope). `answers[<question>]` for a `choice`-typed question carries `choice` (the winning
-# label) plus `probabilities`/`confidence`; `noul`-typed questions carry a `noul` float instead.
+# only the message/criteria differ from the shipped `_CLASSIFICATION_QUESTIONS` schema in
+# shape, not in envelope). `answers[<question>]` for a `choice`-typed question carries
+# `choice` (the winning label) plus `probabilities`/`confidence`; `noul`-typed questions carry
+# a `noul` float instead.
 _REAL_LAYA_RAW_RESULT = {
     "model": "laya-rl-agent",
     "answers": {
@@ -247,6 +252,57 @@ def test_build_classifier_chain_forwards_env_to_every_review_cli_group():
     providers = build_classifier_chain(fallbacks, env={"X": "1"})
     review = next(p for p in providers if isinstance(p, ReviewCliClassifier))
     assert review.env == {"X": "1"}
+
+
+def test_build_classifier_chain_jev_only():
+    providers = build_classifier_chain([("jev", "cloud")])
+    assert len(providers) == 1
+    assert isinstance(providers[0], JevClassifier)
+
+
+def test_build_classifier_chain_jev_head_then_review_cli_group():
+    fallbacks = [("jev", "cloud"), ("anthropic", "claude-haiku-4-5"), ("openai", "gpt-5-mini")]
+    providers = build_classifier_chain(fallbacks)
+    assert len(providers) == 2
+    assert isinstance(providers[0], JevClassifier)
+    assert isinstance(providers[1], ReviewCliClassifier)
+    assert providers[1].fallbacks == [("anthropic", "claude-haiku-4-5"), ("openai", "gpt-5-mini")]
+
+
+def test_build_classifier_chain_laya_and_jev_both_standalone():
+    fallbacks = [("laya", "local"), ("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]
+    providers = build_classifier_chain(fallbacks)
+    assert len(providers) == 3
+    assert isinstance(providers[0], LayaClassifier)
+    assert isinstance(providers[1], JevClassifier)
+    assert isinstance(providers[2], ReviewCliClassifier)
+
+
+def test_build_classifier_chain_interleaved_jev_splits_review_groups():
+    fallbacks = [("anthropic", "claude-haiku-4-5"), ("jev", "cloud"), ("openai", "gpt-5-mini")]
+    providers = build_classifier_chain(fallbacks)
+    assert len(providers) == 3
+    assert isinstance(providers[0], ReviewCliClassifier)
+    assert providers[0].fallbacks == [("anthropic", "claude-haiku-4-5")]
+    assert isinstance(providers[1], JevClassifier)
+    assert isinstance(providers[2], ReviewCliClassifier)
+    assert providers[2].fallbacks == [("openai", "gpt-5-mini")]
+
+
+def test_build_classifier_chain_forwards_env_to_jev():
+    providers = build_classifier_chain([("jev", "cloud")], env={"AI_GATEWAY_API_KEY": "x"})
+    assert providers[0].env == {"AI_GATEWAY_API_KEY": "x"}
+
+
+def test_build_classifier_chain_jev_never_honors_a_configured_value():
+    # SECURITY (see module docstring): a `{jev: <value>}` entry's value must only decide
+    # ROUTING, never which endpoint/model gets called -- both stay fixed regardless of what a
+    # (potentially untrusted, repo-scoped) `classify.fallbacks` config names here.
+    for configured_value in ("cloud", "default", "", "https://evil.example/v1/evaluate"):
+        providers = build_classifier_chain([("jev", configured_value)])
+        assert isinstance(providers[0], JevClassifier)
+        assert providers[0].endpoint == "https://ai-gateway.vercel.sh/v1/evaluate"
+        assert providers[0].model_id == "typesafe-ai/jev"
 
 
 # ── LayaClassifier — the new task-cli#206 local backend ────────────────────────────────────
@@ -464,3 +520,298 @@ class _FakeAgent:
 
     def predict(self, state, questions):
         return self._result
+
+
+# ── JevClassifier — the new task-cli#217 cloud backend (Vercel AI Gateway) ─────────────────
+
+
+def test_read_api_key_from_env_file_parses_line(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text("AI_GATEWAY_API_KEY=plain-value\n", encoding="utf-8")
+    assert classifiers._read_api_key_from_env_file(str(p)) == "plain-value"
+
+
+def test_read_api_key_from_env_file_strips_double_quotes(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text('AI_GATEWAY_API_KEY="double-quoted"\n', encoding="utf-8")
+    assert classifiers._read_api_key_from_env_file(str(p)) == "double-quoted"
+
+
+def test_read_api_key_from_env_file_strips_single_quotes(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text("AI_GATEWAY_API_KEY='single-quoted'\n", encoding="utf-8")
+    assert classifiers._read_api_key_from_env_file(str(p)) == "single-quoted"
+
+
+def test_read_api_key_from_env_file_ignores_other_lines(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text("SOME_OTHER_KEY=nope\nAI_GATEWAY_API_KEY=real\nTHIRD=x\n", encoding="utf-8")
+    assert classifiers._read_api_key_from_env_file(str(p)) == "real"
+
+
+def test_read_api_key_from_env_file_returns_none_when_file_missing(tmp_path):
+    assert classifiers._read_api_key_from_env_file(str(tmp_path / "nope.env")) is None
+
+
+def test_read_api_key_from_env_file_returns_none_when_line_absent(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text("SOME_OTHER_KEY=nope\n", encoding="utf-8")
+    assert classifiers._read_api_key_from_env_file(str(p)) is None
+
+
+def test_jev_classifier_available_true_with_env_var_key():
+    assert JevClassifier(env={"AI_GATEWAY_API_KEY": "real-key"}).available() is True
+
+
+def test_jev_classifier_available_false_without_key_or_env_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(classifiers, "_JEV_ENV_FILE_FALLBACK", str(tmp_path / "missing.env"))
+    assert JevClassifier(env={}).available() is False
+
+
+def test_jev_classifier_explicit_env_never_reads_env_file_even_if_present(tmp_path, monkeypatch):
+    # Review finding (hermeticity): an explicit `env=` dict must be authoritative -- it must
+    # NEVER fall through to the machine-local `.env` file, even when that file exists and
+    # holds a real key. Otherwise an `env={}` meant to simulate "no credentials" (every test
+    # in this module, and any embedding caller) would silently become non-hermetic on this
+    # one machine.
+    env_file = tmp_path / "shared.env"
+    env_file.write_text("AI_GATEWAY_API_KEY=from-file-key\n", encoding="utf-8")
+    monkeypatch.setattr(classifiers, "_JEV_ENV_FILE_FALLBACK", str(env_file))
+    provider = JevClassifier(env={})
+    assert provider.available() is False
+    assert provider._resolve_api_key() is None
+
+
+def test_jev_classifier_falls_back_to_env_file_when_env_var_absent(tmp_path, monkeypatch):
+    # `env=None` (the default) means "use the real process environment" -- ONLY then does the
+    # `.env` file fallback apply.
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    env_file = tmp_path / "shared.env"
+    env_file.write_text("AI_GATEWAY_API_KEY=from-file-key\n", encoding="utf-8")
+    monkeypatch.setattr(classifiers, "_JEV_ENV_FILE_FALLBACK", str(env_file))
+    provider = JevClassifier()
+    assert provider.available() is True
+    assert provider._resolve_api_key() == "from-file-key"
+
+
+def test_jev_classifier_env_var_takes_precedence_over_env_file(tmp_path, monkeypatch):
+    env_file = tmp_path / "shared.env"
+    env_file.write_text("AI_GATEWAY_API_KEY=from-file-key\n", encoding="utf-8")
+    monkeypatch.setattr(classifiers, "_JEV_ENV_FILE_FALLBACK", str(env_file))
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "from-env-key")
+    provider = JevClassifier()
+    assert provider._resolve_api_key() == "from-env-key"
+
+
+def test_jev_classifier_resolves_api_key_only_once(monkeypatch):
+    # Mirrors `test_review_cli_classifier_caches_resolve_chain_resolution` -- resolution is
+    # cached on the instance after the first `available()`/`classify()` call.
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    calls = {"n": 0}
+
+    def _fake_read(path):
+        calls["n"] += 1
+        return "file-key"
+
+    monkeypatch.setattr(classifiers, "_read_api_key_from_env_file", _fake_read)
+    provider = JevClassifier()
+    assert provider.available() is True
+    assert provider.available() is True
+    assert calls["n"] == 1
+
+
+def test_jev_classifier_classify_builds_correct_request(monkeypatch):
+    captured = {}
+
+    def _fake_request_json(url, *, method, headers, payload, timeout):
+        captured["url"] = url
+        captured["method"] = method
+        captured["headers"] = headers
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        return {"answers": {}}
+
+    monkeypatch.setattr("tasklib.backends.http.request_json", _fake_request_json)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    provider.classify("add rate limiting to the API", Verdict.CHANGE)
+
+    assert captured["url"] == "https://ai-gateway.vercel.sh/v1/evaluate"
+    assert captured["method"] == "POST"
+    assert captured["headers"] == {"Authorization": "Bearer placeholder-key-value"}
+    assert captured["timeout"] == classifiers._JEV_TIMEOUT_SECONDS
+    assert captured["payload"]["model"] == "typesafe-ai/jev"
+    assert captured["payload"]["state"] == "add rate limiting to the API"
+    assert captured["payload"]["questions"] == classifiers._CLASSIFICATION_QUESTIONS
+    for question in captured["payload"]["questions"].values():
+        assert question["type"] == "choice"
+
+
+def test_jev_classifier_classify_maps_choice_response(monkeypatch):
+    raw = {
+        "model": "typesafe-ai/jev",
+        "answers": {
+            "verdict": {
+                "type": "choice",
+                "choice": "change",
+                "probabilities": {"change": 0.9, "actionable": 0.05, "justAsk": 0.05},
+            },
+            "process_or_product": {
+                "type": "choice",
+                "choice": "product",
+                "probabilities": {"process": 0.1, "product": 0.9},
+            },
+            "priority": {
+                "type": "choice",
+                "choice": "P1",
+                "probabilities": {"P0": 0.1, "P1": 0.7, "P2": 0.15, "P3": 0.05},
+            },
+            "story_points": {
+                "type": "choice",
+                "choice": "5",
+                "probabilities": {"1": 0, "2": 0, "3": 0.1, "5": 0.8, "8": 0.1, "13": 0},
+            },
+        },
+        "usage": {"inputTokens": 42, "outputTokens": 7},
+    }
+    monkeypatch.setattr("tasklib.backends.http.request_json", lambda *a, **k: raw)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    result = provider.classify("add rate limiting", Verdict.CHANGE)
+    assert result == Classification(
+        verdict=Verdict.CHANGE, process_or_product="product", priority="P1", story_points=5
+    )
+
+
+def test_jev_classifier_classify_defaults_axis_on_malformed_choice(monkeypatch):
+    raw = {
+        "answers": {
+            "verdict": {"type": "choice", "choice": "change"},
+            "process_or_product": {"type": "choice", "choice": "not-a-real-value"},
+            "priority": {"type": "choice", "choice": "P1"},
+            "story_points": {"type": "choice", "choice": "not-a-number"},
+        }
+    }
+    monkeypatch.setattr("tasklib.backends.http.request_json", lambda *a, **k: raw)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    result = provider.classify("hello", Verdict.CHANGE)
+    assert result == Classification(
+        verdict=Verdict.CHANGE, process_or_product="product", priority="P1", story_points=3
+    )
+
+
+def test_jev_classifier_classify_returns_none_on_missing_answers_key(monkeypatch):
+    monkeypatch.setattr(
+        "tasklib.backends.http.request_json", lambda *a, **k: {"model": "typesafe-ai/jev"}
+    )
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+
+
+def test_jev_classifier_classify_returns_none_on_non_dict_response(monkeypatch):
+    monkeypatch.setattr("tasklib.backends.http.request_json", lambda *a, **k: "not a dict")
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+
+
+def test_jev_classifier_classify_returns_none_without_a_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(classifiers, "_JEV_ENV_FILE_FALLBACK", str(tmp_path / "missing.env"))
+    provider = JevClassifier(env={})
+    assert provider.available() is False
+    assert provider.classify("hello", Verdict.CHANGE) is None
+
+
+def test_jev_classifier_classify_falls_through_on_billing_block(monkeypatch, capsys):
+    # The REAL, live-verified Vercel AI Gateway billing-block body (task-cli#217
+    # live-verification, captured verbatim against the real endpoint with a real, valid key on
+    # this account -- which currently has no card on file): the error object's discriminator
+    # field is `type`, NOT `code` as this ticket's own spec described up front. Must degrade
+    # EXACTLY like every other failure -- never a crash, and the chain must fall through to
+    # the next configured provider.
+    from tasklib.backends.http import HttpError
+
+    body = (
+        '{"error":{"message":"AI Gateway requires a valid credit card on file to service '
+        'requests. Please visit https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3D'
+        'add-credit-card to add a card and unlock your free credits.","type":'
+        '"customer_verification_required"}}'
+    )
+
+    def _raise(*a, **k):
+        raise HttpError(403, "HTTP 403 for POST https://ai-gateway.vercel.sh/v1/evaluate", body)
+
+    monkeypatch.setattr("tasklib.backends.http.request_json", _raise)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+    err = capsys.readouterr().err
+    assert "jev classifier failed" in err
+    assert "customer_verification_required" in err
+
+
+def test_jev_classifier_classify_billing_block_code_field_fallback(monkeypatch, capsys):
+    # `code` (this ticket's originally-described field name) is a tolerated fallback for
+    # whenever a future/different Gateway response uses it instead of the real, live-verified
+    # `type` field.
+    from tasklib.backends.http import HttpError
+
+    body = '{"error":{"code":"customer_verification_required","message":"no card on file"}}'
+
+    def _raise(*a, **k):
+        raise HttpError(403, "HTTP 403 for POST https://ai-gateway.vercel.sh/v1/evaluate", body)
+
+    monkeypatch.setattr("tasklib.backends.http.request_json", _raise)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+    assert "customer_verification_required" in capsys.readouterr().err
+
+
+def test_jev_classifier_classify_tolerates_non_string_error_body(monkeypatch):
+    # `getattr(exc, "body", "")` duck-types on ANY exception -- a hypothetical exception whose
+    # `.body` is not a `str` (e.g. a dict) must never make `json.loads` raise a `TypeError`
+    # that escapes `classify()`'s own "never raises" contract.
+    class _WeirdError(Exception):
+        body = {"already": "parsed"}
+
+    def _raise(*a, **k):
+        raise _WeirdError("weird failure")
+
+    monkeypatch.setattr("tasklib.backends.http.request_json", _raise)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+
+
+def test_jev_classifier_classify_returns_none_on_generic_http_error(monkeypatch, capsys):
+    from tasklib.backends.http import HttpError
+
+    def _raise(*a, **k):
+        raise HttpError(500, "HTTP 500 for POST https://ai-gateway.vercel.sh/v1/evaluate", "")
+
+    monkeypatch.setattr("tasklib.backends.http.request_json", _raise)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+    assert "jev classifier failed" in capsys.readouterr().err
+
+
+def test_jev_classifier_classify_returns_none_on_network_error(monkeypatch):
+    def _raise(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("tasklib.backends.http.request_json", _raise)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": "placeholder-key-value"})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+
+
+def test_jev_classifier_never_logs_api_key_on_failure(monkeypatch, capsys):
+    # SECURITY: belt-and-braces guard -- even an exception shape that (hypothetically) echoes
+    # the key back must never leak it to stderr.
+    secret = "YOUR_JEV_KEY_HERE_0123456789_never_should_leak"
+
+    def _raise(*a, **k):
+        raise RuntimeError(f"simulated failure embedding the key {secret} in its message")
+
+    monkeypatch.setattr("tasklib.backends.http.request_json", _raise)
+    provider = JevClassifier(env={"AI_GATEWAY_API_KEY": secret})
+    assert provider.classify("hello", Verdict.CHANGE) is None
+    assert secret not in capsys.readouterr().err
+
+
+def test_jev_classifier_label():
+    assert JevClassifier().label == "jev:typesafe-ai/jev"

@@ -64,6 +64,20 @@ def test_classify_fallbacks_accepts_a_laya_entry(tmp_path, monkeypatch):
     assert cfg.classify_fallbacks == [("laya", "local"), ("anthropic", "claude-haiku-4-5")]
 
 
+def test_classify_fallbacks_accepts_a_jev_entry(tmp_path, monkeypatch):
+    # task-cli#217: same provider-name-agnostic parsing as `laya` — a `jev` entry parses to a
+    # plain `("jev", <value>)` pair, ready for `tasklib.classifiers.build_classifier_chain` to
+    # route to `JevClassifier` (the configured value only decides routing, never the endpoint).
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    (tmp_path / "task.yaml").write_text(
+        "version: 1\nclassify:\n  fallbacks:\n    - { jev: cloud }\n"
+        "    - { anthropic: claude-haiku-4-5 }\n",
+        encoding="utf-8",
+    )
+    cfg = load(tmp_path)
+    assert cfg.classify_fallbacks == [("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]
+
+
 def test_classify_capability_default_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     cfg = load(tmp_path)
