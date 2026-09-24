@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "task-cli"
+name = "hyper-task"
 version = "0.18.2"
 description = "task — the enforced ticket interface: every request becomes a well-formed ticket (GitHub Issues / Linear), with quality enforced by the tool."
 readme = "README.md"

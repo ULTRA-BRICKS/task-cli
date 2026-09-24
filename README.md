@@ -21,10 +21,10 @@ Pick one — each ends with `task` on your PATH:
 
 ```bash
 # 1. uv — recommended; macOS, Linux and Windows (incl. Cygwin / Git Bash)
-uv tool install git+https://git.hyperide.ai/ultrabricks/task-cli
+uv tool install hyper-task
 
 # 2. pipx
-pipx install git+https://git.hyperide.ai/ultrabricks/task-cli
+pipx install hyper-task
 
 # 3. one-liner — clones to ~/.local/share/task-cli, links task into ~/.local/bin, registers the agent skill
 curl -fsSL https://git.hyperide.ai/ultrabricks/task-cli/raw/branch/main/install.sh | bash
@@ -34,15 +34,13 @@ git clone https://git.hyperide.ai/ultrabricks/task-cli && cd task-cli && ./insta
 ```
 
 - After **1** or **2**, run `task install-skill` once so coding agents discover `task` (3 and 4 do it for you).
-- **Update:** `uv tool upgrade task-cli` · `pipx upgrade task-cli` · re-run the one-liner · `git pull`.
+- **Unreleased `main`:** `uv tool install git+https://git.hyperide.ai/ultrabricks/task-cli` (or the same with `pipx install`).
+- **Update:** `uv tool upgrade hyper-task` · `pipx upgrade hyper-task` · re-run the one-liner · `git pull`.
 - **Via rig:** clone into `~/xp/task-cli` and list `task` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
 - **Windows:** use uv (option 1) — `./install.sh` and the one-liner do exactly that under Cygwin / Git Bash. If a command dies with `UnicodeEncodeError` in mintty, run `setx PYTHONUTF8 1` once. More: [rig-cli → Windows](https://git.hyperide.ai/ultrabricks/rig-cli#windows-cygwin-git-bash-powershell).
 
-> **Not on PyPI — always install from the git URL.** A bare `pipx install task-cli` /
-> `uv tool install task-cli` does not install this tool: the name is unclaimed on PyPI or (for
-> `rig-cli`, `dev-cli`, `harness-cli`) belongs to an unrelated project. The canonical repo is
-> **git.hyperide.ai/ultrabricks/task-cli**; `github.com/alex-mextner/task-cli` is a frozen,
-> archived mirror.
+> **On PyPI as `hyper-task`** (the command is still `task`). The canonical repo is
+> **git.hyperide.ai/ultrabricks/task-cli**; `github.com/alex-mextner/task-cli` is a frozen, archived mirror.
 
 The only runtime dep is `pyyaml` (for `task.yaml`); without it the tool falls back to built-in defaults.
 

@@ -11,6 +11,7 @@ FORGE="https://git.hyperide.ai/ultrabricks"   # canonical home; github.com/alex-
 ENTRY="bin/task"   # path inside repo root
 CLONE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}"
 EXPECT_URL="$FORGE/$REPO.git"
+DIST="hyper-task"   # PyPI distribution name
 
 # ── Windows (Cygwin / MSYS2 / Git Bash) ───────────────────────────────────────
 # There python, git and uv are native Windows programs: a symlink to the entry script (a
@@ -46,7 +47,7 @@ case "$(uname -s)" in
     PYTHONUTF8=1 "${_bindir:+$_bindir/}$TOOL" install-skill \
       || echo "  WARNING: '$TOOL install-skill' failed — re-run it once $TOOL is on PATH."
     echo ""
-    if [[ -n "${_src:-}" ]]; then _upd="git pull in $_here"; else _upd="uv tool upgrade $REPO"; fi
+    if [[ -n "${_src:-}" ]]; then _upd="git pull in $_here"; else _upd="uv tool upgrade $DIST"; fi
     echo "  $TOOL is installed (uv tool). Update: $_upd"
     exit 0
     ;;
