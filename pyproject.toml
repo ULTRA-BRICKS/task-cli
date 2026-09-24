@@ -27,7 +27,7 @@ laya = ["laya>=0.3.7,<0.4"]
 task = "tasklib.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/alex-mextner/task-cli"
+Homepage = "https://git.hyperide.ai/ultrabricks/task-cli"
 
 # Explicit package list (NOT setuptools flat-layout autodiscovery, which would silently
 # pull stray top-level dirs into the wheel). backends/ is a SUBpackage of tasklib.
