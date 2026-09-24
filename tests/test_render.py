@@ -60,6 +60,182 @@ def test_round_trip_preserves_checked_state_and_proof():
     ]
 
 
+def test_unchecked_criterion_keeps_proof_marker_text():
+    # A planned proof method named on an unchecked box (per strict-ticket-discipline) is
+    # criterion text, not an attached proof — `_render_criterion` never emits a marker for an
+    # unchecked criterion, so parsing must not strip one off either or it is lost on re-render.
+    t = _full_ticket()
+    t.acceptance = [
+        Criterion("do the thing — proof: command output showing it happened", checked=False),
+    ]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "do the thing — proof: command output showing it happened"
+    assert parsed.acceptance[0].checked is False
+    assert parsed.acceptance[0].proof == ""
+    assert render(parsed) == body
+
+
+def test_unchecked_criterion_keeps_forced_marker_text():
+    # Same as above, for the "— forced: ..." marker shape.
+    t = _full_ticket()
+    t.acceptance = [Criterion("ship it — forced: no CI for this yet", checked=False)]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "ship it — forced: no CI for this yet"
+    assert parsed.acceptance[0].checked is False
+    assert parsed.acceptance[0].force_reason == ""
+    assert render(parsed) == body
+
+
+def test_checked_criterion_with_embedded_proof_text_keeps_its_real_force_reason():
+    # Review finding (task-cli#209 review thread): a criterion's own text can embed
+    # marker-shaped text (the planned-proof case above, now kept verbatim), and later gets
+    # checked with `--force` instead of a real proof. `_split_criterion_rest` must strip only
+    # the marker `_render_criterion` actually appended — the RIGHTMOST one — or the recorded
+    # force reason is destroyed and swallowed into a bogus `proof` value, reopening the exact
+    # lossless-round-trip failure this file exists to prevent.
+    t = _full_ticket()
+    t.acceptance = [
+        Criterion(
+            "do the thing — proof: a planned method",
+            checked=True,
+            force_reason="genuinely impossible",
+        ),
+    ]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "do the thing — proof: a planned method"
+    assert parsed.acceptance[0].proof == ""
+    assert parsed.acceptance[0].force_reason == "genuinely impossible"
+    assert render(parsed) == body
+
+
+def test_checked_criterion_with_embedded_proof_text_keeps_its_real_proof():
+    # Same regression, for a real `--proof <path>` rather than `--force`.
+    t = _full_ticket()
+    t.acceptance = [
+        Criterion("ship it — proof: a script", checked=True, proof="https://s3/img(1).png"),
+    ]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "ship it — proof: a script"
+    assert parsed.acceptance[0].proof == "https://s3/img(1).png"
+    assert parsed.acceptance[0].force_reason == ""
+    assert render(parsed) == body
+
+
+def test_checked_criterion_with_embedded_forced_text_keeps_its_real_force_reason():
+    # Same regression, both markers the SAME shape (forced then forced) — a leftmost-per-
+    # pattern search only ever finds ONE "— forced:" occurrence (the embedded one) since
+    # `re.search` doesn't try again past its first match, so this needs the rightmost
+    # DELIMITER scan, not just a rightmost pick among differently-shaped candidates.
+    t = _full_ticket()
+    t.acceptance = [
+        Criterion("plan — forced: maybe later", checked=True, force_reason="actually impossible"),
+    ]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "plan — forced: maybe later"
+    assert parsed.acceptance[0].force_reason == "actually impossible"
+    assert render(parsed) == body
+
+
+def test_checked_criterion_with_embedded_image_proof_text_keeps_its_real_proof():
+    # Same regression, both markers image-shaped (proof-image then proof-image) — the
+    # embedded marker's own greedy `![...](...)`  capture must not swallow the real one.
+    t = _full_ticket()
+    t.acceptance = [
+        Criterion("plan — proof: ![planned-spec](e2e.png)", checked=True, proof="after.png"),
+    ]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "plan — proof: ![planned-spec](e2e.png)"
+    assert parsed.acceptance[0].proof == "after.png"
+    assert render(parsed) == body
+
+
+def test_checked_criterion_proof_value_containing_a_marker_shaped_substring():
+    # Review finding (task-cli#209): the real marker's own VALUE (as opposed to the
+    # criterion's TEXT) can itself contain a "— forced: ..." substring, e.g. an odd file
+    # path. An image proof's value is delimited by its own closing `)`, so this must not be
+    # mistaken for a second, later marker.
+    t = _full_ticket()
+    t.acceptance = [Criterion("ship it", checked=True, proof="shots/fix — forced: no.txt")]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "ship it"
+    assert parsed.acceptance[0].proof == "shots/fix — forced: no.txt"
+    assert parsed.acceptance[0].force_reason == ""
+    assert render(parsed) == body
+
+
+def test_checked_criterion_dangling_empty_marker_is_left_verbatim():
+    # A checked line ending in a bare "— proof:"/"— forced:" with no value at all (e.g. a
+    # continuation image that failed to join) must not have that text silently deleted —
+    # there is nothing to split off, so it stays part of the criterion's text.
+    t = _full_ticket()
+    t.acceptance = [Criterion("a — proof:", checked=True)]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance == [Criterion("a — proof:", checked=True)]
+    assert render(parsed) == body
+
+
+def test_checked_criterion_dangling_empty_forced_marker_is_left_verbatim():
+    # Symmetric to the "— proof:" case above, for "— forced:".
+    t = _full_ticket()
+    t.acceptance = [Criterion("a — forced:", checked=True)]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance == [Criterion("a — forced:", checked=True)]
+    assert render(parsed) == body
+
+
+def test_checked_criterion_with_embedded_image_proof_text_keeps_a_forced_reason_ending_in_paren():
+    # Review finding (task-cli#209): a force reason ending in ")" (ordinary English — "blocked
+    # (waiting on infra)") can make an EMBEDDED image-proof marker in the criterion's own text
+    # look like it reaches the end of the line, if the boundary is found by scanning for the
+    # last ")" anywhere rather than the one balancing that marker's own "(". The real trailing
+    # "— forced: …" must still win.
+    t = _full_ticket()
+    t.acceptance = [
+        Criterion(
+            "do it — proof: ![spec](e2e.png)",
+            checked=True,
+            force_reason="blocked (waiting on infra)",
+        ),
+    ]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].text == "do it — proof: ![spec](e2e.png)"
+    assert parsed.acceptance[0].proof == ""
+    assert parsed.acceptance[0].force_reason == "blocked (waiting on infra)"
+    assert render(parsed) == body
+
+
+def test_round_trip_preserves_proof_path_with_an_unmatched_open_paren():
+    # Review finding (task-cli#209): a real proof ref can have unbalanced parens too — the
+    # balanced-close check alone would reject this and let the bare fallback re-wrap the
+    # whole `![proof](...)` marker on the next render (progressive double-wrapping).
+    t = _full_ticket()
+    t.acceptance = [Criterion("a", checked=True, proof="shot(final.png")]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].proof == "shot(final.png"
+    assert render(parsed) == body
+
+
+def test_round_trip_preserves_proof_path_with_an_unmatched_close_paren():
+    # Same, for a proof ref whose one paren is a closer rather than an opener.
+    t = _full_ticket()
+    t.acceptance = [Criterion("a", checked=True, proof="a)b.png")]
+    body = render(t)
+    parsed = parse(body)
+    assert parsed.acceptance[0].proof == "a)b.png"
+    assert render(parsed) == body
+
+
 def test_round_trip_preserves_proof_path_containing_parens():
     # a proof path/URL with literal parens must survive render→parse intact (greedy capture),
     # not truncate at the first ')' and re-wrap into ![proof](![proof](...)) on the next render.

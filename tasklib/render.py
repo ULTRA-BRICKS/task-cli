@@ -417,6 +417,12 @@ def _parse_criteria(text: str) -> list[Criterion]:
 
     Reads the checkbox state (``[x]``/``[ ]``) and pulls the trailing proof/forced marker off
     the criterion text so a checked-with-proof criterion survives a render→parse round-trip.
+
+    Proof/forced suffixes are only parsed off a CHECKED criterion: ``_render_criterion`` emits
+    one only when ``checked`` is true, so on an unchecked line the same-looking text (e.g. a
+    PLANNED proof method named up front per strict-ticket-discipline, "— proof: an e2e spec")
+    is part of the criterion itself and must be kept verbatim, or render() silently drops it
+    on the very next round-trip.
     """
     items: list[Criterion] = []
     for line in _join_bullet_blocks(text):
@@ -424,32 +430,86 @@ def _parse_criteria(text: str) -> list[Criterion]:
         if not m:
             continue
         checked = m.group(1).lower() == "x"
-        crit_text, proof, force_reason = _split_criterion_rest(m.group(2).strip())
+        rest = m.group(2).strip()
+        if checked:
+            crit_text, proof, force_reason = _split_criterion_rest(rest)
+        else:
+            crit_text, proof, force_reason = rest, "", ""
         if crit_text and crit_text.lower() != "(none specified)":
             items.append(Criterion(text=crit_text, checked=checked, proof=proof, force_reason=force_reason))
     return items
 
 
-def _split_criterion_rest(rest: str) -> tuple[str, str, str]:
-    """Split a criterion's text from its trailing ``— proof: …`` / ``— forced: …`` marker.
+_PROOF_IMAGE_START_RE = re.compile(r"\s+—\s+proof:\s*!\[[^\]]*\]\(")
+_MARKER_DELIM_RE = re.compile(r"\s+—\s+(proof|forced):\s*(?=\S)")
 
-    Returns ``(text, proof_ref, force_reason)``. Anchored on the specific ``— proof:`` /
-    ``— forced:`` markers (unlikely in a normal criterion), so ordinary em-dashes in the text
-    are left alone. The proof capture is GREEDY to the trailing ``)`` so a path/URL that itself
-    contains parens (e.g. ``img(1).png``) round-trips intact instead of truncating at the first
-    ``)`` and falling through to the bare branch (which would re-capture the whole ``![…](…)``
-    wrapper and progressively double-wrap on the next render).
+
+def _matching_close_paren(s: str, start: int) -> int:
+    """Index of the ``)`` balancing the ``(`` immediately before ``start``, or -1.
+
+    A proof path/URL can itself contain parens (e.g. ``img(1).png``), so the boundary of an
+    image proof's value is wherever its OWN parens balance out — not just any later ``)`` in
+    the line, which could belong to an unrelated parenthetical in a trailing ``— forced: …``
+    reason (``"blocked (waiting on infra)"``) and would otherwise look like a closer.
     """
-    m = re.search(r"\s+—\s+proof:\s*!\[[^\]]*\]\((.+)\)\s*$", rest)
-    if m:
-        return rest[: m.start()].strip(), m.group(1).strip(), ""
-    m = re.search(r"\s+—\s+proof:\s*(\S.*?)\s*$", rest)
-    if m:
-        return rest[: m.start()].strip(), m.group(1).strip(), ""
-    m = re.search(r"\s+—\s+forced:\s*(\S.*?)\s*$", rest)
-    if m:
-        return rest[: m.start()].strip(), "", m.group(1).strip()
-    return rest, "", ""
+    depth = 1
+    for i in range(start, len(s)):
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _image_proof_value(rest: str, marker: re.Match[str], last_paren: int) -> str | None:
+    """The proof value for an image-marker occurrence starting at ``marker``, or ``None``.
+
+    Tried balanced first (bounds a value that itself contains marker-shaped text, e.g. an
+    embedded planned-proof note); falls back to the line's very last ``)`` for a real but
+    genuinely unbalanced-parens ref, accepted only when nothing marker-shaped sits in that
+    span — so it can't silently swallow a real, later ``— forced:``/``— proof:`` marker.
+    """
+    close = _matching_close_paren(rest, marker.end())
+    if close != -1 and not rest[close + 1 :].strip():
+        return rest[marker.end() : close].strip()
+    if last_paren > marker.end() and not rest[last_paren + 1 :].strip():
+        span = rest[marker.end() : last_paren]
+        if not _MARKER_DELIM_RE.search(span):
+            return span.strip()
+    return None
+
+
+def _split_criterion_rest(rest: str) -> tuple[str, str, str]:
+    """Split a checked criterion's text from its trailing ``— proof: …`` / ``— forced: …`` marker.
+
+    Returns ``(text, proof_ref, force_reason)``. The rightmost marker in the line wins, not
+    the first one found — a criterion's own text can independently contain a marker-shaped
+    substring (a planned proof method named while still unchecked, per ``_parse_criteria``'s
+    docstring), and ``_render_criterion`` always appends the real marker last. An image proof
+    is tried first (see ``_image_proof_value``); otherwise the marker is a bare line whose
+    value has no boundary of its own and always extends to the end of ``rest``.
+
+    Two shapes are not, and cannot be, disambiguated from an embedded marker by any regex:
+    a proof/force VALUE that itself contains a marker-shaped substring, and a criterion
+    hand-checked (``[x]``) without ever going through ``task check`` at all, whose own text
+    happens to end in marker-shaped prose. Both produce a string identical to a real embedded
+    marker for the opposite intent; this only stabilizes (round-trips on the SECOND pass),
+    it does not preserve the original.
+    """
+    last_paren = rest.rfind(")")
+    for img_start in reversed(list(_PROOF_IMAGE_START_RE.finditer(rest))):
+        value = _image_proof_value(rest, img_start, last_paren)
+        if value is not None:
+            return rest[: img_start.start()].strip(), value, ""
+    matches = list(_MARKER_DELIM_RE.finditer(rest))
+    if not matches:
+        return rest, "", ""
+    marker = matches[-1]
+    text = rest[: marker.start()].strip()
+    value = rest[marker.end() :].strip()
+    return (text, "", value) if marker.group(1) == "forced" else (text, value, "")
 
 
 def _parse_screenshots(text: str) -> list[Screenshot]:
