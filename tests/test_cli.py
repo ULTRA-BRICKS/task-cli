@@ -74,6 +74,9 @@ def test_no_command_prints_help(capsys):
         ["classify", "some text"],
         ["session"],
         ["session", "bind", "#1"],
+        ["module", "list"],
+        ["module", "add", "classify", "--description", "x"],
+        ["module", "assign", "#1", "classify"],
     ],
 )
 def test_subcommand_parses(argv):
@@ -3048,6 +3051,255 @@ def test_link_makes_a_later_prose_mention_pass_the_links_gate(capsys, _inject_fa
     assert rc == 0
 
 
+
+# ── module (task-cli#218: the product-module taxonomy) ─────────────────────────────────────
+
+
+def _cfg_with_modules(modules):
+    """A real, cascade-loaded config with a taxonomy injected — mirrors the DEFAULTS every
+    other CLI test relies on, but PINS `github.repo` explicitly (rather than leaving it
+    `auto`) so routing never shells out to resolve this machine's real git origin, which this
+    environment has repointed at a Forgejo host (unrelated to this feature; see the other
+    pre-existing test failures this repo already carries for the same reason). Also disables
+    `notifications.on_mutation` — `cmd_create` unconditionally shells out to the real,
+    machine-configured `tg` notifier otherwise, which is slow AND a genuine side effect these
+    tests must never trigger."""
+    from pathlib import Path as _Path
+
+    from tasklib.config import load as _config_load
+
+    cfg = _config_load(_Path(".").resolve())
+    cfg.data["modules"] = modules
+    cfg.data.setdefault("github", {})["repo"] = "acme/test-repo"
+    cfg.data.setdefault("notifications", {})["on_mutation"] = False
+    return cfg
+
+
+_TAXONOMY_YAML = [
+    {"name": "classify", "description": "message classification and SP/priority axes"},
+    {"name": "backends", "description": "GitHub Issues and Linear adapters"},
+]
+
+
+def test_module_list_prints_none_configured_when_absent(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules([]))
+    rc = main(["module", "list"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no module taxonomy configured" in out
+
+
+def test_module_list_prints_configured_taxonomy(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    rc = main(["module", "list"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "classify" in out
+    assert "message classification and SP/priority axes" in out
+    assert "backends" in out
+
+
+def test_module_list_json_output(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    rc = main(["module", "list", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    import json
+
+    payload = json.loads(out)
+    assert payload == [
+        {"name": "classify", "description": "message classification and SP/priority axes"},
+        {"name": "backends", "description": "GitHub Issues and Linear adapters"},
+    ]
+
+
+def test_module_add_prints_yaml_snippet_and_never_writes_a_file(
+    capsys, monkeypatch, _inject_fake
+):
+    from pathlib import Path
+
+    task_yaml = Path(".").resolve() / "task.yaml"
+    before = task_yaml.read_text(encoding="utf-8")
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules([]))
+    rc = main(["module", "add", "render", "--description", "the §5 ticket-body renderer"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "modules:" in out
+    assert '- name: "render"' in out
+    assert 'description: "the §5 ticket-body renderer"' in out
+    # never touches the real repo's committed task.yaml — task.yaml is human-edited only
+    assert task_yaml.read_text(encoding="utf-8") == before
+
+
+def test_module_add_rejects_invalid_name(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules([]))
+    rc = main(["module", "add", "Has Spaces"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "invalid module name" in out
+
+
+def test_module_add_rejects_already_configured_name(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    rc = main(["module", "add", "classify"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "already configured" in out
+
+
+def test_module_add_description_with_yaml_special_chars_round_trips(
+    capsys, monkeypatch, _inject_fake
+):
+    # review finding: an unquoted, raw-interpolated description containing a colon or `#`
+    # produces invalid/silently-truncated YAML once pasted into task.yaml — the printed
+    # snippet must be a real, safe-to-paste YAML document.
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules([]))
+    rc = main(
+        ["module", "add", "classify", "--description", "message: the classifier # chain"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    snippet = out[out.index("\nmodules:\n") + 1 :]
+    import yaml
+
+    parsed = yaml.safe_load(snippet)
+    assert parsed == {
+        "modules": [
+            {"name": "classify", "description": "message: the classifier # chain"}
+        ]
+    }
+
+
+def test_module_assign_stamps_the_module_label(monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    main(_create_argv(**{"--title": "fix the classifier fallback chain"}))
+    rc = main(["module", "assign", "#1", "classify"])
+    assert rc == 0
+    assert "module:classify" in _inject_fake.get("#1").labels
+
+
+def test_module_assign_is_idempotent(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    main(_create_argv(**{"--title": "fix the classifier fallback chain"}))
+    main(["module", "assign", "#1", "classify"])
+    capsys.readouterr()
+    rc = main(["module", "assign", "#1", "classify"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already assigned" in out
+    assert _inject_fake.get("#1").labels.count("module:classify") == 1
+
+
+def test_module_assign_idempotent_path_honors_json(capsys, monkeypatch, _inject_fake):
+    # review finding: the idempotent no-op early-return printed a human ANSI line regardless
+    # of `--json`, breaking a script that `json.loads()`s every invocation's stdout.
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    main(_create_argv(**{"--title": "fix the classifier fallback chain"}))
+    main(["module", "assign", "#1", "classify"])
+    capsys.readouterr()
+
+    rc = main(["module", "assign", "#1", "classify", "--json"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    import json
+
+    payload = json.loads(out)
+    assert payload["id"] == "#1"
+
+
+def test_module_assign_refuses_unknown_module_name_with_no_backend_write(
+    capsys, monkeypatch, _inject_fake
+):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    main(_create_argv(**{"--title": "some ticket"}))
+    capsys.readouterr()
+
+    rc = main(["module", "assign", "#1", "no-such-module"])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert "not a configured module" in out
+    # fails closed BEFORE any backend write — the label is never stamped
+    assert "module:no-such-module" not in _inject_fake.get("#1").labels
+    assert _inject_fake.get("#1").labels == ["session:testsess"]
+
+
+def test_module_assign_refuses_when_no_taxonomy_configured(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules([]))
+    main(_create_argv(**{"--title": "some ticket"}))
+    capsys.readouterr()
+
+    rc = main(["module", "assign", "#1", "classify"])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert "no module taxonomy configured" in out
+    assert _inject_fake.get("#1").labels == ["session:testsess"]
+
+
+def test_module_assign_refuses_a_stale_provider_closed_mismatch(
+    capsys, monkeypatch, _inject_fake
+):
+    # review finding: `backend.update()` unconditionally PATCHes state from `ticket.state`, so
+    # a stale managed-state label vs. the backend's real open/closed flag would otherwise be
+    # silently flipped by this metadata-only write — the same hazard `cmd_link` already guards
+    # against via `_reopen_hazard_reason` before every `backend.update()`.
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    main(_create_argv(**{"--title": "some ticket"}))
+    capsys.readouterr()
+    from dataclasses import replace as _replace
+
+    _inject_fake.update(_replace(_inject_fake.get("#1"), provider_closed=True))
+
+    rc = main(["module", "assign", "#1", "classify"])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert "stale managed label" in out
+    # no backend write happened — the label was never stamped
+    assert "module:classify" not in _inject_fake.get("#1").labels
+
+
+def test_module_assign_ambiguous_update_reports_ambiguous_and_exits_9(
+    capsys, monkeypatch, _inject_fake
+):
+    # review finding: an earlier version let `AmbiguousBackendError` escape `backend.update()`
+    # as a raw traceback instead of the clean, actionable exit every other write path
+    # (`cmd_link`, `_classify_create`) already gives a mid-write connection drop.
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    main(_create_argv(**{"--title": "some ticket"}))
+    capsys.readouterr()
+
+    from tasklib.backends import AmbiguousBackendError
+
+    def _boom(ticket):
+        raise AmbiguousBackendError("connection dropped mid-write")
+
+    monkeypatch.setattr(_inject_fake, "update", _boom)
+    rc = main(["module", "assign", "#1", "classify"])
+    out = capsys.readouterr().out
+
+    assert rc == 9
+    assert "ambiguous" in out
+
+
+def test_module_assign_reports_already_assigned_modules_in_success_message(
+    capsys, monkeypatch, _inject_fake
+):
+    monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules(_TAXONOMY_YAML))
+    main(_create_argv(**{"--title": "some ticket"}))
+    main(["module", "assign", "#1", "classify"])
+    capsys.readouterr()
+
+    rc = main(["module", "assign", "#1", "backends"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "backends" in out and "classify" in out
+    assert set(_inject_fake.get("#1").labels) >= {"module:classify", "module:backends"}
+
+
 # ── the non-blocking todo-shaped hint ────────────────────────────────────────────────────────
 
 
@@ -4014,6 +4266,65 @@ def test_classify_change_creates_ticket(capsys, monkeypatch, _inject_fake):
     out = capsys.readouterr().out
     assert "change" in out
     assert "created" in out
+
+
+
+def _patch_load_with(monkeypatch, **overrides):
+    """Wrap `cli._load` so it applies `overrides` (dotted-shallow: each kwarg is a top-level
+    config key) on top of whatever the real cascade loader resolves — mirrors
+    `test_notification_disabled_by_config`'s existing `orig_load` wrapping pattern."""
+    orig_load = cli._load
+
+    def _patched_load(args):
+        cfg = orig_load(args)
+        for key, value in overrides.items():
+            cfg.data[key] = value
+        return cfg
+
+    monkeypatch.setattr(cli, "_load", _patched_load)
+
+
+def test_classify_infers_module_label_when_opted_in(capsys, monkeypatch, _inject_fake):
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    _patch_load_with(
+        monkeypatch,
+        modules=[
+            {"name": "classify", "description": "message classification fallback chain"},
+            {"name": "backends", "description": "github issues linear adapters"},
+        ],
+        classify={"infer_module": True},
+    )
+    rc = main(["classify", "fix a bug in the classify fallback chain logic", "--create"])
+    assert rc == 0
+    assert "module:classify" in _inject_fake.get("#1").labels
+
+
+def test_classify_does_not_infer_module_by_default(capsys, monkeypatch, _inject_fake):
+    # `classify.infer_module` defaults False — a repo with a configured taxonomy but no
+    # explicit opt-in must see zero behavior change (task-cli#218 constraint).
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: __import__(
+            "tasklib.classify", fromlist=["ResolvedModel"]
+        ).ResolvedModel("anthropic", "claude:claude-haiku-4-5"),
+    )
+    _patch_load_with(
+        monkeypatch,
+        modules=[
+            {"name": "classify", "description": "message classification fallback chain"},
+        ],
+    )
+    rc = main(["classify", "fix a bug in the classify fallback chain logic", "--create"])
+    assert rc == 0
+    labels = _inject_fake.get("#1").labels
+    assert not any(label.startswith("module:") for label in labels)
 
 
 def test_classify_multi_ask_message_creates_one_ticket_per_ask(capsys, monkeypatch, _inject_fake):
@@ -5366,6 +5677,143 @@ def test_classify_laya_runtime_failure_falls_through_to_review_cli(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"verdict": "justAsk"}
+
+
+# ── task-cli#217: pluggable classifier chain, `jev` end-to-end wiring ──────────────────────
+
+
+def test_classify_jev_provider_used_when_available_skips_review_cli(
+    capsys, monkeypatch, _inject_fake
+):
+    # `classify.fallbacks: [{jev: cloud}, {anthropic: ...}]` -- when jev is reachable AND
+    # produces a classification, review-cli must never even be shelled out to.
+    from tasklib.classify import Classification, Verdict
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.JevClassifier.available", lambda self: True)
+    monkeypatch.setattr(
+        "tasklib.classifiers.JevClassifier.classify",
+        lambda self, message, bias: Classification(
+            verdict=Verdict.CHANGE,
+            process_or_product="product",
+            priority="P1",
+            story_points=5,
+        ),
+    )
+
+    def _never_called(model, prompt):
+        raise AssertionError("review-cli must not run when jev already classified")
+
+    monkeypatch.setattr(cli, "_run_review_just_ask", _never_called)
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "verdict": "change",
+        "process_or_product": "product",
+        "priority": "P1",
+        "story_points": 5,
+    }
+
+
+def test_classify_jev_unavailable_falls_through_to_review_cli(capsys, monkeypatch, _inject_fake):
+    # jev configured but no API key resolvable -> falls through to the review-cli chain,
+    # exactly the graceful-degradation contract task-cli#206/#217 requires.
+    from tasklib.classify import ResolvedModel
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.JevClassifier.available", lambda self: False)
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "change")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: ResolvedModel(
+            "anthropic", "claude:claude-haiku-4-5"
+        ),
+    )
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "change"
+
+
+def test_classify_jev_runtime_failure_falls_through_to_review_cli(
+    capsys, monkeypatch, _inject_fake
+):
+    # jev reports itself available (a key is resolvable) but fails at RUNTIME (e.g. the
+    # documented billing block) -- `classify()` returning `None` must fall through to the
+    # next provider, not bias-default straight away while a real review-cli provider is
+    # still reachable.
+    from tasklib.classify import ResolvedModel
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig,
+        "classify_fallbacks",
+        property(lambda self: [("jev", "cloud"), ("anthropic", "claude-haiku-4-5")]),
+    )
+    monkeypatch.setattr("tasklib.classifiers.JevClassifier.available", lambda self: True)
+    monkeypatch.setattr(
+        "tasklib.classifiers.JevClassifier.classify", lambda self, message, bias: None
+    )
+    monkeypatch.setattr(cli, "_run_review_just_ask", lambda model, prompt: "justAsk")
+    monkeypatch.setattr(
+        "tasklib.classify.resolve_chain",
+        lambda fallbacks=None, env=None, **_kw: ResolvedModel(
+            "anthropic", "claude:claude-haiku-4-5"
+        ),
+    )
+    rc = main(["classify", "how does this work?", "--json"])
+    assert rc == 0
+    import json
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"verdict": "justAsk"}
+
+
+def test_classify_explicit_empty_fallbacks_is_never_upgraded_to_the_default_chain(
+    capsys, monkeypatch, _inject_fake
+):
+    # task-cli#208 review finding: a repo that explicitly writes `classify: {fallbacks: []}`
+    # (deliberately disabling every classifier) must get ZERO providers, not the zero-config
+    # default chain (laya + the six-provider review-cli fallback) -- `cli._classify_one` must
+    # never coalesce an explicit empty list into "unconfigured".
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(LoadedConfig, "classify_fallbacks", property(lambda self: []))
+
+    def _laya_available_never_called(self):
+        raise AssertionError("an explicit empty fallbacks list must try NO provider at all")
+
+    monkeypatch.setattr(
+        "tasklib.classifiers.LayaClassifier.available", _laya_available_never_called
+    )
+
+    def _review_cli_never_called(model, prompt):
+        raise AssertionError("an explicit empty fallbacks list must try NO provider at all")
+
+    monkeypatch.setattr(cli, "_run_review_just_ask", _review_cli_never_called)
+    rc = main(["classify", "add rate limiting to the API", "--json"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "no classifier provider available" in captured.err
+    import json
+
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "change"  # the bias default, not a real classification
 
 
 # ── session ──────────────────────────────────────────────────────────────────────────
@@ -7762,3 +8210,4 @@ def test_audit_does_not_flag_unresolvable_msgref_reference(_inject_fake, monkeyp
 
     rc = main(["audit"])
     assert rc == 0
+

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # install.sh — install the `task` CLI (Python 3).
 # Works from a local clone (./install.sh) and piped from curl:
-#   curl -fsSL https://raw.githubusercontent.com/alex-mextner/task-cli/main/install.sh | bash
+#   curl -fsSL https://git.hyperide.ai/ultrabricks/task-cli/raw/branch/main/install.sh | bash
 set -euo pipefail
 
 # ── identity ──────────────────────────────────────────────────────────────────
 TOOL="task"
 REPO="task-cli"
-GITHUB_USER="alex-mextner"
+ORG="ultrabricks"
 ENTRY="bin/task"   # path inside repo root
 CLONE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}"
 
@@ -23,7 +23,7 @@ if [[ -n "$_script_dir" && -f "$_script_dir/$ENTRY" ]]; then
 else
   mkdir -p "$CLONE_BASE"
   CLONE_DIR="$CLONE_BASE/$REPO"
-  EXPECT_URL="https://github.com/$GITHUB_USER/$REPO.git"
+  EXPECT_URL="https://git.hyperide.ai/$ORG/$REPO.git"
   if [[ -d "$CLONE_DIR/.git" ]]; then
     actual_url="$(git -C "$CLONE_DIR" remote get-url origin 2>/dev/null || echo "")"
     if [[ "$actual_url" != "$EXPECT_URL" ]]; then
@@ -63,6 +63,14 @@ if ! python3 -c 'import yaml' 2>/dev/null; then
     echo ""
   fi
 fi
+
+# ── optional dependency: laya (task-cli#208 default classify provider) ──────
+# Best-effort, non-fatal (task_install_laya always returns 0 — see its own docstring for
+# the full PEP 668 rationale). `task classify`'s own runtime auto-install
+# (tasklib/laya_autoinstall.py) is the other half of task-cli#208 and retries this exact
+# same install later (cooldown-cached) if this step didn't succeed here.
+source "$SRC/scripts/lib/install_laya.sh"
+task_install_laya "$(command -v python3)"
 
 # ── symlink entry ─────────────────────────────────────────────────────────────
 ENTRY_PATH="$SRC/$ENTRY"

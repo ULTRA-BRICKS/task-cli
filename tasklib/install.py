@@ -48,7 +48,7 @@ description: >-
   `task gate <id>`, `task done <id>`.
 metadata:
   author: alex-mextner
-  repo: https://github.com/alex-mextner/task-cli
+  repo: https://git.hyperide.ai/ultrabricks/task-cli
 ---
 
 # task — the enforced ticket interface
