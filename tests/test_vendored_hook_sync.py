@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -36,6 +37,16 @@ VENDORED = REPO_ROOT / "test" / "docker" / "require_ticket_before_commit.py"
 SYNC_BEGIN = "# SYNC-HEADER-BEGIN"
 SYNC_END = "# SYNC-HEADER-END"
 BLOCK_MARKER = "[require-ticket] BLOCKED: no ticket reference"
+
+# The vendored hook runs under `sys.executable`. In CI that's a self-contained toolchain build
+# (actions/setup-python's Linux tool-cache Python), which needs its OWN LD_LIBRARY_PATH to find
+# its bundled libpython*.so -- a bare env replacement drops it entirely, so the subprocess can't
+# even start (exit 127: "cannot open shared object file"), though this is invisible on macOS/a
+# system-installed python where the interpreter doesn't need it. Stay otherwise minimal/hermetic
+# -- only carry this one var through, and only when the parent actually has it set.
+_HOOK_ENV: dict[str, str] = {"PATH": "/usr/bin:/bin"}
+if os.environ.get("LD_LIBRARY_PATH"):
+    _HOOK_ENV["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
 
 
 def _vendored_text() -> str:
@@ -104,7 +115,7 @@ def test_vendored_hook_keeps_the_block_marker_contract():
         input=event,
         capture_output=True,
         text=True,
-        env={"REQUIRE_TICKET_STRICT": "1", "PATH": "/usr/bin:/bin"},
+        env={**_HOOK_ENV, "REQUIRE_TICKET_STRICT": "1"},
         timeout=10,
         check=False,
     )
@@ -119,7 +130,7 @@ def test_vendored_hook_allows_a_ticketed_commit():
         input=event,
         capture_output=True,
         text=True,
-        env={"REQUIRE_TICKET_STRICT": "1", "PATH": "/usr/bin:/bin"},
+        env={**_HOOK_ENV, "REQUIRE_TICKET_STRICT": "1"},
         timeout=10,
         check=False,
     )
@@ -134,7 +145,7 @@ def _run_hook(command: str, *, strict: str = "1") -> subprocess.CompletedProcess
         input=event,
         capture_output=True,
         text=True,
-        env={"REQUIRE_TICKET_STRICT": strict, "PATH": "/usr/bin:/bin"},
+        env={**_HOOK_ENV, "REQUIRE_TICKET_STRICT": strict},
         timeout=10,
         check=False,
     )

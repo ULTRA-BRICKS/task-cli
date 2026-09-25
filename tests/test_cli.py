@@ -3118,7 +3118,12 @@ def test_module_add_prints_yaml_snippet_and_never_writes_a_file(
 ):
     from pathlib import Path
 
+    # `_inject_fake` -> `isolated_state` runs this test from a throwaway hermetic repo (UB-25)
+    # that starts with no task.yaml at all — seed one so "never touches it" is actually
+    # exercised (reading a file that may not exist yet would raise FileNotFoundError instead of
+    # proving the no-write contract).
     task_yaml = Path(".").resolve() / "task.yaml"
+    task_yaml.write_text("task:\n  backend: github-issues\n", encoding="utf-8")
     before = task_yaml.read_text(encoding="utf-8")
     monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules([]))
     rc = main(["module", "add", "render", "--description", "the §5 ticket-body renderer"])

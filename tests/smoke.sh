@@ -59,8 +59,11 @@ set -e
 if [ "$RC" -ne 2 ]; then fail "task list outside a repo (expected exit 2, got $RC)"; fi
 case "$OUT" in
   *Traceback*) fail "task list outside a repo printed a traceback" ;;
-  # match a stable substring of the 3-part error (resilient to docs/wording tweaks).
-  *"outside a git repo"*) pass "outside-a-repo task list -> clean 3-part error" ;;
+  # match a stable substring of the 3-part error (resilient to docs/wording tweaks). task-cli#220
+  # added an earlier, -C-specific "-C <path> is not inside a git repository" check (cli.py) that
+  # now intercepts before cmd_list's own "outside a git repo" wording ever runs for this
+  # explicit-`-C` case -- update the matched substring to the current, correct message.
+  *"is not inside a git repository"*) pass "outside-a-repo task list -> clean 3-part error" ;;
   *) fail "task list outside a repo: unexpected output" ;;
 esac
 
