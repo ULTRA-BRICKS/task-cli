@@ -49,6 +49,16 @@ def _no_ambient_github_env_override(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_fj_key_store(tmp_path, monkeypatch):
+    """On Windows the fj key store lives under %APPDATA% (credentials._fj_key_files checks it
+    first), and tests that only redirect HOME would otherwise read -- and, for an expired OAuth
+    login, run the real `fj` to refresh -- the developer's REAL Forgejo login. Point APPDATA at
+    an empty throwaway dir for every test; harmless where APPDATA is unused.
+    """
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata-isolated"))
+
+
+@pytest.fixture(autouse=True)
 def _sane_umask():
     """config.py's `_trusted_ancestor` (UB-25 security hardening) legitimately fails-closed on
     an ancestor directory that is group/world-writable -- a real protection against another
