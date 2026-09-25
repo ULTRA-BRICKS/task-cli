@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,10 +12,29 @@ import pytest
 # Make the package importable when running pytest from the repo root without an install.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Files and directories the tests create must not be group-writable: the config loader skips an
+# ancestor rig.yaml (or its directory) that others can write (tasklib/config.py
+# `_trusted_ancestor`). The suite assumed a 022 umask (GitHub-hosted runners, macOS); a Forgejo /
+# self-hosted runner user with Ubuntu's user-private-group umask 002 made every ancestor-cascade
+# test read an empty layer. Pin it for the whole run (subprocesses inherit it).
+os.umask(0o022)
+
 from tasklib.backends import TicketBackend  # noqa: E402
 from tasklib.config import ATTACHMENT_MODE_ENV_VAR  # noqa: E402
 from tasklib.model import State, Ticket  # noqa: E402
 from tasklib.render import parse, render  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_github_api_root(monkeypatch):
+    """The GitHub backend honors GITHUB_API_URL / GITHUB_UPLOADS_URL (GHE, test mocks). A CI
+    runner exports its own server's API root there — on GitHub that is https://api.github.com,
+    so the suite never noticed; a Forgejo runner exports e.g. http://10.89.0.1:3000/api/v1, which
+    the backend (correctly) refuses to send a token to, failing every GitHub-backend test. Tests
+    that need an override set it themselves.
+    """
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+    monkeypatch.delenv("GITHUB_UPLOADS_URL", raising=False)
 
 
 @pytest.fixture(autouse=True)
