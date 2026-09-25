@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -36,6 +37,22 @@ VENDORED = REPO_ROOT / "test" / "docker" / "require_ticket_before_commit.py"
 SYNC_BEGIN = "# SYNC-HEADER-BEGIN"
 SYNC_END = "# SYNC-HEADER-END"
 BLOCK_MARKER = "[require-ticket] BLOCKED: no ticket reference"
+
+
+def _hook_env(strict: str) -> dict[str, str]:
+    """A minimal env for running the vendored hook under THIS interpreter.
+
+    Keeps the dynamic-loader path: a `setup-python` interpreter links a shared libpython. On
+    GitHub's hosted image it resolves without help, but in a Forgejo / self-hosted runner's tool
+    cache it is found only through the LD_LIBRARY_PATH setup-python exports, so dropping that
+    made the child die with "libpython3.X.so.1.0: cannot open shared object file" (exit 127)
+    before the hook ran.
+    """
+    env = {"REQUIRE_TICKET_STRICT": strict, "PATH": "/usr/bin:/bin"}
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        if os.environ.get(var):
+            env[var] = os.environ[var]
+    return env
 
 
 def _vendored_text() -> str:
@@ -104,7 +121,7 @@ def test_vendored_hook_keeps_the_block_marker_contract():
         input=event,
         capture_output=True,
         text=True,
-        env={"REQUIRE_TICKET_STRICT": "1", "PATH": "/usr/bin:/bin"},
+        env=_hook_env("1"),
         timeout=10,
         check=False,
     )
@@ -119,7 +136,7 @@ def test_vendored_hook_allows_a_ticketed_commit():
         input=event,
         capture_output=True,
         text=True,
-        env={"REQUIRE_TICKET_STRICT": "1", "PATH": "/usr/bin:/bin"},
+        env=_hook_env("1"),
         timeout=10,
         check=False,
     )
@@ -134,7 +151,7 @@ def _run_hook(command: str, *, strict: str = "1") -> subprocess.CompletedProcess
         input=event,
         capture_output=True,
         text=True,
-        env={"REQUIRE_TICKET_STRICT": strict, "PATH": "/usr/bin:/bin"},
+        env=_hook_env(strict),
         timeout=10,
         check=False,
     )
