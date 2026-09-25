@@ -12,7 +12,8 @@ blocks/blocked-by/relates-to/duplicate-of/follow-up-of/followed-up-by
 relationship between two tickets) · audit (reconciliation backstop — flags/reverts a Done ticket
 that never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close)
 · mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
-session · daemon (the due-date reminder watcher: start/stop/status/run).
+module (list/add/assign the repo's product-module taxonomy) · session · daemon (the
+due-date reminder watcher: start/stop/status/run).
 Global flags: --backend, --repo, --config, --json, --yes, and per-gate --skip-<gate>.
 """
 
@@ -149,12 +150,19 @@ def build_parser() -> argparse.ArgumentParser:
     # global flags live on the top parser AND each subparser via parents
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
-        "-C", "--cwd", default=".", help="repo root to operate on (default: cwd)"
+        "-C",
+        "--cwd",
+        default=None,
+        help="repository to operate on (default: cwd). An explicit path must be inside a git "
+        "repository",
     )
     common.add_argument(
-        "--backend", help="override the configured backend (github-issues|linear)"
+        "--backend",
+        help="override the configured backend (github-issues|linear|tasks|forgejo)",
     )
-    common.add_argument("--repo", help="override github repo (owner/name)")
+    common.add_argument(
+        "--repo", help="override the repository (owner/name) for github-issues or forgejo"
+    )
     common.add_argument(
         "--config", help="explicit config file (default: ./task.yaml + global)"
     )
@@ -394,6 +402,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="screenshot path or URL (one or more)",
     )
 
+    # comment — the supported way to add a note to any backend's ticket (UB-25: the normal path
+    # that replaces raw forge-CLI/API comment writes)
+    cmp = sub.add_parser(
+        "comment", parents=[common], help="add a comment to a ticket (Markdown kept as-is)"
+    )
+    cmp.add_argument("id", help="ticket id (#123, owner/repo#123 or HYP-456)")
+    cmp.add_argument("text", nargs="*", help="comment text (words are joined with spaces)")
+    cmp.add_argument(
+        "--body-file", help="read the comment body from a file ('-' reads stdin)"
+    )
+
     # status
     stp = sub.add_parser(
         "status", parents=[common], help="read or transition a ticket's state"
@@ -489,6 +508,26 @@ def build_parser() -> argparse.ArgumentParser:
     lkp.add_argument("id", help="ticket id (#123 or HYP-456)")
     lkp.add_argument("relation", choices=list(RELATIONS), help="relation type")
     lkp.add_argument("other_id", metavar="other-id", help="the other ticket id")
+
+    # module — the repo's product-module taxonomy: list/add/assign (task-cli#218)
+    mdp = sub.add_parser(
+        "module",
+        parents=[common],
+        help="manage the repo's product-module taxonomy (list|add|assign)",
+    )
+    mdp.add_argument("action", choices=["list", "add", "assign"], help="list | add | assign")
+    mdp.add_argument(
+        "arg1",
+        nargs="?",
+        metavar="NAME-OR-ID",
+        help="add: module name | assign: ticket id (#123 or HYP-456)",
+    )
+    mdp.add_argument(
+        "arg2", nargs="?", metavar="MODULE-NAME", help="assign: module name"
+    )
+    mdp.add_argument(
+        "--description", metavar="TEXT", help="module description (add only)"
+    )
 
     # gate — the read-only ship-time verdict (agent-tools ci/ship/ship.sh calls this pre-merge)
     gtp = sub.add_parser(
@@ -622,11 +661,13 @@ def main(argv: list[str] | None = None) -> int:
         "find": cmd_find,
         "change": cmd_change,
         "attach": cmd_attach,
+        "comment": cmd_comment,
         "status": cmd_status,
         "done": cmd_done,
         "check": cmd_check,
         "accept": cmd_accept,
         "link": cmd_link,
+        "module": cmd_module,
         "gate": cmd_gate,
         "audit": cmd_audit,
         "mark-shipped": cmd_mark_shipped,
@@ -636,6 +677,7 @@ def main(argv: list[str] | None = None) -> int:
         "daemon": cmd_daemon,
     }
     try:
+        _refuse_explicit_non_repo_cwd(args)
         return handlers[args.command](args)
     except TransitionError as exc:
         # an illegal state transition (issue #10): clean error, no traceback. It returns the
@@ -672,11 +714,42 @@ class _ClassifyBatchAmbiguous(Exception):
 # ── shared plumbing ─────────────────────────────────────────────────────────────────
 
 
+# `owner/repo#N` — a repository-qualified GitHub/Forgejo issue id (numbers are per repository).
+_QUALIFIED_ID_RE = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[0-9]+")
+_FORGE_BACKENDS = ("github-issues", "forgejo")
+
+
+def _refuse_explicit_non_repo_cwd(args: argparse.Namespace) -> None:
+    """UB-25 contract: EVERY explicit ``-C``/``--cwd`` — for reads and writes alike — must name
+    a path inside a git worktree, checked before any config, credential or provider I/O.
+
+    An explicit target says "operate on THIS repository"; a non-repository path would silently
+    fall back to a global/registry route that may be a different project. The unscoped
+    registry/aggregation views (``list``/``find``/``read`` outside a repo) stay available, but
+    only from a non-repository shell cwd with NO ``-C``.
+    """
+    explicit = getattr(args, "cwd", None)
+    if explicit is None:
+        return
+    target = Path(explicit).expanduser()
+    if target.is_dir() and _in_git_repo(target.resolve()):
+        return
+    raise _UserError(
+        f"-C {explicit} is not inside a git repository.\n"
+        "  why: an explicit -C/--cwd selects the repository this command operates on; a "
+        "non-repository path would fall back to a global or registry route that may be a "
+        "different project.\n"
+        "  fix: pass -C with a path inside the target repository, or run the command from "
+        "inside it (no flag needed). For the cross-project registry view, run it from outside "
+        "any repository without -C."
+    )
+
+
 def _load(args: argparse.Namespace):
     """Load config for the -C repo, applying --backend/--repo/--config overrides."""
     from .config import ConfigError, load
 
-    repo_root = Path(args.cwd).resolve()
+    repo_root = Path(args.cwd or ".").resolve()
     explicit = None
     if getattr(args, "config", None):
         cp = Path(args.config)
@@ -685,6 +758,37 @@ def _load(args: argparse.Namespace):
         cfg = load(repo_root, explicit_config=explicit)
     except ConfigError as exc:
         raise _UserError(str(exc)) from exc
+
+    # Zero-config Forgejo routing: the built-in default is github-issues, but a
+    # repository whose origin lives on a host already trusted by fj is
+    # unambiguously Forgejo for repo:auto. Any explicitly configured backend (a
+    # `backend:` in any config layer, even `github-issues`), explicit CLI
+    # routing/pins AND an explicitly preconfigured dormant forgejo url/repo win.
+    forgejo_cfg = cfg.section("forgejo")
+    if (
+        not getattr(args, "backend", None)
+        and not getattr(args, "repo", None)
+        and not cfg.explicit_backend
+        and cfg.backend == "github-issues"
+        and str(cfg.section("github").get("repo", "auto")).strip() == "auto"
+        and not str(forgejo_cfg.get("url", "")).strip()
+        and str(forgejo_cfg.get("repo", "auto")).strip() == "auto"
+    ):
+        from .backends.forgejo import autodetect_forgejo_origin
+
+        origin = autodetect_forgejo_origin(repo_root)
+        if origin:
+            cfg.data["backend"] = "forgejo"
+            cfg.data.setdefault("forgejo", {})["url"] = origin
+            cfg.data["forgejo"]["repo"] = "auto"
+            cfg.layers.append(f"autodetect:forgejo:{origin}")
+            try:
+                from .config import validate
+
+                validate(cfg.data)
+            except ConfigError as exc:
+                raise _UserError(str(exc)) from exc
+
     if getattr(args, "backend", None):
         cfg.data["backend"] = args.backend
         try:
@@ -694,7 +798,8 @@ def _load(args: argparse.Namespace):
         except ConfigError as exc:
             raise _UserError(str(exc)) from exc
     if getattr(args, "repo", None):
-        cfg.data.setdefault("github", {})["repo"] = args.repo
+        section = "forgejo" if cfg.backend == "forgejo" else "github"
+        cfg.data.setdefault(section, {})["repo"] = args.repo
     return cfg
 
 
@@ -761,6 +866,27 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
         name = f"{team}/{project}" if project else team
         return name, {"backend": "linear", "linear": {"team": team, "project": project}}
 
+    if backend == "forgejo":
+        return _current_forgejo_overlay(cfg)
+
+    if backend == "tasks":
+        sec = cfg.section("tasks")
+        url = str(sec.get("url", "")).strip()
+        team = str(sec.get("team", "")).strip()
+        if not url or not team:
+            # Same reasoning as the teamless-linear branch above: a misconfigured `backend:
+            # tasks` INSIDE a repo is a real, actionable misconfig, not "outside a repo".
+            if not _in_git_repo(cfg.repo_root):
+                return None
+            _backend(
+                cfg
+            )  # NoReturn here: raises _UserError("tasks backend requires a url"/"...team key")
+            raise AssertionError(
+                "unreachable: _backend raises on a misconfigured tasks config"
+            )
+        name = f"{team}@{url}"
+        return name, {"backend": "tasks", "tasks": {"url": url, "team": team}}
+
     # github-issues
     gh = cfg.section("github")
     repo_spec = str(gh.get("repo", "auto")).strip()
@@ -779,9 +905,44 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
     except BackendError as exc:
         # inside a repo, but the origin is broken/unsupported → a real, user-facing error
         # (not "outside a repo"). Surface it as a clean _UserError, never a traceback.
-        raise _UserError(str(exc)) from exc
+        raise _UserError(_with_forgejo_hint(str(exc))) from exc
     full = f"{owner}/{repo}"
     return full, {"backend": "github-issues", "github": {"repo": full}}
+
+
+def _with_forgejo_hint(message: str) -> str:
+    """UB-25: a repo still routed to the github default (or a stale `backend: github-issues`
+    override) whose origin is a non-GitHub forge gets a pointer at the Forgejo backend instead
+    of a bare "unrecognized github remote URL"."""
+    if not message.startswith("unrecognized github remote URL"):
+        return message
+    return (
+        f"{message}\n"
+        "  why: this repository is routed to the github-issues backend, but its origin is not "
+        "on github.com.\n"
+        "  fix: if it lives on a Forgejo forge, route it there in the repository's rig.yaml: "
+        "`task: {backend: forgejo, forgejo: {url: https://<forge-host>, repo: owner/name}}`."
+    )
+
+
+def _current_forgejo_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
+    """The forgejo branch of :func:`_current_project_overlay`: an explicit ``forgejo.repo``
+    pins the target; ``auto`` resolves the git ``origin`` (only on ``forgejo.url``'s host), and
+    returns ``None`` only when genuinely outside a git work tree."""
+    from .backends import BackendError
+    from .backends.forgejo import forgejo_origin, resolve_repo
+
+    sec = cfg.section("forgejo")
+    spec = str(sec.get("repo", "auto") or "auto").strip()
+    if spec == "auto" and not _in_git_repo(cfg.repo_root):
+        return None
+    try:
+        origin = forgejo_origin(str(sec.get("url", "") or ""))
+        owner, repo = resolve_repo(spec, cfg.repo_root, origin)
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+    full = f"{owner}/{repo}"
+    return full, {"backend": "forgejo", "forgejo": {"url": origin, "repo": full}}
 
 
 def _config_for_overlay(cfg, overlay: dict):
@@ -860,27 +1021,57 @@ def _routing_for_id(cfg, ticket_id: str):
 def _route_id_to_project(ticket_id: str, projects: list):
     """Pick the registered project that owns ``ticket_id``, or ``None`` if ambiguous/none."""
     tid = ticket_id.strip()
+    qualified = _QUALIFIED_ID_RE.fullmatch(tid)
+    if qualified is not None:
+        # owner/repo#N names its repository: route to the registered forge project with that
+        # repo (never to a same-numbered issue elsewhere).
+        named = qualified.group(1).lower()
+        hits = [p for p in projects if p.backend in _FORGE_BACKENDS and _repo_of(p) == named]
+        return hits[0] if len(hits) == 1 else None
     if tid.startswith("#") or tid.lstrip("#").isdigit():
-        gh = [p for p in projects if p.backend == "github-issues"]
-        return gh[0] if len(gh) == 1 else None
-    # Linear-shaped id: TEAM-123 → route by the team prefix. A Linear identifier is team-scoped,
-    # and get/update resolve by the identifier alone (they ignore the project), so ANY registered
-    # project on that team can fetch it — pick the first deterministically rather than calling two
-    # same-team projects "ambiguous" (they'd resolve the same issue either way).
+        # A bare number is only meaningful inside ONE repository: with more than one registered
+        # GitHub/Forgejo repository it is ambiguous, whichever backends they use.
+        forge = [p for p in projects if p.backend in _FORGE_BACKENDS]
+        return forge[0] if len(forge) == 1 else None
+    # TEAM-123-shaped id: Linear AND Tasks both use this identifier shape and are both
+    # team-scoped, so route by team prefix across BOTH backends. Within ONE tracker, get/update
+    # resolve by the identifier alone (ignoring the project), so two same-team projects of that
+    # tracker resolve the same issue — pick the first deterministically. Across trackers (Linear
+    # vs Tasks, or two Tasks deployments) the same `HYP-3` names DIFFERENT tickets, so that is
+    # ambiguous and refused, never guessed (UB-25 review).
     prefix = tid.partition("-")[0].upper() if "-" in tid else ""
     if prefix:
         matches = [
             p
             for p in projects
-            if p.backend == "linear" and _linear_team_of(p) == prefix
+            if (p.backend == "linear" and _linear_team_of(p) == prefix)
+            or (p.backend == "tasks" and _tasks_team_of(p) == prefix)
         ]
-        if matches:
+        trackers = {_tracker_of(p) for p in matches}
+        if len(trackers) == 1:
             return matches[0]
     return None
 
 
+def _tracker_of(project) -> str:
+    """The ticket store a team-scoped project reads from: one Linear workspace, or one Tasks
+    deployment (by url)."""
+    if project.backend == "tasks":
+        return "tasks:" + str(project.overlay.get("tasks", {}).get("url", "")).strip().rstrip("/").lower()
+    return project.backend
+
+
+def _repo_of(project) -> str:
+    section = "forgejo" if project.backend == "forgejo" else "github"
+    return str(project.overlay.get(section, {}).get("repo", "")).strip().lower()
+
+
 def _linear_team_of(project) -> str:
     return str(project.overlay.get("linear", {}).get("team", "")).strip().upper()
+
+
+def _tasks_team_of(project) -> str:
+    return str(project.overlay.get("tasks", {}).get("team", "")).strip().upper()
 
 
 def _unroutable_id_error(ticket_id: str, projects: list) -> str:
@@ -904,6 +1095,16 @@ def _create_without_repo_error(cfg) -> str:
         how = (
             "  fix: run inside the repo whose `task.yaml` sets `linear.team`, "
             "or set `linear: {team: KEY}` in ~/.config/task-cli/config.yaml."
+        )
+    elif backend == "tasks":
+        how = (
+            "  fix: run inside the repo whose `task.yaml` sets `tasks.url`/`tasks.team`, "
+            "or set `tasks: {url: URL, team: KEY}` in ~/.config/task-cli/config.yaml."
+        )
+    elif backend == "forgejo":
+        how = (
+            "  fix: run inside the target Forgejo repository's checkout (its origin must be on "
+            "`forgejo.url`'s host), or pin `forgejo.repo: owner/name`."
         )
     else:
         how = (
@@ -3495,6 +3696,58 @@ def cmd_change(args: argparse.Namespace) -> int:
 
 
 
+def cmd_comment(args: argparse.Namespace) -> int:
+    """Append a comment to a ticket through its configured backend (UB-25).
+
+    The supported, backend-agnostic way to leave a note on a GitHub/Forgejo/Linear/Tasks ticket
+    — agents use this instead of a raw forge CLI or API write. The text is posted verbatim (it
+    is Markdown, never re-rendered), and never touches the ticket body.
+    """
+    body = _comment_body(args)
+    cfg = _load(args)
+    backend = _backend_for_id(cfg, args.id)
+    from .backends import AmbiguousBackendError, BackendError
+
+    try:
+        backend.comment(args.id, body)
+    except AmbiguousBackendError as exc:
+        print(_err(f"ambiguous: {exc}"))
+        print(_warn(f"  the comment may already be posted — check {args.id} before retrying."))
+        return exc.exit_code
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+    if args.json:
+        import json
+
+        print(json.dumps({"id": args.id, "commented": True}, ensure_ascii=False))
+    else:
+        print(f"commented on {args.id}")
+    return 0
+
+
+def _comment_body(args: argparse.Namespace) -> str:
+    """The comment text from ``--body-file`` (``-`` = stdin) or the positional words; an empty
+    or whitespace-only comment is refused before any backend is built."""
+    if args.body_file and args.text:
+        raise _UserError("pass the comment either as text or with --body-file, not both")
+    if args.body_file:
+        try:
+            if args.body_file == "-":
+                body = sys.stdin.read()
+            else:
+                body = Path(args.body_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise _UserError(f"cannot read --body-file {args.body_file}: {exc}") from exc
+    else:
+        body = " ".join(args.text)
+    if not body.strip():
+        raise _UserError(
+            "the comment is empty\n"
+            "  fix: pass the text (`task comment <id> \"note\"`) or --body-file PATH"
+        )
+    return body
+
+
 def cmd_attach(args: argparse.Namespace) -> int:
     """Attach screenshot path(s) as implementation proof.
 
@@ -3602,6 +3855,11 @@ def cmd_status(args: argparse.Namespace) -> int:
             ticket = backend.get(args.id)
         except BackendError as exc:
             raise _UserError(str(exc)) from exc
+        if args.json:
+            import json
+
+            print(json.dumps(_ticket_dict(ticket), ensure_ascii=False, indent=2))
+            return 0
         print(f"{ticket.id} {_dim('[' + ticket.state.value + ']')} {ticket.title}")
         return 0
 
@@ -3639,6 +3897,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     _record_session_touch(cfg, backend, updated)
     log_event("ticket.transition", ticket_id=updated.id, state=new_state.value)
     _notify_mutation(cfg, updated, "done" if new_state is State.DONE else "changed")
+    if args.json:
+        # --json promises machine-readable stdout: the updated ticket, nothing else
+        import json
+
+        print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
+        return 0
     print(_ok(f"{updated.id} → {new_state.value}"))
     if new_state in _RECENT_PRIORITY_STATES:
         _print_session_attention_after_mutation(
@@ -5088,6 +5352,187 @@ def cmd_link(args: argparse.Namespace) -> int:
     return 2 if any(o.status == "failed" for o in outcomes) else 0
 
 
+def cmd_module(args: argparse.Namespace) -> int:
+    """`task module list/add/assign` — the repo's product-module taxonomy (task-cli#218).
+
+    A module is a NAMED, durable subsystem/area (`tasklib.modules.ProductModule`) a repo
+    defines once in `task.yaml`'s `modules:` list; `list` shows it (or a clear "none
+    configured" message — a taxonomy is never required), `add` prints the exact YAML snippet
+    to append by hand (`task.yaml` has no config-WRITING precedent anywhere in this repo — see
+    `tasklib.modules`'s module docstring — it is a committed, human-edited file), and `assign`
+    stamps a `module:<name>` label onto an existing ticket via `backend.update()`, the exact
+    same label mechanism `sp:<n>`/`priority:<Pn>` already use. `assign` FAILS CLOSED (a clean
+    `error:`, no backend write) on a module name outside the configured taxonomy — it never
+    invents a new label on the fly.
+    """
+    cfg = _load(args)
+    if args.action == "list":
+        return _cmd_module_list(cfg, args)
+    if args.action == "add":
+        return _cmd_module_add(cfg, args)
+    return _cmd_module_assign(cfg, args)
+
+
+def _cmd_module_list(cfg, args: argparse.Namespace) -> int:
+    from .modules import load_taxonomy
+
+    taxonomy = load_taxonomy(cfg)
+    if args.json:
+        import json
+
+        print(
+            json.dumps(
+                [{"name": m.name, "description": m.description} for m in taxonomy.modules],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if not taxonomy.configured:
+        print(
+            "no module taxonomy configured for this repo — add one with "
+            '`task module add <name> --description "..."`'
+        )
+        return 0
+    for m in taxonomy.modules:
+        print(f"{m.name}  —  {m.description}" if m.description else m.name)
+    return 0
+
+
+def _cmd_module_add(cfg, args: argparse.Namespace) -> int:
+    from .modules import NAME_RE, load_taxonomy
+
+    name = (args.arg1 or "").strip()
+    if not name:
+        raise _UserError('usage: task module add <name> --description "TEXT"')
+    if not NAME_RE.match(name):
+        raise _UserError(
+            f"invalid module name {name!r} — lowercase letters, digits, hyphens only, "
+            "starting with a letter or digit"
+        )
+    taxonomy = load_taxonomy(cfg)
+    if name in taxonomy.names():
+        raise _UserError(f"module {name!r} is already configured")
+    description = (args.description or "").strip()
+    # No config-WRITING precedent exists anywhere in this repo (tasklib.modules's module
+    # docstring) — task.yaml is committed and human-edited, so this prints the snippet to add
+    # by hand rather than silently rewriting a file a repo owner reviews and commits. Target
+    # path mirrors `_load`'s own `--config` resolution (review finding) — an explicit
+    # `--config` file replaces the `task.yaml` layer, so the printed path must too, or the
+    # guidance points at a file the loader never reads.
+    explicit = getattr(args, "config", None)
+    target = (
+        (cfg.repo_root / explicit if not Path(explicit).is_absolute() else Path(explicit))
+        if explicit
+        else cfg.repo_root / "task.yaml"
+    )
+    import json
+
+    print(
+        f"{target} is human-edited (task-cli never writes it) — add this entry to its "
+        "`modules:` list:\n"
+    )
+    if not taxonomy.configured:
+        # Only emit the `modules:` header when the taxonomy is empty/absent — printing it
+        # unconditionally would create a SECOND top-level `modules:` key once pasted under an
+        # already-populated one, and PyYAML silently keeps only the last one, dropping every
+        # existing entry (review finding).
+        print("modules:")
+    # `json.dumps` on both the name and the description produces YAML-safe double-quoted
+    # scalars (valid under both JSON and YAML flow-scalar syntax) — a raw, unquoted name like
+    # `on`/`null`/`42` parses back as a bool/null/int under YAML 1.1's implicit typing, and an
+    # unquoted description breaks on an embedded colon or `#` (review finding: either one,
+    # pasted verbatim, corrupts task.yaml for every subsequent `task` command in the repo).
+    print(f"  - name: {json.dumps(name, ensure_ascii=False)}")
+    if description:
+        print(f"    description: {json.dumps(description, ensure_ascii=False)}")
+    return 0
+
+
+def _cmd_module_assign(cfg, args: argparse.Namespace) -> int:
+    from .backends import AmbiguousBackendError, BackendError
+    from .modules import assigned_module_names, label_for, load_taxonomy
+
+    ticket_id = (args.arg1 or "").strip()
+    name = (args.arg2 or "").strip()
+    if not ticket_id or not name:
+        raise _UserError("usage: task module assign <ticket-id> <module-name>")
+    taxonomy = load_taxonomy(cfg)
+    if not taxonomy.configured:
+        raise _UserError(
+            "no module taxonomy configured for this repo — add one with "
+            '`task module add <name> --description "..."` first'
+        )
+    if taxonomy.get(name) is None:
+        raise _UserError(
+            f"{name!r} is not a configured module — known modules: "
+            f"{', '.join(taxonomy.names())}"
+        )
+    backend = _backend_for_id(cfg, ticket_id)
+    try:
+        # A plain read with no side effects — an ambiguous outcome is as harmless as a clean
+        # one here, matching `_resolve_ticket_for_link`'s identical convention for its own
+        # `backend.get()` (review finding: an earlier version caught only `BackendError`,
+        # letting `AmbiguousBackendError` escape as a raw traceback).
+        ticket = backend.get(ticket_id)
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(str(exc)) from exc
+    label = label_for(name)
+    if label in ticket.labels:
+        # A `--json` caller (e.g. a script re-running an idempotent assign) must get the same
+        # JSON shape on every branch, not a human-readable ANSI line on the no-op path
+        # (review finding).
+        if args.json:
+            import json
+
+            print(json.dumps(_ticket_dict(ticket), ensure_ascii=False, indent=2))
+        else:
+            print(_ok(f"{ticket.id} is already assigned to module {name!r}"))
+        return 0
+    # Same reopen/re-close hazard `cmd_link` guards against before every `backend.update()`
+    # (review finding: a stale managed-state label vs. the backend's real open/closed flag
+    # would otherwise be silently flipped by this metadata-only write, since `update()`
+    # unconditionally PATCHes state from `ticket.state`) — see `_reopen_hazard_reason`'s
+    # docstring for the full rationale.
+    hazard = _reopen_hazard_reason(ticket)
+    if hazard:
+        raise _UserError(hazard)
+    existing_modules = assigned_module_names(ticket.labels)
+    ticket.labels.append(label)
+    try:
+        updated = backend.update(ticket)
+    except AmbiguousBackendError as exc:
+        # The write may have already landed server-side before the connection dropped — same
+        # ambiguity `cmd_link`/`_classify_create` handle explicitly for their own
+        # `backend.update()` calls (review finding: this path previously let it propagate as
+        # an unhandled traceback instead of a clean, actionable exit).
+        print(_err(f"ambiguous: {exc}"))
+        print(
+            _warn(
+                f"  the module:{name} label on {ticket.id} may have already been written — "
+                "check the backend before retrying, to avoid a duplicate/partial write."
+            ),
+            file=sys.stderr,
+        )
+        return exc.exit_code
+    except BackendError as exc:
+        raise _UserError(str(exc)) from exc
+    if args.json:
+        import json
+
+        print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
+    elif existing_modules:
+        print(
+            _ok(
+                f"assigned {updated.id} to module {name!r} "
+                f"(modules: {', '.join(sorted(existing_modules | {name}))})"
+            )
+        )
+    else:
+        print(_ok(f"assigned {updated.id} to module {name!r}"))
+    return 0
+
+
 def _reopen_hazard_reason(ticket: Ticket) -> str:
     """`""` when `ticket` is safe to `backend.update()`; otherwise the refusal reason.
 
@@ -5361,8 +5806,25 @@ def _classify_one(
     # AND actually produces a classification -- a provider that looks reachable but fails at
     # runtime (e.g. laya's model download/predict) falls through to the next one, same
     # graceful-degradation posture as the old single-provider "no reachable provider" path.
+    #
+    # `cfg.classify_fallbacks` is passed through AS-IS (task-cli#208 review finding) -- never
+    # coalesced to `None` on an empty list. `config.py`'s cascade always supplies SOME
+    # fallbacks list (`DEFAULTS` at minimum), so `[]` here means either a repo explicitly
+    # wrote `classify: {fallbacks: []}`/`fallbacks: null` (deliberately disabling every
+    # classifier, falling straight to the bias default), OR every configured entry was
+    # malformed and silently dropped (`config.LoadedConfig.classify_fallbacks` only keeps
+    # single-key `{provider: model}` maps). Coalescing `[]` to `None` would silently
+    # reinterpret EITHER case as "unconfigured" and hand it the FULL zero-config default
+    # chain instead, the exact "explicit config is never altered" invariant this ticket's own
+    # docs promise. A malformed-entries-only config (a typo, not an intentional opt-out) now
+    # gets the SAME zero-providers outcome instead of silently falling back to a working LLM
+    # chain (the pre-#208 `or None` coalescing papered over that case too) -- a deliberate,
+    # explicit-empty-list-respecting tradeoff, not a case this ticket set out to distinguish
+    # from a genuine intentional opt-out; a malformed config silently degrading to the bias
+    # default is a pre-existing class of gap (`classify_fallbacks` already dropped malformed
+    # entries with no warning before this ticket) that this ticket does not newly fix.
     providers = build_classifier_chain(
-        cfg.classify_fallbacks or None, capability=cfg.classify_capability or None
+        cfg.classify_fallbacks, capability=cfg.classify_capability or None
     )
     classification = None
     used_label = "none"
@@ -5450,6 +5912,23 @@ def _classify_one(
             )
         return _classify_create(args, cfg, classification, batch_resolved_ids=batch_resolved_ids)
     return 0
+
+
+def _inferred_module_labels(cfg, text: str) -> list[str]:
+    """`classify.infer_module` opt-in (`cfg.classify_infer_module`, default False): a cheap
+    keyword-overlap heuristic (`tasklib.modules.infer_module`) against the repo's configured
+    `modules:` taxonomy, applied as a single `module:<name>` label on a freshly-CREATED ticket
+    only — never on a dedup-fold-in comment, mirroring `sp:<n>`/`priority:<Pn>`'s same scoping.
+    Returns `[]` (no-op) for a repo with no taxonomy configured or the opt-in left at its
+    default False — this must never change existing behavior for a repo that hasn't opted in.
+    """
+    if not cfg.classify_infer_module:
+        return []
+    from .modules import infer_module, label_for, load_taxonomy
+
+    taxonomy = load_taxonomy(cfg)
+    name = infer_module(taxonomy, text)
+    return [label_for(name)] if name else []
 
 
 def _classify_create(
@@ -5603,6 +6082,7 @@ def _classify_create(
                     "needs-triage",
                     f"sp:{classification.story_points}",
                     f"priority:{classification.priority}",
+                    *_inferred_module_labels(cfg, args.text),
                 ]
             )
         ),

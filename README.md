@@ -5,8 +5,8 @@ well-formed ticket the moment it arrives — `task` enforces ticket *quality* (a
 criteria, motivation, user-impact, cost-of-inaction, screenshots, formatting) in the tool
 itself, not by convention. A ticket and its PR speak one shape.
 
-A standalone Python CLI, peer to [`review-cli`](https://git.hyperide.ai/ultrabricks/rig-cli),
-[`rig-cli`](https://git.hyperide.ai/ultrabricks/rig-cli), and `tg-cli`. Backends: **GitHub Issues
+A standalone Python CLI, peer to [`review-cli`](https://git.hyperide.ai/ultrabricks/review-cli),
+[`rig-cli`](https://git.hyperide.ai/ultrabricks/rig-cli), and [`tg-cli`](https://git.hyperide.ai/ultrabricks/tg-cli). Backends: **GitHub Issues
 (default)** and **Linear** (per-repo). Stdlib-first; the backends call the provider API
 directly (no `requests`, no per-call subprocess), and credentials are harvested from the CLIs
 you already authed — zero extra setup.
@@ -53,8 +53,9 @@ gh auth login      # GitHub Issues (the default backend)
 linear auth        # Linear (per-repo, via the rig.yaml task: block)
 ```
 
-`task` reads `gh auth token` / `~/.config/linear/credentials.toml` (or `$GITHUB_TOKEN` /
-`$LINEAR_API_KEY`) and calls the API directly. Tokens are never logged or persisted.
+`task` reads `gh auth token` / `~/.config/linear/credentials.toml` / the `fj` CLI's stored
+Forgejo token (or `$GITHUB_TOKEN` / `$LINEAR_API_KEY` / `$FORGEJO_TOKEN`) and calls the API
+directly. Tokens are never logged or persisted.
 
 ## Commands
 
@@ -83,6 +84,10 @@ task mark-shipped <id> --pr <url> [--commit <sha>]  # record a merged PR; NEVER 
 #   TODO/IN_PROGRESS to in-review, posts a durable comment, and prints what's still needed
 #   before a genuine `task done`.
 task attach <id> <path> [path...]  # add implementation screenshot(s) (Playwright/agent-browser capture, not screencapture)
+task comment <id> "text"           # add a comment (Markdown posted as-is; never touches the body)
+task comment <id> --body-file F    # the same, body read from a file (`-` = stdin)
+#   `task comment` is the supported way to comment on any backend's ticket — use it instead of
+#   a raw forge CLI or API call
 task done <id>    [--screenshot p] # close a ticket — runs the on-done gates (all criteria checked)
 task change <id>  [--due ...] [--done] [--deployed "<note>"]  # update; --due sets/clears the
 #   due date; --done closes (gates); --deployed records a production deploy (state must
@@ -94,6 +99,9 @@ task classify "<text>" [--create]  # change|actionable|justAsk (+ SP/priority/pr
                                     # on `change`) via review; --create makes/dedups a product
                                     # ticket, or files a local `harness task` for a `process` item
 task session [show|bind <id>]      # show/bind the current session and its tickets
+task module list [--json]         # show the repo's configured product-module taxonomy
+task module add <name> --description "..."  # print the task.yaml snippet to add by hand
+task module assign <id> <name>    # tag an existing ticket module:<name> (see below)
 task daemon start|stop|status|run  # the due-date reminder watcher (see Daemon below)
 task audit [<id>] [--revert]       # reconciliation backstop — flags a Done ticket that never
 #   passed the close gates (see Audit below)
@@ -101,6 +109,12 @@ task audit [<id>] [--revert]       # reconciliation backstop — flags a Done ti
 
 Global flags: `-C/--cwd`, `--backend`, `--repo`, `--config`, `--json`, and the per-gate escape
 hatch `--skip-<gate> "<reason>"`.
+
+Normal use needs no `-C`: run `task` inside the repository. An **explicit** `-C`/`--cwd` must
+point inside a git repository — for every command, reads included. A non-repository path is
+refused before any config, credential or network access, because it would otherwise fall back
+to a global/registry route that may be a different project. The cross-project registry views
+(`list`, `find`, `read` outside a repo) work from a non-repository shell cwd **without** `-C`.
 
 ### Due-date reminders (the daemon)
 
@@ -409,6 +423,38 @@ no embeddings, no fuzzy matching) checks currently-open tickets for plausible re
 prints a nudge with the exact `task link` command for each candidate. It only ever *suggests* —
 nothing is auto-linked, and a scan hiccup never fails the create.
 
+### Product modules — `task module`
+
+A **module** is a named, durable subsystem/area of the product a ticket belongs to (e.g. for
+task-cli itself: `classify`, `backends`, `links`, `render`) — a small, per-repo TAXONOMY a
+team defines once, not a free-text label. A repo opts in by adding a `modules:` list to its
+`task.yaml`:
+
+```yaml
+modules:
+  - name: classify
+    description: message classification, SP/priority axes, the classifier-provider chain
+  - name: backends
+    description: GitHub Issues / Linear adapters
+```
+
+```
+task module list [--json]                 # show the configured taxonomy, or a clear "none
+                                            #   configured" message when the repo has none
+task module add <name> --description "..."  # task.yaml is committed/human-edited (task-cli
+                                            #   never writes it) — prints the exact YAML
+                                            #   snippet to add by hand
+task module assign <id> <name>             # tags <id> with a `module:<name>` label (the same
+                                            #   mechanism `sp:<n>`/`priority:<Pn>` use) —
+                                            #   REFUSES cleanly (no backend write) for a name
+                                            #   outside the configured taxonomy
+```
+
+With `classify.infer_module: true` in `task.yaml` (default `false` — opt-in), `task classify
+--create` also tries to infer a module from the taxonomy via a cheap keyword-overlap heuristic
+against each module's name/description — a best-effort nudge, not a guarantee, and it never
+applies a label when the signal is empty or ambiguous (a tie).
+
 ### Deploy + follow-up traceability — `task change --deployed` + `follow-up-of`
 
 A ticket's lifecycle can be traced past `done` (accepted) through to an actual production
@@ -578,10 +624,14 @@ A tool's *read* and *global* operations should not demand you stand inside a git
   session**, or a session with **no tickets**, it falls back to *all* of that repo's tickets
   and says so. **`task list --all`** gives the cross-project grouped view from anywhere.
 - **`task read` / `task status` / `task find`** work outside a repo too. An id is routed to a
-  registered project (a Linear `HYP-3` by its team; a `#123` when exactly one GitHub project
-  is registered); an ambiguous id fails with a clear, actionable error.
+  registered project (a Linear/Tasks `HYP-3` by its team; `owner/repo#123` to the registered
+  GitHub/Forgejo project with that repo; a bare `#123` only when exactly ONE GitHub/Forgejo
+  project is registered — issue numbers are per repository); an ambiguous id fails with a
+  clear, actionable error.
 - **Only `task new`/`create` is repo-bound** — it writes a ticket into one specific project, so
   it needs a repo (or `--repo owner/name`). Outside one it fails with a 3-part WHAT/WHY/HOW error.
+  Id-routed reads and writes work from a non-repository shell cwd, never through an explicit
+  non-repository `-C` (see Global flags).
 - A project whose backend errors (auth, offline, unknown team) is shown as a **degraded
   group** — it never aborts the whole cross-project listing.
 
@@ -613,6 +663,7 @@ projects:
   - { repo: acme/frontend }                       # GitHub shorthand → group "acme/frontend"
   - { name: Backend, github: { repo: acme/api } }  # explicit block + display name
   - { name: HYP, backend: linear, team: HYP }      # a Linear team/project
+  - { name: rig, forgejo: { url: https://git.hyperide.ai, repo: ultrabricks/rig-cli } }  # Forgejo (nested only)
 ```
 
 The repo you're currently inside is always one of the groups, even if it isn't (yet) listed.
@@ -623,31 +674,89 @@ The repo you're currently inside is always one of the groups, even if it isn't (
 directly execute an existing command/tool right now — e.g. "run a review on the diff"; no
 ticket, and actually invoking it is out of scope for this repo, see "Out of scope" below), or
 `justAsk` (a pure question). Resolution is **pluggable** (`tasklib/classifiers.py`,
-task-cli#206): `classify.fallbacks` is walked in order, and each configured provider is tried
-in turn until one is both AVAILABLE and actually produces a classification. Two provider
-kinds:
+task-cli#206/#217): `classify.fallbacks` is walked in order, and each configured provider is
+tried in turn until one is both AVAILABLE and actually produces a classification. Three
+provider kinds:
 
-- **`review-cli`** (every entry except `laya`) — shells out to `review just-ask -m <model>
-  --pool 1`. The model is the first available provider in that RUN of the chain (default head
-  `claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google → local ollama),
-  so it works with whatever you have — offline via ollama, or on any one key. A subprocess
-  error degrades to the bias default for that run (it never raises out of the shell-out
-  itself), so this provider does not itself fall through to a later one in `fallbacks`.
+- **`review-cli`** (every entry except `laya`/`jev`) — shells out to `review just-ask -m
+  <model> --pool 1`. The model is the first available provider in that RUN of the chain
+  (default head `claude-haiku-4-5`; degrades through OpenAI → commandcode → z.ai → Google →
+  local ollama), so it works with whatever you have — offline via ollama, or on any one key.
+  A subprocess error degrades to the bias default for that run (it never raises out of the
+  shell-out itself), so this provider does not itself fall through to a later one in
+  `fallbacks`.
 - **`laya`** — a REAL, free, fully local classifier: Convai Innovations' Apache-2.0 "laya"
   PyPI package (an open-weights alternative to the paid cloud "Jev" model). Runs entirely
-  in-process (no subprocess, no API key) once its optional extra is installed:
-  `uv sync --extra laya` (or `pip install task-cli[laya]`). Never a hard dependency and never
-  imported at module top — `task --help` and every other command stay dependency-free whether
-  or not it's installed. Not installed, its first-run HuggingFace model download fails (no
-  network/disk/rate-limit), or the model call itself errors (logged to stderr) → it reports
-  itself unreachable and the chain falls through to the NEXT configured provider — the only
-  provider kind that does. Security: the `{ laya: <value> }` value only decides whether this
-  entry becomes a laya provider at all — it is NEVER used to pick which model loads (always
-  the built-in `convaiinnovations/laya` checkpoint), since `classify.fallbacks` can come from
-  a repo-scoped `task.yaml`/`rig.yaml` that `task classify` — running inside the target repo
+  in-process (no subprocess, no API key). **The zero-config DEFAULT (task-cli#208):** a repo
+  with no committed `classify.fallbacks` tries `laya` FIRST, ahead of the hardcoded
+  `review-cli` chain above. The real mechanism is `config.py`'s built-in `DEFAULTS` (the
+  layer-0 config every repo starts from) listing `{laya: local}` first — the cascade merge
+  replaces a `fallbacks:` list WHOLESALE, never item-by-item, so a repo's own committed
+  `classify.fallbacks` (even one that never mentions `laya`) fully replaces this default and
+  is never silently altered. `tasklib/classifiers.py`'s `build_classifier_chain` itself is
+  UNCHANGED from before task-cli#208 (a `None` input still uses the plain, laya-free
+  `classify.DEFAULT_FALLBACKS`) — it only groups whatever chain it's handed.
+
+  **Auto-install.** `laya` is never a hard dependency and never imported at module top —
+  `task --help` and every other command stay dependency-free whether or not it's installed.
+  The first time `task classify` actually reaches the `laya` step and finds the package not
+  importable, it auto-installs it once (`tasklib/laya_autoinstall.py`) before falling through
+  to the next provider:
+  1. `python3 -m pip install --user laya>=0.3.7,<0.4` (`python3` = `sys.executable`, i.e. the
+     exact interpreter `task classify` is already running under; the pin matches
+     `pyproject.toml`'s `laya` extra exactly — an unpinned install could pull a breaking
+     release `LayaClassifier`'s hand-parsed result shape can no longer read). Inside an
+     activated virtualenv, `--user` is dropped entirely (pip refuses it there outright) —
+     the venv's own site-packages is already an isolated, user-writable location.
+  2. If that fails specifically with pip's PEP 668 `externally-managed-environment` error
+     (a Homebrew/distro-managed Python — verified on real machines), retries ONCE with
+     `--user --break-system-packages` — the fix pip's own error message recommends. `--user`
+     confines the install to your OWN site-packages, never a Homebrew-managed or system file,
+     which is what makes auto-appending that flag safe without asking first. A different
+     failure (no network, disk full, ...) never gets this retry, and neither does a venv.
+
+  On success, the SAME `task classify` invocation retries and proceeds with `laya`
+  immediately — no re-exec, no second run needed. On failure, it falls through to the next
+  provider exactly like an already-uninstalled `laya` always has, and caches the failure
+  under `~/.local/state/task-cli/laya_autoinstall/` for 24h
+  (`$TASK_LAYA_AUTOINSTALL_COOLDOWN_S` to override) so a subsequent call on an offline machine
+  skips the network attempt entirely instead of paying a pip-timeout tax on every invocation.
+  A corrupted/unreadable cache file fails OPEN (treated as "never attempted") rather than
+  wedging auto-install off permanently. `install.sh` also attempts this same two-step install,
+  best-effort, when you first install `task` — so on most machines `laya` is already present
+  before you ever run `task classify`.
+
+  Not installed (and auto-install also failed/was skipped), its first-run HuggingFace model
+  download fails (no network/disk/rate-limit), or the model call itself errors (logged to
+  stderr) → it reports itself unreachable and the chain falls through to the NEXT configured
+  provider — the only provider kind that does (besides `jev`, below). Security: the
+  `{ laya: <value> }` value only decides whether this entry becomes a laya provider at all —
+  it is NEVER used to pick which model loads (always the built-in
+  `convaiinnovations/laya` checkpoint), since `classify.fallbacks` can come from a
+  repo-scoped `task.yaml`/`rig.yaml` that `task classify` — running inside the target repo
   it's ticketing — must not trust with an arbitrary Hub id to download and execute in-process.
-  Put `laya` first in `fallbacks` (see the config block above) to try the free local model
-  before spending an API call.
+  To opt back INTO an explicit chain (e.g. to reorder it, or to drop `laya` entirely),
+  configure `classify.fallbacks` yourself — see the config block below. Its `priority`
+  criteria are calibrated around concrete observables (production down / data loss / active
+  security breach / blocks other engineers or most customers) rather than `CLASSIFY_PROMPT`'s
+  abstract "drop everything .. low" framing (see the `priority` axis bullet below): that
+  abstract framing showed zero discrimination on this local model against real,
+  professionally-worded tickets, and the observable-based wording is a real, measured fix for
+  it — see the CALIBRATION comment in `tasklib/classifiers.py` for the evidence.
+- **`jev`** (task-cli#217) — a REAL, paid, cloud classifier: TypeSafe AI's "Jev" evaluation
+  model, called directly over Vercel AI Gateway's `POST https://ai-gateway.vercel.sh/v1/
+  evaluate` HTTP endpoint (model id `typesafe-ai/jev`) via stdlib `urllib` — no `review`, no
+  subprocess, no extra dependency. Needs `AI_GATEWAY_API_KEY` in the environment; set
+  `TASK_JEV_ENV_FILE=/path/to/.env` to ALSO read that one `AI_GATEWAY_API_KEY=<value>` line
+  from a `.env`-shaped file when the env var itself is absent — an explicit, per-machine
+  opt-in (unset by default, never a hardcoded path). Never a zero-config default — opt-in only, since it costs
+  money and needs network. Missing key, a network/timeout error, ANY non-2xx HTTP status
+  (including Vercel's documented `customer_verification_required` "no card on file" billing
+  block), or a malformed response body all report unreachable/fail → the chain falls through
+  to the NEXT configured provider, same graceful-degradation contract as `laya`. Security:
+  same posture as `laya` — the `{ jev: <value> }` value only decides routing, never which
+  endpoint/model gets called (both fixed), so a repo-scoped config can't redirect the call
+  (and your API key) to an attacker-controlled host.
 
 **Bias is to `change` on ambiguity between change/justAsk** — most questions to a dev agent
 are latent change requests; that bias never applies to a genuine `actionable` signal, which is
@@ -699,7 +808,7 @@ source of truth for the whole agent toolchain (rig provisions it). Drop a `task:
 ```yaml
 # rig.yaml (repo root) — selects the tracker backend for this repo
 task:
-  backend: linear      # or github-issues (the default for every other repo)
+  backend: linear      # or github-issues (the default), tasks, forgejo
   team: HYP            # → linear.team (Linear coordinate)
   # project: ""        # → linear.project
   # repo: owner/name   # → github.repo (for the github-issues backend)
@@ -718,9 +827,10 @@ The full native shape (also accepted as `task.yaml`, or nested under `rig.yaml` 
 
 ```yaml
 version: 1
-backend: github-issues            # or: linear
+backend: github-issues            # or: linear | tasks | forgejo
 github:   { repo: auto, default_labels: [agent], attachment_mode: native }  # repo: auto = origin owner/name
-linear:   { team: HYP, project: "", attachment_mode: native }  # attachment_mode: native|link — same knob, both backends
+linear:   { team: HYP, project: "", attachment_mode: native }  # attachment_mode: native|link — same knob, every backend
+forgejo:  { url: https://git.hyperide.ai, repo: owner/name, attachment_mode: native }  # see "Forgejo backend"
 trusted_attachment_hosts: []      # extra hosts `task read --save-attachments` may auto-fetch
                                    # from beyond the tracker's own asset domain (e.g. your own
                                    # GitHub Pages host) — fetched WITHOUT the tracker's auth
@@ -763,13 +873,19 @@ classify:
     - { zai:         glm-4.6-flash }
     - { google:      gemini-2.5-flash }
     - { ollama:      qwen2.5:3b }
-    # - { laya: local }               # opt-in: a REAL, free, local classifier (Convai
-    #                                 # Innovations' Apache-2.0 "laya" PyPI package, an
-    #                                 # open-weights alternative to the paid cloud "Jev"
-    #                                 # model) -- see "Classification" below for how it plugs
-    #                                 # into the provider chain and its `laya` extra.
-    # - { jev:  <model> }             # config plumbing only, unverified — no real endpoint
-    #                                 # call exists for jev in this repo yet
+    # - { laya: local }               # explicit opt-in equivalent to the IMPLICIT zero-
+    #                                 # config default (task-cli#208 -- an unconfigured
+    #                                 # `fallbacks:` already tries `laya` first automatically;
+    #                                 # only list it here to pin its position when the rest of
+    #                                 # this chain is also explicitly configured, e.g. to try
+    #                                 # it AFTER a paid provider instead of first). See
+    #                                 # "Classification" above for auto-install + the extra.
+    # - { jev: cloud }                # opt-in: a REAL, paid, cloud classifier -- TypeSafe
+    #                                 # AI's "Jev" model over Vercel AI Gateway's
+    #                                 # /v1/evaluate endpoint. Needs $AI_GATEWAY_API_KEY; the
+    #                                 # value here (`cloud`) is a free-form label only -- see
+    #                                 # "Classification" below, `jev` never lets a configured
+    #                                 # value pick the endpoint/model.
   bias: change
   route_process_to_harness: true     # `process`-classified `--create` items file a local
                                      # `harness tasks new` ticket instead of the product
@@ -787,7 +903,9 @@ daemon:                              # the due-date reminder watcher (all keys o
 ```
 
 Config is committed by default and scoped by location, never a flag. With no config at all the
-tool defaults to `github-issues` with every gate on (and the daemon's built-in defaults above).
+tool defaults to `github-issues` with every gate on, `classify.fallbacks` trying `laya` first
+(task-cli#208, auto-installed on demand — see "Classification" above), and the daemon's
+built-in defaults above.
 
 **`trusted_attachment_hosts` — what it does and does not protect against.** Entries are
 validated as bare hostnames: no scheme/path/port/userinfo, no IP literal (canonical or any
@@ -816,6 +934,79 @@ per-machine convenience override, meant to win over anything file-based), and is
 endpoint (see `backends/github_issues.py`'s module docstring); set `attachment_mode: link` for
 that backend if you'd rather not depend on it.
 
+### Forgejo backend
+
+`backend: forgejo` files tickets as native issues of a Forgejo repository (Forgejo REST API,
+`<url>/api/v1`) — not a GitHub alias and not a shared tracker for many repositories: every
+repository keeps its own issues. Put the route in the repository's own `rig.yaml`:
+
+```yaml
+task:
+  backend: forgejo
+  forgejo:
+    url: https://git.hyperide.ai   # the forge origin; https, no path (/api/v1 is appended)
+    repo: owner/name               # explicit in committed config
+    attachment_mode: native        # native = upload as an issue attachment; link = URLs only
+```
+
+- **`repo`** must be explicit in committed/published config. At runtime `repo: auto` (or an
+  absent `repo`) resolves the git `origin` remote, and only when that remote is on `url`'s host —
+  a GitHub (or other-host) origin is an error, never a silent fallback. A `projects:` registry
+  entry always needs an explicit `repo`. The flat `repo:` shorthand in `rig.yaml` `task:` stays
+  GitHub's; Forgejo uses the nested `forgejo:` block.
+- **Precedence** is the normal cascade (defaults → rig-global → task-cli global → ancestor
+  `rig.yaml` `task:` blocks, outer to inner → the repo's `rig.yaml` → `task.yaml` → `--config`):
+  a nearer layer wins key by key. An ancestor `rig.yaml` that is not owned by you, or that
+  (or whose directory) is writable by other users — for example one planted in `/tmp` — is
+  skipped with a warning. **Inheritance** (a cross-repo contract shared with rig-cli, so
+  `rig` and `task` read an inherited block the same way): a folder-level `rig.yaml` (for
+  example `~/work/rig.yaml`) passes every `task:` key down to the repositories below it,
+  `forgejo.repo` included — only `code_prefix` is never inherited. A folder-wide default should
+  therefore say `forgejo.repo: auto` (each repository resolves its own origin), while an
+  explicit `owner/name` in a repository's own `rig.yaml` also carries into its nested
+  worktrees.
+- **Stale overrides:** a repository hosted on a Forgejo forge but still routed to
+  `github-issues` fails with `unrecognized github remote URL` plus a pointer at this block.
+  A leftover `task.yaml` `backend:`/`github:`/`linear:` override beats `rig.yaml`, so remove it
+  when moving a repository to Forgejo.
+- **Credentials:** `$FORGEJO_TOKEN` (honored only when `$FORGEJO_URL` names the same origin,
+  so a repository's config cannot aim an ambient token at another host), else the `fj` CLI's
+  own store (`keys.json`, macOS:
+  `~/Library/Application Support/forgejo-cli.forgejo-cli/`; Linux, best effort:
+  `$XDG_DATA_HOME/forgejo-cli/`) — only the entry for exactly `url`'s host. `fj` host aliases
+  are never followed. Log in once with `fj -H <host> auth login` (or `auth add-token`).
+- **Transport:** every request goes to `url` + `/api/v1` with the token, and a redirect to
+  another host (or from https to http) is refused, so the token cannot leave that origin.
+  Attachment downloads send the token only to the same origin.
+- **Ids:** `#N`, `N`, `owner/repo#N`, or the issue's full URL (the qualified forms only for the
+  current repository on the configured origin).
+  Issue numbers are per repository; the project coordinate is `forgejo:<url>/<owner>/<repo>`.
+  Pull requests share the number space and are never treated as issues.
+- **Due dates** are Forgejo's native issue due date. When the issue has one, it wins over a
+  `## Due` line in the body; setting or clearing a due date never rewrites the body.
+- **Minimal writes:** an update sends only the fields that changed since `task` read the issue,
+  and replaces labels only when the label set changed. It first re-reads the issue and refuses,
+  before writing anything, if the issue changed on the server since that read.
+- **Attachments** (`native`): the file is uploaded as an issue attachment and its bytes are
+  downloaded back (same origin, with the token) and compared before it counts as proof. If the
+  follow-up comment linking it fails, the attachment still exists: `task` reports the partial
+  success and does not upload it again.
+- **Body safety:** label/state/due changes and comments never rewrite the issue body. A body edit
+  is refused when the stored Markdown holds content outside task-cli's section template
+  (rewriting it would lose that content) — edit such an issue in Forgejo or use
+  `task comment`. That includes `task attach` on such an issue: the upload and its comment
+  succeed, the body's Screenshots section update is refused.
+
+**API limitations (Forgejo 16):** issues have no version, ETag or `If-Match` support
+(`EditIssueOption.updated_at` only overrides the timestamp; it is not a concurrency check). The
+stale-read refusal above narrows the window but is not an atomic compare-and-set: an edit that
+lands between `task`'s re-read and its write is still overwritten (last write wins). An update
+can also take two requests (the issue `PATCH`, then the labels `PUT`, because the issue edit
+endpoint has no labels field), so a failure between them can leave the new title/state with
+the old labels. The issue-list `limit` is capped server-side (50 by default), so `task` pages
+until it has enough matches or the list ends; a listing that hits the 200-page safety cap
+prints a `truncated` warning instead of passing a short result off as complete.
+
 ## Architecture
 
 - `bin/task` — thin shim → `tasklib.cli:main`.
@@ -824,8 +1015,9 @@ that backend if you'd rather not depend on it.
 - Pure core (no provider I/O): `model.py` (the `Ticket`), `render.py` (template ↔ Ticket),
   `policy.py` (the gates), `classify.py` (chain resolution + verdict parse), `session.py`
   (detection + sidecar), `config.py` (cascade loader).
-- `tasklib/backends/` — the `TicketBackend` protocol + `github_issues.py` (REST) and
-  `linear.py` (GraphQL), each calling the API directly via the tiny `http.py` urllib helper.
+- `tasklib/backends/` — the `TicketBackend` protocol + `github_issues.py` (REST),
+  `linear.py` (GraphQL), `tasks.py` (tasks-app REST) and `forgejo.py` (Forgejo REST), each
+  calling the API directly via the tiny `http.py` urllib helper.
 - `tasklib/credentials.py` — harvest tokens from existing CLI configs.
 - `tasklib/logging.py` — structured JSONL in the `agenttools_log` shape, with secret redaction.
 

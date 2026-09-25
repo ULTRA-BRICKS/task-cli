@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import signal
 import time
 from datetime import date
@@ -617,6 +618,9 @@ def _write_decoy_tasklib(root, sentinel) -> None:
 
 
 def _write_disabled_daemon_config(root) -> None:
+    # The spawned child runs `daemon run -C <root>`; an explicit -C must name a git worktree
+    # (UB-25), so the target project is a real repository, as it is in production.
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
     (root / "task.yaml").write_text(
         "version: 1\nbackend: github-issues\ngithub: {repo: owner/name}\ndaemon: {enabled: false}\n",
         encoding="utf-8",
@@ -1800,3 +1804,14 @@ def test_reminder_text_overdue_today_future():
     assert "OVERDUE by 11d" in daemon._reminder_text(_t("#1", "2026-06-20", title="od"), today=TODAY)
     assert "due TODAY" in daemon._reminder_text(_t("#2", "2026-07-01", title="t"), today=TODAY)
     assert "due in 2d" in daemon._reminder_text(_t("#3", "2026-07-03", title="f"), today=TODAY)
+
+
+def test_spawned_child_gets_c_only_for_a_git_worktree(tmp_path):
+    # A daemon started outside a repo with a pinned coordinate must still spawn: its child gets
+    # no explicit -C (which must name a worktree) and inherits the directory as its process cwd.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert daemon.child_cwd_flag(str(plain)) == []
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert daemon.child_cwd_flag(str(repo)) == ["-C", str(repo)]

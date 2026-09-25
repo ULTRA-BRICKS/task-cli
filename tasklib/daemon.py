@@ -1257,7 +1257,7 @@ def _spawn_detached(*, cwd: str | None, log_path: Path, child_flags: list[str]) 
     """
     repo_root = _repo_root()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    argv = [sys.executable, "-P", "-m", "tasklib", "daemon", "run", "-C", cwd or os.getcwd(), *child_flags]
+    argv = [sys.executable, "-P", "-m", "tasklib", "daemon", "run", *child_cwd_flag(cwd or os.getcwd()), *child_flags]
     child_env = _child_env(repo_root) if _needs_pythonpath_bootstrap(repo_root) else _sanitized_child_env()
     logf = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 - handed to the child; closed below
     try:
@@ -1273,6 +1273,23 @@ def _spawn_detached(*, cwd: str | None, log_path: Path, child_flags: list[str]) 
     finally:
         logf.close()
     return proc
+
+
+def child_cwd_flag(cwd: str) -> list[str]:
+    """``["-C", cwd]`` for a self-spawned child whose target is a git worktree, else ``[]``.
+
+    An explicit ``-C`` must name a git worktree (UB-25). A daemon/web started outside a repo with
+    a PINNED coordinate (``--repo``/config) is still supported: the child then gets no ``-C`` and
+    inherits the same directory as its process cwd (``Popen(cwd=...)``), resolving the same
+    pinned coordinate from the forwarded flags.
+    """
+    # A `.git` entry (directory, or the file a linked worktree uses) in the directory or an
+    # ancestor — a filesystem check, not a `git` subprocess, so spawning stays one Popen.
+    from pathlib import Path
+
+    here = Path(cwd).resolve()
+    in_worktree = any((d / ".git").exists() for d in (here, *here.parents))
+    return ["-C", cwd] if in_worktree else []
 
 
 def stop(coordinate: str, *, env: dict[str, str] | None = None, timeout_s: float = 5.0) -> tuple[str, int | None]:

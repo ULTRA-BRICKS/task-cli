@@ -840,31 +840,16 @@ def test_classify_prompt_documents_the_new_axes():
     assert "Respond with EXACTLY four lines" in p
 
 
-# ── jev provider table entry (config plumbing only, unverified in this env) ────────────────
+# ── `laya`/`jev` are handled entirely by tasklib.classifiers, never this module ─────────────
 # `laya` used to live here too (a speculative "review -m laya:<model>" daemon-on-PATH
-# provider that was NEVER actually wired to anything real). task-cli#206 replaced that
-# vaporware with a REAL local classifier (the `laya` PyPI package) that never touches
-# `resolve_chain`/`to_model_arg`/`provider_available` at all — see `tests/test_classifiers.py`.
-
-
-def test_to_model_arg_jev():
-    assert to_model_arg("jev", "jev-mini") == "jev:jev-mini"
-
-
-def test_provider_available_jev_reads_api_key_env():
-    assert provider_available("jev", {"JEV_API_KEY": "x"})
-
-
-def test_provider_available_jev_absent_without_key():
-    assert not provider_available("jev", {})
-
-
-def test_resolve_chain_picks_reachable_jev():
-    fallbacks = [("anthropic", "claude-haiku-4-5"), ("jev", "jev-mini")]
-    resolved = resolve_chain(fallbacks, {"JEV_API_KEY": "x"})
-    assert resolved is not None
-    assert resolved.provider == "jev"
-    assert resolved.model_arg == "jev:jev-mini"
+# provider that was NEVER actually wired to anything real); task-cli#206 replaced that
+# vaporware with a REAL local classifier (the `laya` PyPI package). `jev` had the same
+# vaporware history in this module's own provider tables (a `JEV_API_KEY`-gated
+# `_PROVIDER_MODEL_PREFIX`/`_PROVIDER_KEY_ENV` entry, config-plumbing-only, no real HTTP call
+# anywhere in this repo); task-cli#217 replaced it with a REAL direct HTTP call to Vercel AI
+# Gateway (`$AI_GATEWAY_API_KEY`). Neither provider touches
+# `resolve_chain`/`to_model_arg`/`provider_available` at all anymore — see
+# `tests/test_classifiers.py`.
 
 
 def test_resolve_chain_laya_is_never_reachable_via_review_cli():
@@ -873,5 +858,15 @@ def test_resolve_chain_laya_is_never_reachable_via_review_cli():
     # walker at all (it is handled entirely by `tasklib.classifiers.build_classifier_chain`
     # instead), even with every conceivable credential present.
     fallbacks = [("laya", "local")]
-    env = {"JEV_API_KEY": "x", "ANTHROPIC_API_KEY": "x", "LAYA_API_KEY": "x"}
+    env = {"AI_GATEWAY_API_KEY": "x", "ANTHROPIC_API_KEY": "x", "LAYA_API_KEY": "x"}
+    assert resolve_chain(fallbacks, env) is None
+
+
+def test_resolve_chain_jev_is_never_reachable_via_review_cli():
+    # `jev` (task-cli#217) is likewise deliberately ABSENT from every review-cli provider
+    # table — a `classify.fallbacks` entry named `jev` must never resolve through this pure
+    # chain-walker (it is handled entirely by `tasklib.classifiers.build_classifier_chain`'s
+    # `JevClassifier` instead), even with a real `AI_GATEWAY_API_KEY` present.
+    fallbacks = [("jev", "cloud")]
+    env = {"AI_GATEWAY_API_KEY": "x", "ANTHROPIC_API_KEY": "x"}
     assert resolve_chain(fallbacks, env) is None

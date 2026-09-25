@@ -221,6 +221,8 @@ def start(
     log_path = pid_path.with_suffix(".log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     cwd = cwd or os.getcwd()
+    from .daemon import child_cwd_flag
+
     argv = [
         sys.executable,
         "-P",
@@ -230,8 +232,7 @@ def start(
         "run",
         "--port",
         str(port),
-        "-C",
-        cwd,
+        *child_cwd_flag(cwd),
         *(child_flags or []),
     ]
     logf = open(log_path, "a", encoding="utf-8")

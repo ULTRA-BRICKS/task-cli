@@ -123,6 +123,14 @@ if ! python3 -c 'import yaml' 2>/dev/null; then
   fi
 fi
 
+# ── optional dependency: laya (task-cli#208 default classify provider) ──────
+# Best-effort, non-fatal (task_install_laya always returns 0 — see its own docstring for
+# the full PEP 668 rationale). `task classify`'s own runtime auto-install
+# (tasklib/laya_autoinstall.py) is the other half of task-cli#208 and retries this exact
+# same install later (cooldown-cached) if this step didn't succeed here.
+source "$SRC/scripts/lib/install_laya.sh"
+task_install_laya "$(command -v python3)"
+
 # ── symlink entry ─────────────────────────────────────────────────────────────
 ENTRY_PATH="$SRC/$ENTRY"
 chmod +x "$ENTRY_PATH"
