@@ -120,6 +120,25 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   `list`) so a caller can walk the full request → ship → deploy → follow-up chain without a
   second IPC mechanism — `task read <id> --json` IS the integration point (e.g. harness-cli's
   `harness stats` shells out to it; it never imports `tasklib`).
+- **Product modules** (`tasklib/modules.py`, task-cli#218): a **module** is a named, durable
+  subsystem/area of the product (e.g. for task-cli itself: `classify`/`backends`/`links`) — a
+  small, per-repo TAXONOMY a team defines ONCE in `task.yaml`'s `modules:` list
+  (`[{name, description}, ...]`), not a free-text label. `ModuleTaxonomy` is loaded via the
+  SAME config-cascade pattern as every other `task.yaml` key (`config.py`); absent → an empty,
+  fail-SOFT taxonomy (never required), present-but-malformed → `ConfigError`, fail-CLOSED
+  (`validate_modules_config` is the single source of truth for the shape, called from both
+  `config.validate()` and `load_taxonomy()`). A ticket is tagged into a module via a plain
+  `module:<name>` label — the EXACT same mechanism `sp:<n>`/`priority:<Pn>` (#203) already
+  use, so it needed zero backend-adapter changes. `task module list` shows the taxonomy (or
+  "none configured"); `task module add <name> --description "..."` never writes `task.yaml`
+  itself (no config-WRITING precedent exists anywhere in this repo — it is committed and
+  human-edited) and instead prints the exact YAML snippet to add by hand; `task module assign
+  <id> <name>` stamps the label via `backend.update()` and FAILS CLOSED — a clean `error:`, no
+  backend write — on a name outside the configured taxonomy, never inventing a new one.
+  `classify.infer_module` (default `false`, opt-in) lets `_classify_create` additionally try a
+  cheap keyword-overlap heuristic (`tasklib.modules.infer_module`) against the taxonomy on a
+  freshly-CREATED ticket only — never a guarantee, an ambiguous/tied score or an empty
+  taxonomy both yield no label, and a repo that hasn't opted in sees zero behavior change.
 - **`task.yaml` is committed by default** (per-repo source of truth) and **overrides** the
   global `~/.config/task-cli/config.yaml`. Scope is by location, never a flag. The tool works
   with **zero config** on any GitHub repo (built-in defaults = github-issues, all gates on).
@@ -151,16 +170,43 @@ fake-backed test; do not special-case a backend anywhere in `cli.py`.
 
 ## Classification
 
-`task classify` resolution is **pluggable** (`tasklib/classifiers.py`, task-cli#206): a small
-`ClassifierProvider` protocol (`available() -> bool`, `classify(message, bias) ->
-Classification | None`, `label`) with two implementations. `build_classifier_chain` turns
+`task classify` resolution is **pluggable** (`tasklib/classifiers.py`, task-cli#206/#217): a
+small `ClassifierProvider` protocol (`available() -> bool`, `classify(message, bias) ->
+Classification | None`, `label`) with three implementations. `build_classifier_chain` turns
 `classify.fallbacks` (a list of `{provider: model}` pairs) into an ordered list of providers —
-a `laya` entry becomes its own `LayaClassifier`; consecutive non-`laya` entries fold into one
-`ReviewCliClassifier` (so `classify.capability`'s manifest-head preference and
-`resolve_chain`'s own availability-walk apply to that run exactly as before). `_classify_one`
-walks the chain and uses the first provider that is BOTH available AND actually returns a
-`Classification` — a provider that looks reachable but fails at runtime returns `None` and the
-chain falls through to the next one, same as the pre-existing "no reachable provider" path.
+a `laya`/`jev` entry becomes its own `LayaClassifier`/`JevClassifier`; consecutive entries
+naming neither fold into one `ReviewCliClassifier` (so `classify.capability`'s manifest-head
+preference and `resolve_chain`'s own availability-walk apply to that run exactly as before).
+`_classify_one` walks the chain and uses the first provider that is BOTH available AND
+actually returns a `Classification` — a provider that looks reachable but fails at runtime
+returns `None` and the chain falls through to the next one, same as the pre-existing "no
+reachable provider" path. Neither `laya` nor `jev` is ever the zero-config default — both are
+opt-in only.
+
+**task-cli#208: `laya` is the zero-config DEFAULT, auto-installed on demand.** The default
+lives entirely in `config.DEFAULTS["classify"]["fallbacks"]`, which now lists `{laya: local}`
+FIRST -- `cli._classify_one` passes `cfg.classify_fallbacks` straight through (never coalesced
+to `None`), and the cascade merge replaces a `fallbacks:` list WHOLESALE, so any repo's own
+committed `classify.fallbacks` (even one omitting `laya`) fully overrides this default and is
+never silently altered (verified live against this repo's own laya-free `task.yaml` pin).
+`build_classifier_chain` itself is UNCHANGED from pre-#208 (`None` -> `classify.
+DEFAULT_FALLBACKS`, no laya) -- it only groups whatever chain it's handed; see its own
+docstring, and `test_build_classifier_chain_default_fallbacks_is_a_single_review_cli_group`.
+
+`LayaClassifier.available()` auto-installs the package (once per instance, i.e. once per
+`task classify` invocation) the first time it's found genuinely not importable: see
+`tasklib/laya_autoinstall.py`'s module docstring for the full pip PEP-668/
+`--break-system-packages`/24h-cooldown-cache design (live-verified end to end: a real PEP 668
+externally-managed-environment failure on the first attempt, an automatic
+`--break-system-packages` retry, a real install, and a real loaded `laya` model producing a
+live classification, all in one `task classify` invocation). `available()` deliberately
+routes ONLY the `find_spec() is None` branch into the auto-installer -- a `find_spec`
+exception (broken/partial install metadata) is a different, weirder failure and is left
+alone, matching the pre-#208 "treat as not installed, don't reinstall over it" posture.
+`install.sh` also attempts this same best-effort, non-fatal install
+(`scripts/lib/install_laya.sh`) against `command -v python3` (the interpreter `bin/task`'s
+shebang resolves to) when `task` itself is installed, so on most machines the runtime
+auto-install path is never even needed.
 
 - **`ReviewCliClassifier`** — the original path, refactored in place, unchanged behavior:
   resolves the **first available** model in the per-provider fallback chain
@@ -169,34 +215,53 @@ chain falls through to the next one, same as the pre-existing "no reachable prov
   daemon on PATH. The shell-out is the only effect; prompt-building and verdict-parsing are
   pure and tested without spawning `review`. `resolve_chain`/`_run_review_just_ask` are
   looked up on their owning module at call time (never cached), so this stays a thin,
-  behavior-preserving wrapper. `jev` is an additional provider-table entry (config plumbing
-  only, unverified — no credentials/HTTP call exist for it in this repo; wiring the real
-  call is `review`'s job).
-- **`LayaClassifier`** — task-cli#206's new backend: Convai Innovations' free, local,
+  behavior-preserving wrapper.
+- **`LayaClassifier`** — task-cli#206's local backend: Convai Innovations' free, local,
   Apache-2.0 "laya" PyPI package (an open-weights alternative to the paid cloud "Jev"
   model). Runs entirely in-process — no subprocess, no API key, no `review` involvement —
   via `laya.load(model_id).predict(message, questions) -> dict`. Optional dependency
-  (`pyproject.toml`'s `laya` extra, `uv sync --extra laya`), lazily imported inside
-  `_load_agent`/`classify` (never at this module's top — stdlib-only-at-import-time still
-  holds for every `tasklib/*` module). `available()` is `importlib.util.find_spec("laya") is
-  not None` (cheap, no import); `classify()` never raises — package missing, a first-run
-  HuggingFace download failure, or a `predict()`/result-mapping runtime error all yield
-  `None` (fall through, with a stderr diagnostic so a broken local install is observable)
-  instead of a crash or traceback. `laya` is DELIBERATELY ABSENT from `classify.py`'s
-  `_PROVIDER_MODEL_PREFIX`/`_LOCAL_DAEMON_PROVIDERS`/`_PROVIDER_KEY_ENV` tables (unlike
-  `jev`) — it never touches `resolve_chain`/`review` at all. SECURITY (two layers,
-  `tasklib/classifiers.py`): (1) `build_classifier_chain` NEVER threads a `{laya: <value>}`
-  fallback entry's value into `model_id` — that value only decides ROUTING (does this entry
-  become a `LayaClassifier`?). `classify.fallbacks` can come from a repo-scoped
-  `task.yaml`/`rig.yaml`, and `task classify` runs inside the target/foreign repo being
-  ticketed, so honoring an arbitrary configured Hub id would let a malicious checkout make
-  `task classify` download and run attacker-controlled model code in-process. `model_id`
-  always resolves to the fixed `_LAYA_DEFAULT_MODEL_ID`. (2) `_load_agent` ALSO refuses to
-  load whenever that fixed id already exists as a path relative to the current working
-  directory — `laya.load()`'s underlying `model_id_or_path` resolution treats an existing
-  local path as authoritative over the Hub, so an unguarded lookup would let a planted
-  `convaiinnovations/laya/` directory in the target repo shadow the real checkpoint (mirrors
-  `bin/task`'s existing cwd-import-shadowing posture).
+  (`pyproject.toml`'s `laya` extra, `uv sync --extra laya` — or auto-installed at runtime,
+  see the task-cli#208 note above), lazily imported inside `_load_agent`/`classify` (never at
+  this module's top — stdlib-only-at-import-time still holds for every `tasklib/*` module).
+  `available()` starts with a cheap `importlib.util.find_spec("laya") is not None` check --
+  when that's `False`, it also drives the task-cli#208 auto-install (`ensure_installed`
+  above) before returning, so it is NO LONGER guaranteed cheap/import-free on that path.
+  `classify()` never raises — package missing, a first-run HuggingFace download failure, or a
+  `predict()`/result-mapping runtime error all yield `None` (fall through, with a stderr
+  diagnostic so a broken local install is observable) instead of a crash or traceback.
+- **`JevClassifier`** — task-cli#217's cloud backend: TypeSafe AI's paid "Jev" evaluation
+  model, called directly over Vercel AI Gateway's `POST https://ai-gateway.vercel.sh/v1/
+  evaluate` HTTP endpoint (model id `typesafe-ai/jev`) via stdlib `urllib`
+  (`tasklib.backends.http.request_json` — no `review`, no subprocess, no new dependency).
+  `available()` is cheap — just "is an API key resolvable" (`$AI_GATEWAY_API_KEY`, falling
+  back to a `.env`-shaped file read ONLY when `$TASK_JEV_ENV_FILE` is also set — opt-in per
+  machine, never a hardcoded path) — no network call. `classify()` never raises: a missing
+  key, a network/timeout error, or ANY
+  non-2xx HTTP status (including Vercel's documented `customer_verification_required`
+  billing-block shape — a disclosed, live-verified environment limitation on this account,
+  not a code bug) all yield `None` and print one stderr diagnostic (API key and any other
+  token-shaped secret redacted first); a malformed-but-2xx response body also yields `None`
+  but degrades SILENTLY (no diagnostic), matching `LayaClassifier`'s own precedent. Either
+  way the chain falls through instead of a crash or traceback.
+
+`laya`/`jev` are DELIBERATELY ABSENT from `classify.py`'s
+`_PROVIDER_MODEL_PREFIX`/`_LOCAL_DAEMON_PROVIDERS`/`_PROVIDER_KEY_ENV` tables — neither
+touches `resolve_chain`/`review` at all (`jev` used to live there as config-plumbing-only
+vaporware before task-cli#217 gave it a real implementation, the same way `laya` itself did
+before task-cli#206). SECURITY (two layers each, `tasklib/classifiers.py`): (1)
+`build_classifier_chain` NEVER threads a `{laya: <value>}`/`{jev: <value>}` fallback entry's
+value into which Hub id/endpoint gets used — that value only decides ROUTING (does this
+entry become a `LayaClassifier`/`JevClassifier`?). `classify.fallbacks` can come from a
+repo-scoped `task.yaml`/`rig.yaml`, and `task classify` runs inside the target/foreign repo
+being ticketed, so honoring an arbitrary configured value would let a malicious checkout make
+`task classify` download and run attacker-controlled model code in-process (`laya`) or
+exfiltrate `$AI_GATEWAY_API_KEY` to an attacker-controlled host (`jev`). `model_id`/`endpoint`
+always resolve to the fixed `_LAYA_DEFAULT_MODEL_ID`/`_JEV_ENDPOINT`+`_JEV_MODEL_ID`. (2)
+`LayaClassifier._load_agent` ALSO refuses to load whenever its fixed id already exists as a
+path relative to the current working directory — `laya.load()`'s underlying
+`model_id_or_path` resolution treats an existing local path as authoritative over the Hub, so
+an unguarded lookup would let a planted `convaiinnovations/laya/` directory in the target
+repo shadow the real checkpoint (mirrors `bin/task`'s existing cwd-import-shadowing posture).
 
 **SP / priority / process-vs-product** (`classify.parse_classification` → `Classification`):
 the SAME `review` round-trip that yields the verdict also yields three axes on a `change`

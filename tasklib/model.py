@@ -217,6 +217,24 @@ class Ticket:
     # never part of the rendered body.
     closed_at: str = ""
 
+    # Also appended last (same reasoning as ``due`` above). Optimistic-concurrency version
+    # integer for a backend that requires one on every write (the Tasks backend — see
+    # ``backends/tasks.py``; GitHub/Linear have no equivalent, so it stays 0 there). A
+    # transition/update MUST send back the version it actually READ, not a value re-derived
+    # from a second fetch — reusing a stale version races a concurrent editor into a clean
+    # 409 instead of silently clobbering their change, and reading twice widens the same race
+    # window it exists to close. 0 means "unknown / not a versioned backend", never a real
+    # server version (the Tasks API's own ``version`` starts at 1). Never part of the rendered
+    # body — operational metadata, not ticket content.
+    backend_version: int = 0
+
+    # Also operational metadata, never rendered: the normalized ``state`` value as the backend
+    # READ it (``""`` = unknown, e.g. a Ticket built locally). A backend whose native workflow has
+    # several statuses per normalized state (Tasks: "In progress" and "Blocked" are both
+    # IN_PROGRESS) compares against this to tell a real state change from a metadata/body-only
+    # edit, and leaves the native status untouched in the latter case (UB-25).
+    backend_read_state: str = ""
+
     # Also appended last (same reasoning as ``due`` above). Whether this ticket has actually
     # been deployed to production, PAST the ``done``/accepted state — orthogonal to ``state``
     # on purpose: a ticket can be ``done`` and later reopened to ``in-progress`` for a

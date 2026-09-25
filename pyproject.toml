@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyper-task"
-version = "0.18.2"
+version = "0.19.0"
 description = "task — the enforced ticket interface: every request becomes a well-formed ticket (GitHub Issues / Linear), with quality enforced by the tool."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,7 +20,10 @@ test = ["pytest"]
 # task-cli#206: the LayaClassifier backend (tasklib/classifiers.py) — a real, local, free
 # classifier, lazily imported and never a hard dependency (`task --help` never needs it).
 # Upper-bounded: this module hand-parses `Agent.predict()`'s raw dict envelope, which isn't
-# a versioned/stable public contract yet.
+# a versioned/stable public contract yet. task-cli#208: `laya` is now the zero-config default
+# classify provider and is auto-installed on demand (tasklib/laya_autoinstall.py) or via
+# install.sh's best-effort step if missing -- this extra remains the manual/pinned-version
+# alternative (`uv sync --extra laya` / `pip install task-cli[laya]`).
 laya = ["laya>=0.3.7,<0.4"]
 
 [project.scripts]

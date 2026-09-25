@@ -166,22 +166,19 @@ DEFAULT_FALLBACKS: tuple[tuple[str, str], ...] = (
 # How review-cli names each provider in a ``-m`` model string, and which env var(s) signal
 # the provider is reachable. ollama is reachable when its local daemon binary exists.
 #
-# ``jev`` (task-cli's classification-axes ticket, 2026-09): CONFIG PLUMBING ONLY, added the
-# same way every other provider here is added — a prefix-table entry and an availability rule
-# — so a repo's ``classify.fallbacks``/``classify.capability`` CAN name it, exactly like
-# anthropic/openai/ollama today. It is not wired to a real HTTP call anywhere in this repo
-# (making that call, like every other review-cli-routed provider, is entirely ``review``'s
-# job — its own provider table is out of scope here); no credentials exist in this
-# environment, so this is unverified against a live endpoint. ``jev`` mirrors the API-key
-# shape (``JEV_API_KEY``).
-#
-# ``laya`` (task-cli#206) is DELIBERATELY ABSENT from this table: unlike every other entry
-# here, it is not an LLM ``review`` shells out to — it is a real, local, directly-invoked
-# classifier (the ``laya`` PyPI package, Convai Innovations' free/local/Apache-2.0 "System 1"
-# model) that never touches ``review``/``resolve_chain``/``to_model_arg`` at all. See
-# ``tasklib/classifiers.py``'s ``LayaClassifier`` and ``build_classifier_chain``, which turns
-# a ``classify.fallbacks`` entry named ``laya`` into a direct in-process ``predict()`` call
-# instead of a ``-m laya:<model>`` review-cli invocation.
+# ``laya`` (task-cli#206) and ``jev`` (task-cli#217) are DELIBERATELY ABSENT from this table:
+# unlike every other entry here, neither is an LLM ``review`` shells out to — each is a real,
+# directly-invoked classifier that never touches ``review``/``resolve_chain``/``to_model_arg``
+# at all. ``laya`` is local (the ``laya`` PyPI package, Convai Innovations' free/local/
+# Apache-2.0 "System 1" model); ``jev`` is TypeSafe AI's paid cloud model, called directly
+# over Vercel AI Gateway's HTTP API (``$AI_GATEWAY_API_KEY``). ``jev`` used to live in this
+# table as config-plumbing-only vaporware (no real HTTP call existed anywhere in this repo —
+# review's job, never wired) with its own ``JEV_API_KEY`` shape; task-cli#217 replaced that
+# with the real implementation and removed the stale entries, the same way task-cli#206 did
+# for ``laya``. See ``tasklib/classifiers.py``'s ``LayaClassifier``/``JevClassifier`` and
+# ``build_classifier_chain``, which turns a ``classify.fallbacks`` entry named ``laya``/
+# ``jev`` into a direct in-process/HTTP call instead of a ``-m <provider>:<model>`` review-cli
+# invocation.
 _PROVIDER_MODEL_PREFIX = {
     "anthropic": "claude",
     "openai": "commandcode",  # OpenAI models are routed through the commandcode gateway
@@ -189,7 +186,6 @@ _PROVIDER_MODEL_PREFIX = {
     "zai": "zai",
     "google": "gemini",
     "ollama": "ollama",
-    "jev": "jev",
 }
 
 # Local-daemon-on-PATH providers: reachable when their own binary exists on PATH, not via an
@@ -207,7 +203,6 @@ _PROVIDER_KEY_ENV = {
     "zai": ("ZAI_API_KEY", "ZHIPU_API_KEY"),
     "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "ollama": (),  # availability is the daemon, not a key
-    "jev": ("JEV_API_KEY",),
 }
 
 # The shared manifest (models.yaml) names Google's provider ``gemini`` and has no ``ollama``;
@@ -255,9 +250,9 @@ def provider_available(provider: str, env: dict[str, str] | None = None) -> bool
     Pure-ish: reads ``env`` (defaults to ``os.environ``) and, for a local-daemon provider,
     checks for its binary on PATH. No network probe — availability here means "we have a
     credible way to reach it", matching review-cli's startup failover posture. NEVER called
-    for ``laya`` (task-cli#206): that provider's own reachability check
-    (``tasklib.classifiers.LayaClassifier.available``) is "the ``laya`` package is
-    importable", entirely decoupled from this review-cli-routed provider table.
+    for ``laya``/``jev`` (task-cli#206/#217): each provider's own reachability check
+    (``tasklib.classifiers.LayaClassifier.available``/``JevClassifier.available``) is
+    entirely decoupled from this review-cli-routed provider table.
     """
     env = os.environ if env is None else env
     if provider in _LOCAL_DAEMON_PROVIDERS:

@@ -40,6 +40,18 @@ class LinearCreds:
     source: str
 
 
+@dataclass
+class TasksCreds:
+    token: str
+    source: str  # provenance, for diagnostics (never the token itself)
+
+
+@dataclass
+class ForgejoCreds:
+    token: str
+    source: str  # provenance, for diagnostics (never the token itself)
+
+
 # ── GitHub ─────────────────────────────────────────────────────────────────────────
 
 
@@ -162,3 +174,161 @@ def _linear_credentials_toml(env: dict[str, str], workspace: str | None) -> Line
         if isinstance(key, str) and key.startswith("lin_api_"):
             return LinearCreds(api_key=key.strip(), workspace=str(name), source="~/.config/linear/credentials.toml")
     return None
+
+
+# ── Tasks ──────────────────────────────────────────────────────────────────────────
+
+
+def tasks_token(url: str, env: dict[str, str] | None = None) -> TasksCreds:
+    """Resolve a Tasks API token for the (already origin-validated) ``url``. Raises
+    :class:`CredentialError` if none is available.
+
+    Resolution order: ``$TASKS_TOKEN`` (with ``$TASKS_URL``) → ``$TICKETS_TOKEN`` (the native
+    ``tasks-app`` CLI's own env var, with ``$TICKETS_URL``) → the ``tasks-app`` CLI's own
+    persisted credential file. Every source is origin-bound: an env token is used only when its
+    paired URL variable names the SAME origin as ``url``, and the file's token only when its
+    stored ``url`` does. ``tasks.url`` comes from repository config, so a cloned repository must
+    not be able to aim an ambient token at its own host (UB-25 review).
+    """
+    env = os.environ if env is None else env
+
+    for var, url_var in (("TASKS_TOKEN", "TASKS_URL"), ("TICKETS_TOKEN", "TICKETS_URL")):
+        val = env.get(var)
+        if val and val.strip() and _same_origin_str(str(env.get(url_var, "")).strip(), url):
+            return TasksCreds(token=val.strip(), source=f"env:{var}")
+
+    creds = _tasks_app_cli_config(env, url)
+    if creds:
+        return creds
+
+    raise CredentialError(
+        f"no Tasks API token found for {url}. Run `tasks-app auth login --url {url}` "
+        f"(or set $TASKS_TOKEN together with TASKS_URL={url}). (task-cli reads the tasks-app "
+        "CLI's stored credential; it never re-prompts.)"
+    )
+
+
+def _tasks_app_cli_config(env: dict[str, str], url: str) -> TasksCreds | None:
+    """Read the native ``tasks-app`` CLI's own credential file (``config.json``, mode 0600),
+    reusing its token ONLY when the file's own stored ``url`` is the same origin as ``url``.
+
+    The file holds a single ``{"url": ..., "token": ...}`` pair (whichever workspace the user
+    last ran ``tasks-app auth login`` against) — NOT keyed per-origin itself, so the origin
+    check here is what keeps a token minted for one tasks-app deployment from being replayed
+    against a different ``url`` this backend happens to be configured for.
+    """
+    base = env.get("TICKETS_CONFIG_DIR") or os.path.join(
+        env.get("HOME", os.path.expanduser("~")), ".config", "tickets-app"
+    )
+    path = Path(base) / "config.json"
+    if not path.is_file():
+        return None
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    stored_url = str(data.get("url", "")).strip()
+    stored_token = str(data.get("token", "")).strip()
+    if not stored_token or not _same_origin_str(stored_url, url):
+        return None
+    return TasksCreds(token=stored_token, source=f"{path}")
+
+
+# ── Forgejo ────────────────────────────────────────────────────────────────────────
+
+
+def forgejo_token(url: str, env: dict[str, str] | None = None) -> ForgejoCreds:
+    """Resolve a Forgejo API token for the (already validated) origin ``url``. Raises
+    :class:`CredentialError` if none is available.
+
+    Order: ``$FORGEJO_TOKEN`` — used ONLY when ``$FORGEJO_URL`` names this same origin, because
+    ``forgejo.url`` comes from repository config and a cloned repository must not be able to aim
+    an ambient token at its own host — then the ``fj`` CLI's own store (``keys.json``), whose
+    ``hosts`` map is keyed by host name (``host:port`` for a non-default port). Only the entry
+    for THIS origin's host is ever used, and fj's ``aliases`` map is deliberately ignored:
+    following an alias would send one host's token to a different host name.
+    """
+    env = os.environ if env is None else env
+    val = env.get("FORGEJO_TOKEN")
+    if val and val.strip() and _same_origin_str(str(env.get("FORGEJO_URL", "")).strip(), url):
+        return ForgejoCreds(token=val.strip(), source="env:FORGEJO_TOKEN")
+
+    key = _forgejo_host_key(url)
+    for path in _fj_key_files(env):
+        token = _fj_host_token(path, key) if key else None
+        if token:
+            return ForgejoCreds(token=token, source=str(path))
+
+    raise CredentialError(
+        f"no Forgejo token found for {key or url}. Run `fj -H {key or 'HOST'} auth login` "
+        f"(or set $FORGEJO_TOKEN together with FORGEJO_URL={url}). (task-cli reads fj's stored "
+        "credential for that exact host; it never re-prompts.)"
+    )
+
+
+def _forgejo_host_key(url: str) -> str:
+    """fj's ``hosts`` key for ``url``: ``host`` on the default port, else ``host:port``."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    return f"{host}:{port}" if host and port and port != 443 else host
+
+
+def _fj_key_files(env: dict[str, str]) -> list[Path]:
+    """Candidate ``keys.json`` locations. The macOS path is the one fj actually uses on this
+    platform (verified); the XDG ones follow the same ``directories`` convention on Linux and
+    are best-effort."""
+    home = Path(env.get("HOME") or os.path.expanduser("~"))
+    data_home = Path(env.get("XDG_DATA_HOME") or home / ".local" / "share")
+    return [
+        home / "Library" / "Application Support" / "forgejo-cli.forgejo-cli" / "keys.json",
+        data_home / "forgejo-cli" / "keys.json",
+    ]
+
+
+def _fj_host_token(path: Path, host_key: str) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    hosts = data.get("hosts") if isinstance(data, dict) else None
+    entry = hosts.get(host_key) if isinstance(hosts, dict) else None
+    token = entry.get("token") if isinstance(entry, dict) else None
+    return token.strip() if isinstance(token, str) and token.strip() else None
+
+
+def _same_origin_str(a: str, b: str) -> bool:
+    """Whether ``a`` and ``b`` are the same origin (scheme + host + effective port).
+
+    A small, self-contained comparison (not delegated to ``tasklib.backends.http``) so this
+    module — imported before a backend is even chosen — never has to import the network layer
+    just to compare two strings.
+    """
+    from urllib.parse import urlsplit
+
+    default_ports = {"https": 443, "http": 80}
+    try:
+        pa, pb = urlsplit(a), urlsplit(b)
+        # `.port` validates lazily and raises on a malformed port: fail closed, never crash
+        port_a = pa.port if pa.port is not None else default_ports.get(pa.scheme)
+        port_b = pb.port if pb.port is not None else default_ports.get(pb.scheme)
+    except ValueError:
+        return False
+    return (
+        pa.scheme == pb.scheme
+        and (pa.hostname or "").lower() == (pb.hostname or "").lower()
+        and port_a == port_b
+    )
