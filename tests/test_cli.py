@@ -3113,13 +3113,16 @@ def test_module_list_json_output(capsys, monkeypatch, _inject_fake):
     ]
 
 
+@pytest.mark.parametrize("config_exists", [False, True])
 def test_module_add_prints_yaml_snippet_and_never_writes_a_file(
-    capsys, monkeypatch, _inject_fake
+    capsys, monkeypatch, _inject_fake, config_exists
 ):
     from pathlib import Path
 
     task_yaml = Path(".").resolve() / "task.yaml"
-    before = task_yaml.read_text(encoding="utf-8")
+    if config_exists:
+        task_yaml.write_text("version: 1\n# Preserve existing user settings.\n", encoding="utf-8")
+    before = task_yaml.read_text(encoding="utf-8") if config_exists else None
     monkeypatch.setattr(cli, "_load", lambda args: _cfg_with_modules([]))
     rc = main(["module", "add", "render", "--description", "the §5 ticket-body renderer"])
     out = capsys.readouterr().out
@@ -3128,7 +3131,8 @@ def test_module_add_prints_yaml_snippet_and_never_writes_a_file(
     assert '- name: "render"' in out
     assert 'description: "the §5 ticket-body renderer"' in out
     # never touches the real repo's committed task.yaml — task.yaml is human-edited only
-    assert task_yaml.read_text(encoding="utf-8") == before
+    after = task_yaml.read_text(encoding="utf-8") if task_yaml.exists() else None
+    assert after == before
 
 
 def test_module_add_rejects_invalid_name(capsys, monkeypatch, _inject_fake):

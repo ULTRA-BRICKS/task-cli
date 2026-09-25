@@ -53,6 +53,7 @@ import json
 import os
 from dataclasses import dataclass, field, replace
 from urllib.parse import quote, urlencode
+from uuid import UUID
 
 from ..model import State, Ticket
 from ..render import parse, render, round_trips_losslessly
@@ -236,17 +237,38 @@ class TasksBackend:
 
     # ── ticket-id aliasing ───────────────────────────────────────────────────────
     def _resolve_id(self, ticket_id: str) -> str:
-        """Normalize a caller-given code to this team's canonical ``TEAM-N`` key when it looks
-        like one (case-insensitive team-prefix aliasing, e.g. ``gl-12`` -> ``GL-12`` — mirrors
-        :func:`~tasklib.taskref.linear_identifier`'s contract exactly). A code that does not
-        match that shape (a UUID, or an id from a different team) is passed through unchanged —
-        this backend's ``/api/v1/issues/{id}`` accepts either a UUID or a human key, so a
-        non-matching string is still a legitimate lookup, not necessarily a typo.
+        """Accept this team's short key or a canonical UUID within this Tasks deployment.
+
+        Do not reinterpret another team's key or a provider URL through workspace
+        defaults. UUIDs remain explicit Tasks addresses, not cross-provider aliases.
         """
+        text = str(ticket_id).strip()
         try:
-            return tasks_identifier(ticket_id, self.team_key)
+            return tasks_identifier(text, self.team_key)
         except TaskRefError:
-            return str(ticket_id).strip()
+            pass
+        try:
+            value = str(UUID(text))
+            if value == text.lower():
+                return value
+        except ValueError:
+            pass
+        # Raise outside the parser handlers: neither message nor exception context echoes input.
+        raise BackendError(
+            f"tasks: invalid Tasks identifier for configured team {self.team_key}. "
+            "Select the owning repository and tracker, or use an explicit Tasks UUID."
+        )
+
+    def _team_write_key(self, ticket_id: str) -> str:
+        """Mutations use the configured-team key returned by the original read."""
+        try:
+            return tasks_identifier(str(ticket_id).strip(), self.team_key)
+        except TaskRefError:
+            pass
+        raise BackendError(
+            f"tasks: changes are limited to configured team {self.team_key}; "
+            "read the issue first and retain its returned team key."
+        )
 
     # ── catalog (team id, workflow statuses, labels) ────────────────────────────
     def _ensure_catalog(self) -> None:
@@ -397,6 +419,9 @@ class TasksBackend:
         row = self._call(f"/api/v1/issues/{quote(code, safe='')}")
         if not isinstance(row, dict) or not row.get("id"):
             raise BackendError(f"tasks: no issue {ticket_id}")
+        identities = {str(row.get(name) or "").lower() for name in ("id", "key")}
+        if code.lower() not in identities:
+            raise BackendError(f"tasks: the server returned a different issue for {code}; refusing that response")
         return row
 
     # ── protocol ─────────────────────────────────────────────────────────────────
@@ -422,15 +447,14 @@ class TasksBackend:
     def update(self, ticket: Ticket) -> Ticket:
         """PATCH ``ticket`` back to tasks-app.
 
-        Two safety rules (UB-23 review, both load-bearing — see :meth:`_update_version` and
+        Safety rules (see :meth:`_update_version` and
         :meth:`_update_description`):
 
         1. **Version is read-once, never re-read.** The PATCH carries ``ticket.backend_version``
            — the version the CALLER's original :meth:`get` saw — never a value fetched fresh
            here. tasks-app's own PATCH route (``packages/server/modules/tickets/service.mjs``)
-           accepts the SAME ``key`` path segment GET does (UUID or team key, interchangeably —
-           confirmed in the route dispatch), so this never re-reads the issue just to learn its
-           UUID either: a second read would only widen the race window between "read the
+           accepts the configured-team key returned on ``ticket.id`` by :meth:`get`,
+           so this never re-reads the issue just to learn its UUID either: a second read would only widen the race window between "read the
            version" and "write it back", the opposite of what optimistic concurrency buys (same
            reasoning as :meth:`transition`'s docstring). A stale version 409s server-side
            (``UPDATE ... WHERE version=?`` — zero rows changed -> conflict) instead of silently
@@ -441,6 +465,10 @@ class TasksBackend:
            writes fields present in the JSON body (``Object.hasOwn(input, field)``), so omitting
            the key is a true no-op on that column, not just "send the same value back".
 
+        3. **Retain the original configured-team key.** UUID addressing is supported by
+           :meth:`get`; its returned Ticket uses the key needed for a team-scoped update.
+           Replacing that key with a UUID or a foreign team key is refused before I/O.
+
         Order matters (integration review finding): :meth:`_update_description` runs BEFORE
         :meth:`_status_id_for`/:meth:`_label_ids` — both of those can make their OWN write calls
         (``_label_ids`` CREATES a not-yet-existing label). A refused lossy body edit must make
@@ -450,7 +478,7 @@ class TasksBackend:
         """
         version = self._update_version(ticket)
         description = self._update_description(ticket)
-        code = self._resolve_id(ticket.id)
+        code = self._team_write_key(ticket.id)
         payload: dict = {
             "version": version,
             "title": ticket.title,
@@ -682,12 +710,14 @@ class TasksBackend:
             ) from None
 
     def transition(self, ticket_id: str, state: State) -> Ticket:
-        # Resolve the target status FIRST (pure catalog lookup — no issue read, no write): an
+        ticket_id = self._resolve_id(ticket_id)
+        # After pure identifier validation, resolve the target status before the issue read: an
         # unmapped state (IN_REVIEW with no review-capable status) must fail here, before the
         # issue is ever read or written — see the module docstring and
         # test_no_silent_in_review_fallback.
         status_id = self._status_id_for(state)
         row = self._issue_row(ticket_id)  # the ONE read whose version the write below reuses
+        self._team_write_key(str(row.get("key") or ""))  # UUID addressing cannot change team workflows.
         payload = {"version": row.get("version"), "status_id": status_id}
         updated = self._call(f"/api/v1/issues/{row['id']}", method="PATCH", payload=payload)
         if not isinstance(updated, dict) or not updated.get("id"):
