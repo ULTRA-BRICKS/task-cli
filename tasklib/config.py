@@ -774,12 +774,6 @@ class LoadedConfig:
         return str(self.section("tasks").get("attachment_mode", "native"))
 
     @property
-    def tasks_attachment_mode(self) -> str:
-        """``"native"`` (real Tasks attachment upload) or ``"link"`` (never re-host a local
-        file; only register an already-hosted URL). See :data:`VALID_ATTACHMENT_MODES`."""
-        return str(self.section("tasks").get("attachment_mode", "native"))
-
-    @property
     def trusted_attachment_hosts(self) -> frozenset[str]:
         """Extra hostnames (repo-configured, top-level ``trusted_attachment_hosts:``) that
         ``_save_attachments`` treats as safe to auto-fetch bytes from, even though they are not
