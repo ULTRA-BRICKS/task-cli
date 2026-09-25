@@ -49,6 +49,8 @@ WORKDIR /opt/task-cli
 COPY --chown=tester:tester bin ./bin
 COPY --chown=tester:tester tasklib ./tasklib
 COPY --chown=tester:tester pyproject.toml README.md install.sh ./
+# install.sh sources its helpers from here (scripts/lib/install_laya.sh, task-cli#208).
+COPY --chown=tester:tester scripts/lib ./scripts/lib
 COPY --chown=tester:tester test/docker ./test/docker
 
 USER tester
