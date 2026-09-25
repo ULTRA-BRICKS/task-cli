@@ -12,7 +12,7 @@ import re
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
-_DISTRIBUTION = "task-cli"
+_DISTRIBUTION = "hyper-task"
 
 # Scoped regex for the `[project] version = "..."` line. We deliberately do NOT use tomllib
 # here: the live-checkout fallback must work on any interpreter (and a one-field scoped regex
@@ -24,7 +24,7 @@ def _version_from_pyproject() -> str:
     """Parse the declared version out of the repo's pyproject.toml (live-checkout fallback).
 
     Reached only when the package is not pip-installed (``importlib.metadata`` can't find the
-    ``task-cli`` distribution), e.g. running straight from a git checkout via the ``bin/task``
+    ``hyper-task`` distribution), e.g. running straight from a git checkout via the ``bin/task``
     shim. We scan only the ``[project]`` table so a ``version`` key elsewhere can't shadow it;
     the scope ends at the next table header of any kind (``[project.scripts]`` etc.), which is
     TOML-correct — keys after a subtable header no longer belong to ``[project]``.
