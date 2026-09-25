@@ -970,9 +970,14 @@ task:
 - **Credentials:** `$FORGEJO_TOKEN` (honored only when `$FORGEJO_URL` names the same origin,
   so a repository's config cannot aim an ambient token at another host), else the `fj` CLI's
   own store (`keys.json`, macOS:
-  `~/Library/Application Support/forgejo-cli.forgejo-cli/`; Linux, best effort:
+  `~/Library/Application Support/forgejo-cli.forgejo-cli/`; Windows:
+  `%APPDATA%\forgejo-cli\forgejo-cli\data\`; Linux, best effort:
   `$XDG_DATA_HOME/forgejo-cli/`) — only the entry for exactly `url`'s host. `fj` host aliases
-  are never followed. Log in once with `fj -H <host> auth login` (or `auth add-token`).
+  are never followed. Log in once with `fj -H <host> auth login` (or `auth add-token`). An
+  `auth login` (OAuth) token expires after about an hour and fj refreshes it only when fj
+  runs, so when the stored one has expired `task` runs `fj -H <host> whoami` once (fj
+  refreshes and rewrites its store) and re-reads it; without `fj` on `PATH` it fails with the
+  usual "no Forgejo token" error.
 - **Transport:** every request goes to `url` + `/api/v1` with the token, and a redirect to
   another host (or from https to http) is refused, so the token cannot leave that origin.
   Attachment downloads send the token only to the same origin.

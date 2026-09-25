@@ -11,15 +11,20 @@ Resolution order:
   Linear: ``$LINEAR_API_KEY`` → ``~/.config/linear/credentials.toml`` (the ``default``
           workspace's key, or a named workspace) → ``$XDG_CONFIG_HOME/linear/...``.
 
-Tokens are returned, never logged or persisted by this module. The only subprocess is the
-one-shot ``gh auth token`` — there is no per-API-call subprocess (that is the whole point).
+Tokens are returned, never logged or persisted by this module. The only subprocesses are the
+one-shot ``gh auth token`` and, for an EXPIRED ``fj`` OAuth login, one ``fj -H <host> whoami``
+(fj refreshes the token and rewrites its own store) — there is no per-API-call subprocess (that
+is the whole point).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -251,6 +256,11 @@ def forgejo_token(url: str, env: dict[str, str] | None = None) -> ForgejoCreds:
     ``hosts`` map is keyed by host name (``host:port`` for a non-default port). Only the entry
     for THIS origin's host is ever used, and fj's ``aliases`` map is deliberately ignored:
     following an alias would send one host's token to a different host name.
+
+    ``fj auth login`` stores an OAuth login whose access token expires after about an hour; fj
+    refreshes it only when fj itself runs. An expired entry therefore triggers ONE
+    ``fj -H <host> whoami`` (fj refreshes + rewrites ``keys.json``) and a re-read; if fj is
+    absent or that does not yield a fresh token, the usual "no Forgejo token" error is raised.
     """
     env = os.environ if env is None else env
     val = env.get("FORGEJO_TOKEN")
@@ -258,16 +268,43 @@ def forgejo_token(url: str, env: dict[str, str] | None = None) -> ForgejoCreds:
         return ForgejoCreds(token=val.strip(), source="env:FORGEJO_TOKEN")
 
     key = _forgejo_host_key(url)
-    for path in _fj_key_files(env):
-        token = _fj_host_token(path, key) if key else None
-        if token:
-            return ForgejoCreds(token=token, source=str(path))
+    expired = False
+    found = _fj_store_entry(key, env) if key else None
+    if found and _fj_entry_expired(found[1]):
+        expired = True
+        _fj_refresh(key, env)
+        # Re-read even when fj failed: a concurrent task/fj run may have refreshed it already.
+        found = _fj_store_entry(key, env)
+        if found and _fj_entry_expired(found[1]):
+            found = None
+    if found:
+        path, entry = found
+        return ForgejoCreds(token=entry["token"].strip(), source=str(path))
 
+    hint = (
+        f" (the stored fj OAuth login for {key} has expired and `fj -H {key} whoami` could not "
+        "refresh it)"
+        if expired
+        else ""
+    )
     raise CredentialError(
-        f"no Forgejo token found for {key or url}. Run `fj -H {key or 'HOST'} auth login` "
+        f"no Forgejo token found for {key or url}{hint}. Run `fj -H {key or 'HOST'} auth login` "
         f"(or set $FORGEJO_TOKEN together with FORGEJO_URL={url}). (task-cli reads fj's stored "
         "credential for that exact host; it never re-prompts.)"
     )
+
+
+def forgejo_login_known(url: str, env: dict[str, str] | None = None) -> bool:
+    """Whether the user has a Forgejo credential for exactly ``url``'s origin — the origin-bound
+    env pair or an fj store entry for that host, EXPIRED OR NOT. Observational: no subprocess and
+    no network (auto-detection runs during generic CLI setup), unlike :func:`forgejo_token`,
+    which refreshes an expired fj OAuth login."""
+    env = os.environ if env is None else env
+    val = env.get("FORGEJO_TOKEN")
+    if val and val.strip() and _same_origin_str(str(env.get("FORGEJO_URL", "")).strip(), url):
+        return True
+    key = _forgejo_host_key(url)
+    return bool(key and _fj_store_entry(key, env))
 
 
 def _forgejo_host_key(url: str) -> str:
@@ -284,18 +321,33 @@ def _forgejo_host_key(url: str) -> str:
 
 
 def _fj_key_files(env: dict[str, str]) -> list[Path]:
-    """Candidate ``keys.json`` locations. The macOS path is the one fj actually uses on this
-    platform (verified); the XDG ones follow the same ``directories`` convention on Linux and
-    are best-effort."""
+    """Candidate ``keys.json`` locations — fj's ``directories::ProjectDirs("", "forgejo-cli",
+    "forgejo-cli").data_dir()``, the running platform's own location first: Windows
+    ``%APPDATA%\\forgejo-cli\\forgejo-cli\\data``, macOS ``~/Library/Application Support/
+    forgejo-cli.forgejo-cli`` (both verified against fj 0.6), Linux ``$XDG_DATA_HOME/forgejo-cli``."""
     home = Path(env.get("HOME") or os.path.expanduser("~"))
     data_home = Path(env.get("XDG_DATA_HOME") or home / ".local" / "share")
-    return [
-        home / "Library" / "Application Support" / "forgejo-cli.forgejo-cli" / "keys.json",
-        data_home / "forgejo-cli" / "keys.json",
-    ]
+    mac = home / "Library" / "Application Support" / "forgejo-cli.forgejo-cli" / "keys.json"
+    xdg = data_home / "forgejo-cli" / "keys.json"
+    appdata = env.get("APPDATA")
+    windows = [Path(appdata) / "forgejo-cli" / "forgejo-cli" / "data" / "keys.json"] if appdata else []
+    if sys.platform == "win32":
+        return [*windows, mac, xdg]
+    if sys.platform == "darwin":
+        return [mac, xdg, *windows]
+    return [xdg, mac, *windows]
 
 
-def _fj_host_token(path: Path, host_key: str) -> str | None:
+def _fj_store_entry(host_key: str, env: dict[str, str]) -> tuple[Path, dict] | None:
+    """The first key-store ``(path, entry)`` holding a usable token for exactly ``host_key``."""
+    for path in _fj_key_files(env):
+        entry = _fj_host_entry(path, host_key)
+        if entry is not None:
+            return path, entry
+    return None
+
+
+def _fj_host_entry(path: Path, host_key: str) -> dict | None:
     if not path.is_file():
         return None
     try:
@@ -307,7 +359,68 @@ def _fj_host_token(path: Path, host_key: str) -> str | None:
     hosts = data.get("hosts") if isinstance(data, dict) else None
     entry = hosts.get(host_key) if isinstance(hosts, dict) else None
     token = entry.get("token") if isinstance(entry, dict) else None
-    return token.strip() if isinstance(token, str) and token.strip() else None
+    return entry if isinstance(token, str) and token.strip() else None
+
+
+def _fj_expires_at(value: object) -> datetime | None:
+    """Parse fj's ``expires_at`` (a Rust ``time::OffsetDateTime``). fj serialises it with the
+    ``time`` crate's default serde form, a 9-tuple ``[year, ordinal_day, hour, minute, second,
+    nanosecond, offset_h, offset_m, offset_s]``; a human-readable/RFC 3339 string or a unix
+    timestamp are accepted too. ``None`` when unrecognised."""
+    try:
+        if isinstance(value, list) and len(value) == 9 and all(type(v) is int for v in value):
+            year, ordinal, hour, minute, second, nanos, off_h, off_m, off_s = value
+            local = datetime(year, 1, 1) + timedelta(
+                days=ordinal - 1, hours=hour, minutes=minute, seconds=second, microseconds=nanos // 1000
+            )
+            offset = timedelta(hours=off_h, minutes=off_m, seconds=off_s)
+            return (local - offset).replace(tzinfo=timezone.utc)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            parts = text.split(" ")
+            if len(parts) == 3:  # time's human-readable form: "2026-09-25 20:05:01.5 +00:00:00"
+                sign = -1 if parts[2].startswith("-") else 1
+                h, m, sec = (int(x) for x in parts[2].lstrip("+-").split(":"))
+                naive = datetime.fromisoformat(f"{parts[0]}T{parts[1][:15]}")
+                return (naive - sign * timedelta(hours=h, minutes=m, seconds=sec)).replace(tzinfo=timezone.utc)
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    return None
+
+
+def _fj_entry_expired(entry: dict) -> bool:
+    """Whether an OAuth entry's access token is past its ``expires_at``. Application tokens (and an
+    unrecognised timestamp) are treated as live — the server stays the authority on those."""
+    if entry.get("type") != "OAuth":
+        return False
+    expires = _fj_expires_at(entry.get("expires_at"))
+    return expires is not None and datetime.now(timezone.utc) >= expires
+
+
+def _fj_refresh(host_key: str, env: dict[str, str]) -> None:
+    """Run ``fj -H <host> whoami`` once so fj refreshes its expired OAuth token and rewrites its
+    own ``keys.json``. Output (which names the account) is discarded; a missing or failing fj is
+    not an error here — the caller re-reads the store and decides."""
+    fj = shutil.which("fj", path=env.get("PATH") or os.environ.get("PATH"))
+    if not fj:
+        return
+    run_env = None if env is os.environ else {**os.environ, **env}
+    try:
+        subprocess.run(
+            [fj, "-H", host_key, "whoami"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=run_env,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _same_origin_str(a: str, b: str) -> bool:
