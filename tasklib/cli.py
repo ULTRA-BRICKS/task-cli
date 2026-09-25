@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from . import __version__
 from .links import RELATIONS
 from .model import Criterion, Screenshot, State, Ticket
+from .stdio import ensure_utf8_stdio
 from .transitions import TransitionError, validate_transition
 
 if TYPE_CHECKING:
@@ -643,6 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    ensure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.command:
