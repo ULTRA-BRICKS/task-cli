@@ -38,21 +38,15 @@ SYNC_BEGIN = "# SYNC-HEADER-BEGIN"
 SYNC_END = "# SYNC-HEADER-END"
 BLOCK_MARKER = "[require-ticket] BLOCKED: no ticket reference"
 
-
-def _hook_env(strict: str) -> dict[str, str]:
-    """A minimal env for running the vendored hook under THIS interpreter.
-
-    Keeps the dynamic-loader path: a `setup-python` interpreter links a shared libpython. On
-    GitHub's hosted image it resolves without help, but in a Forgejo / self-hosted runner's tool
-    cache it is found only through the LD_LIBRARY_PATH setup-python exports, so dropping that
-    made the child die with "libpython3.X.so.1.0: cannot open shared object file" (exit 127)
-    before the hook ran.
-    """
-    env = {"REQUIRE_TICKET_STRICT": strict, "PATH": "/usr/bin:/bin"}
-    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
-        if os.environ.get(var):
-            env[var] = os.environ[var]
-    return env
+# The vendored hook runs under `sys.executable`. In CI that's a self-contained toolchain build
+# (actions/setup-python's Linux tool-cache Python), which needs its OWN LD_LIBRARY_PATH to find
+# its bundled libpython*.so -- a bare env replacement drops it entirely, so the subprocess can't
+# even start (exit 127: "cannot open shared object file"), though this is invisible on macOS/a
+# system-installed python where the interpreter doesn't need it. Stay otherwise minimal/hermetic
+# -- only carry this one var through, and only when the parent actually has it set.
+_HOOK_ENV: dict[str, str] = {"PATH": "/usr/bin:/bin"}
+if os.environ.get("LD_LIBRARY_PATH"):
+    _HOOK_ENV["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
 
 
 def _vendored_text() -> str:
@@ -121,7 +115,7 @@ def test_vendored_hook_keeps_the_block_marker_contract():
         input=event,
         capture_output=True,
         text=True,
-        env=_hook_env("1"),
+        env={**_HOOK_ENV, "REQUIRE_TICKET_STRICT": "1"},
         timeout=10,
         check=False,
     )
@@ -136,7 +130,7 @@ def test_vendored_hook_allows_a_ticketed_commit():
         input=event,
         capture_output=True,
         text=True,
-        env=_hook_env("1"),
+        env={**_HOOK_ENV, "REQUIRE_TICKET_STRICT": "1"},
         timeout=10,
         check=False,
     )
@@ -151,7 +145,7 @@ def _run_hook(command: str, *, strict: str = "1") -> subprocess.CompletedProcess
         input=event,
         capture_output=True,
         text=True,
-        env=_hook_env(strict),
+        env={**_HOOK_ENV, "REQUIRE_TICKET_STRICT": strict},
         timeout=10,
         check=False,
     )

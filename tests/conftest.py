@@ -50,6 +50,46 @@ def _no_ambient_attachment_mode_override(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_ambient_github_env_override(monkeypatch):
+    """CI (GitHub/Forgejo Actions-compatible runners) ambiently injects GITHUB_API_URL (and,
+    on a machine with `gh auth login` already run for a human operator, GITHUB_TOKEN/GH_TOKEN)
+    into every job's environment -- a real, standard var (see github_issues.py's _api_root()
+    docstring), not something any test here sets on purpose. Only the handful of tests that
+    exercise _api_root()'s own override behavior `monkeypatch.setenv` it explicitly; every other
+    test that merely constructs a GitHubIssuesBackend (indirectly calling _api_root()/
+    _uploads_api_root()/credential resolution) inherited whatever the real CI host's ambient
+    values were, which -- on the current Forgejo Actions runner -- point at the internal Forgejo
+    instance over http, tripping the non-loopback-https guard and turning >15 unrelated tests
+    into BackendError/CredentialError failures. Autouse (unlike `isolated_state`) so it protects
+    every test file, not just ones that ask for it.
+    """
+    for var in ("GITHUB_API_URL", "GITHUB_UPLOADS_URL", "GITHUB_TOKEN", "GH_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _sane_umask():
+    """config.py's `_trusted_ancestor` (UB-25 security hardening) legitimately fails-closed on
+    an ancestor directory that is group/world-writable -- a real protection against another
+    local user planting a `rig.yaml` that retargets this user's tickets/credentials. But every
+    test here builds its throwaway ancestor tree with a bare `Path.mkdir(parents=True)`, whose
+    actual on-disk mode is `0o777 & ~umask` -- fine under a normal 022 umask (the assumed
+    default), but on a host whose ambient process umask is permissive (observed on the current
+    CI runner), those test-created directories land group/world-writable and the exact same
+    real security check then (correctly, per its own contract) skips every one of them, making
+    the whole ancestor-config cascade silently no-op. Force a conventional umask for the
+    duration of the suite so directory permissions are deterministic across hosts -- this is a
+    test-hermeticity fix, not a change to the production trust check, which must stay
+    fail-closed.
+    """
+    old = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_laya_autoinstall(monkeypatch):
     """task-cli#208 review finding: `laya` is now the zero-config DEFAULT `classify.fallbacks`
     head (`config.DEFAULTS`), and `LayaClassifier.available()` auto-installs the real package
