@@ -101,7 +101,7 @@ jobs:
                   print(f"note: could not ensure the drift label: {exc}")
               call("POST", "/issues", {"title": title, "body": body, "labels": labels})
           PY
-            exit 0
+            exit $?  # python's outcome: a failed find-or-create must fail the job
           fi
           # Match the EXACT title (gh --search is word-based, and the drift vs infra titles share
           # words — a substring search could comment on the wrong one). `--jq` filters on an exact
