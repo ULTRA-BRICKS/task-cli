@@ -36,6 +36,7 @@ git clone https://git.hyperide.ai/ultrabricks/task-cli && cd task-cli && ./insta
 - After **1** or **2**, run `task install-skill` once so coding agents discover `task` (3 and 4 do it for you).
 - **Unreleased `main`:** `uv tool install git+https://git.hyperide.ai/ultrabricks/task-cli` (or the same with `pipx install`).
 - **Update:** `uv tool upgrade hyper-task` · `pipx upgrade hyper-task` · re-run the one-liner · `git pull`.
+- **Installed before the rename** (as `task-cli`, from git)? Remove that first — `uv tool uninstall task-cli` or `pipx uninstall task-cli` — or two installs both claim `task`.
 - **Via rig:** clone into `~/xp/task-cli` and list `task` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
 - **Windows:** use uv (option 1) — `./install.sh` and the one-liner do exactly that under Cygwin / Git Bash. If a command dies with `UnicodeEncodeError` in mintty, run `setx PYTHONUTF8 1` once. More: [rig-cli → Windows](https://git.hyperide.ai/ultrabricks/rig-cli#windows-cygwin-git-bash-powershell).
 
