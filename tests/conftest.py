@@ -26,18 +26,6 @@ from tasklib.render import parse, render  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_github_api_root(monkeypatch):
-    """The GitHub backend honors GITHUB_API_URL / GITHUB_UPLOADS_URL (GHE, test mocks). A CI
-    runner exports its own server's API root there — on GitHub that is https://api.github.com,
-    so the suite never noticed; a Forgejo runner exports e.g. http://10.89.0.1:3000/api/v1, which
-    the backend (correctly) refuses to send a token to, failing every GitHub-backend test. Tests
-    that need an override set it themselves.
-    """
-    monkeypatch.delenv("GITHUB_API_URL", raising=False)
-    monkeypatch.delenv("GITHUB_UPLOADS_URL", raising=False)
-
-
-@pytest.fixture(autouse=True)
 def _no_ambient_attachment_mode_override(monkeypatch):
     """review finding: TASK_CLI_ATTACHMENT_MODE (config.py's highest-precedence config layer)
     is documented as something a developer exports in their own shell profile — the EXACT

@@ -20,7 +20,6 @@ is the whole point).
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -401,11 +400,34 @@ def _fj_entry_expired(entry: dict) -> bool:
     return expires is not None and datetime.now(timezone.utc) >= expires
 
 
+def find_fj(path_value: str) -> str | None:
+    """The first ``fj`` in the ABSOLUTE directories of ``path_value`` — never the working directory.
+
+    ``shutil.which`` on Windows (Python <= 3.13) searches the working directory first, and task
+    runs inside repositories it does not control: a repo's own ``fj.bat`` must never run with the
+    user's credentials. Windows looks for the PATHEXT names (rig's ``fj.cmd`` wrapper, ``fj.exe``);
+    POSIX for ``fj``.
+    """
+    if sys.platform == "win32":
+        names = ["fj" + ext for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if ext]
+    else:
+        names = ["fj"]
+    for directory in path_value.split(os.pathsep):
+        if not directory or not os.path.isabs(directory):  # "" and "." mean the working directory
+            continue
+        for name in names:
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
 def _fj_refresh(host_key: str, env: dict[str, str]) -> None:
     """Run ``fj -H <host> whoami`` once so fj refreshes its expired OAuth token and rewrites its
     own ``keys.json``. Output (which names the account) is discarded; a missing or failing fj is
-    not an error here — the caller re-reads the store and decides."""
-    fj = shutil.which("fj", path=env.get("PATH") or os.environ.get("PATH"))
+    not an error here — the caller re-reads the store and decides. Only ``env``'s own PATH is
+    searched: a scoped env without one finds no fj (never the ambient one)."""
+    fj = find_fj(env.get("PATH", ""))
     if not fj:
         return
     run_env = None if env is os.environ else {**os.environ, **env}
@@ -416,7 +438,7 @@ def _fj_refresh(host_key: str, env: dict[str, str]) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=run_env,
-            timeout=60,
+            timeout=15,  # refresh failure is soft; a wedged fj must not stall every task command
             check=False,
         )
     except (OSError, subprocess.SubprocessError):

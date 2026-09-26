@@ -4,6 +4,7 @@ routing through the cwd / ``projects:`` registry. Hermetic — ``get_backend`` i
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -460,3 +461,35 @@ def test_classify_with_create_and_explicit_non_repo_cwd_is_refused(tmp_path, mon
     monkeypatch.setattr("tasklib.backends.get_backend", _Recorder())
     assert main(["classify", "fix it", "--create", "-C", str(tmp_path)]) == 2
     assert "not inside a git repository" in capsys.readouterr().out
+
+
+def test_an_expired_fj_login_still_routes_to_forgejo_without_running_fj(tmp_path, monkeypatch):
+    """The point of forgejo_login_known: an EXPIRED OAuth login still auto-routes the repo to the
+    forgejo backend (it used to fall back to github-issues), and routing never runs fj."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-empty"))
+    keys = home / "Library" / "Application Support" / "forgejo-cli.forgejo-cli" / "keys.json"
+    keys.parent.mkdir(parents=True, exist_ok=True)
+    expired = {"type": "OAuth", "token": "t", "refresh_token": "r",
+               "expires_at": [2020, 1, 0, 0, 0, 0, 0, 0, 0]}
+    keys.write_text(json.dumps({"hosts": {"git.hyperide.ai": expired}}), encoding="utf-8")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    marker = tmp_path / "fj-ran"
+    (bindir / "fj").write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    (bindir / "fj").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    repo = tmp_path / "repo-expired"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://git.hyperide.ai/ultrabricks/x.git"], check=True)
+    rec = _Recorder(_Commentable())
+    monkeypatch.setattr("tasklib.backends.get_backend", rec)
+    assert main(["read", "#4", "-C", str(repo)]) == 0
+
+    (cfg,) = rec.configs
+    assert cfg.backend == "forgejo"
+    assert any(layer == "autodetect:forgejo:https://git.hyperide.ai" for layer in cfg.layers)
+    assert not marker.exists()

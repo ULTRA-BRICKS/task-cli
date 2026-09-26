@@ -236,3 +236,21 @@ def test_login_known_counts_an_expired_login_without_running_fj(tmp_path):
 )
 def test_fj_expires_at_parsing(value, expected):
     assert credentials._fj_expires_at(value) == expected
+
+
+def test_find_fj_never_uses_the_working_directory(tmp_path, monkeypatch):
+    """task runs inside repos it doesn't control: a repo's own fj (fj.bat on Windows, where
+    shutil.which searches the working directory first) must never be the one refreshed with."""
+    names = ["fj.bat", "fj.cmd", "fj.exe"] if sys.platform == "win32" else ["fj"]
+    repo = tmp_path / "some-repo"
+    repo.mkdir()
+    for name in names:
+        (repo / name).write_text("#!/bin/sh\necho pwned\n")
+        (repo / name).chmod(0o755)
+    monkeypatch.chdir(repo)
+    assert credentials.find_fj(os.pathsep.join(["", ".", "relative/bin"])) is None
+    real = tmp_path / "bin"
+    real.mkdir()
+    (real / names[-1]).write_text("#!/bin/sh\n")
+    (real / names[-1]).chmod(0o755)
+    assert credentials.find_fj(os.pathsep.join([".", str(real)])) == str(real / names[-1])
