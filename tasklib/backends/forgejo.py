@@ -639,9 +639,10 @@ def autodetect_forgejo_origin(repo_root, env: dict[str, str] | None = None) -> s
 
     This is credential-backed rather than treating every non-github.com remote as Forgejo:
     GitLab, Bitbucket and arbitrary git servers must not be reclassified. No network call is
-    made; forgejo_token only checks the origin-bound env pair / fj key store.
+    made; forgejo_login_known only checks the origin-bound env pair / fj key store (an expired
+    fj OAuth login still counts — refreshing it is forgejo_token's job, not auto-detection's).
     """
-    from ..credentials import CredentialError, forgejo_token
+    from ..credentials import forgejo_login_known
 
     remote = _git_origin_url_from_config(repo_root)
     if not remote:
@@ -664,11 +665,7 @@ def autodetect_forgejo_origin(repo_root, env: dict[str, str] | None = None) -> s
     if not host or host == "github.com":
         return None
     origin = f"https://{host}{api_port}"
-    try:
-        forgejo_token(origin, env)
-    except CredentialError:
-        return None
-    return origin
+    return origin if forgejo_login_known(origin, env) else None
 
 
 def _git_origin_url_from_config(repo_root) -> str | None:

@@ -49,6 +49,7 @@ WORKDIR /opt/task-cli
 COPY --chown=tester:tester bin ./bin
 COPY --chown=tester:tester tasklib ./tasklib
 COPY --chown=tester:tester pyproject.toml README.md install.sh ./
+COPY --chown=tester:tester scripts ./scripts
 COPY --chown=tester:tester test/docker ./test/docker
 
 USER tester

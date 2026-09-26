@@ -3,8 +3,8 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "task-cli"
-version = "0.19.0"
+name = "hyper-task"
+version = "0.20.0"
 description = "task — the enforced ticket interface: every request becomes a well-formed ticket (GitHub Issues / Linear), with quality enforced by the tool."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,7 +23,7 @@ test = ["pytest"]
 # a versioned/stable public contract yet. task-cli#208: `laya` is now the zero-config default
 # classify provider and is auto-installed on demand (tasklib/laya_autoinstall.py) or via
 # install.sh's best-effort step if missing -- this extra remains the manual/pinned-version
-# alternative (`uv sync --extra laya` / `pip install task-cli[laya]`).
+# alternative (`uv sync --extra laya` / `pip install hyper-task[laya]`).
 laya = ["laya>=0.3.7,<0.4"]
 
 [project.scripts]

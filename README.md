@@ -17,14 +17,33 @@ you already authed — zero extra setup.
 
 ## Install
 
+Pick one — each ends with `task` on your PATH:
+
 ```bash
-git clone https://git.hyperide.ai/ultrabricks/task-cli && cd task-cli && ./install.sh
-# or, one-liner:
+# 1. uv — recommended; macOS, Linux and Windows (incl. Cygwin / Git Bash)
+uv tool install hyper-task
+
+# 2. pipx
+pipx install hyper-task
+
+# 3. one-liner — clones to ~/.local/share/task-cli, links task into ~/.local/bin, registers the agent skill
 curl -fsSL https://git.hyperide.ai/ultrabricks/task-cli/raw/branch/main/install.sh | bash
+
+# 4. from a clone — to hack on it; `git pull` updates the installed tool
+git clone https://git.hyperide.ai/ultrabricks/task-cli && cd task-cli && ./install.sh
 ```
 
-The installer symlinks `bin/task` into `~/.local/bin` and registers the agent skill. The only
-runtime dep is `pyyaml` (for `task.yaml`); without it the tool falls back to built-in defaults.
+- After **1** or **2**, run `task install-skill` once so coding agents discover `task` (3 and 4 do it for you).
+- **Unreleased `main`:** `uv tool install git+https://git.hyperide.ai/ultrabricks/task-cli` (or the same with `pipx install`).
+- **Update:** `uv tool upgrade hyper-task` · `pipx upgrade hyper-task` · re-run the one-liner · `git pull`.
+- **Installed before the rename** (as `task-cli`, from git)? Remove that first — `uv tool uninstall task-cli` or `pipx uninstall task-cli` — or two installs both claim `task`.
+- **Via rig:** clone into `~/xp/task-cli` and list `task` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
+- **Windows:** use uv (option 1) — `./install.sh` and the one-liner do exactly that under Cygwin / Git Bash. If a command dies with `UnicodeEncodeError` in mintty, run `setx PYTHONUTF8 1` once. More: [rig-cli → Windows](https://git.hyperide.ai/ultrabricks/rig-cli#windows-cygwin-git-bash-powershell).
+
+> **On PyPI as `hyper-task`** (the command is still `task`). The canonical repo is
+> **git.hyperide.ai/ultrabricks/task-cli**; `github.com/alex-mextner/task-cli` is a frozen, archived mirror.
+
+The only runtime dep is `pyyaml` (for `task.yaml`); without it the tool falls back to built-in defaults.
 
 **Credentials** are read from the CLIs you already use — run these once and you're done:
 
@@ -952,9 +971,14 @@ task:
 - **Credentials:** `$FORGEJO_TOKEN` (honored only when `$FORGEJO_URL` names the same origin,
   so a repository's config cannot aim an ambient token at another host), else the `fj` CLI's
   own store (`keys.json`, macOS:
-  `~/Library/Application Support/forgejo-cli.forgejo-cli/`; Linux, best effort:
+  `~/Library/Application Support/forgejo-cli.forgejo-cli/`; Windows:
+  `%APPDATA%\forgejo-cli\forgejo-cli\data\`; Linux, best effort:
   `$XDG_DATA_HOME/forgejo-cli/`) — only the entry for exactly `url`'s host. `fj` host aliases
-  are never followed. Log in once with `fj -H <host> auth login` (or `auth add-token`).
+  are never followed. Log in once with `fj -H <host> auth login` (or `auth add-token`). An
+  `auth login` (OAuth) token expires after about an hour and fj refreshes it only when fj
+  runs, so when the stored one has expired `task` runs `fj -H <host> whoami` once (fj
+  refreshes and rewrites its store) and re-reads it; without `fj` on `PATH` it fails with the
+  usual "no Forgejo token" error.
 - **Transport:** every request goes to `url` + `/api/v1` with the token, and a redirect to
   another host (or from https to http) is refused, so the token cannot leave that origin.
   Attachment downloads send the token only to the same origin.

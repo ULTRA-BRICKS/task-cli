@@ -19,7 +19,9 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   must run with zero third-party imports. Do not add a top-level `import yaml`.
 - **Backends call the provider API DIRECTLY** (stdlib `urllib`, no per-call subprocess):
   GitHub REST, Linear GraphQL. The only subprocesses are the one-shot `gh auth token`
-  (credential harvest) and the classify shell-out to `review`. Never spawn a CLI per API call.
+  (credential harvest), a one-shot `fj -H <host> whoami` when fj's stored OAuth token has
+  expired (fj refreshes its own store), and the classify shell-out to `review`. Never spawn a
+  CLI per API call.
 - **Credentials are harvested, never re-prompted, never logged.** GitHub from
   `$GITHUB_TOKEN` → `gh auth token` → `hosts.yml`; Linear from `$LINEAR_API_KEY` →
   `~/.config/linear/credentials.toml`. All logging goes through `tasklib.logging` which

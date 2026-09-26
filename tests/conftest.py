@@ -12,6 +12,13 @@ import pytest
 # Make the package importable when running pytest from the repo root without an install.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Files and directories the tests create must not be group-writable: the config loader skips an
+# ancestor rig.yaml (or its directory) that others can write (tasklib/config.py
+# `_trusted_ancestor`). The suite assumed a 022 umask (GitHub-hosted runners, macOS); a Forgejo /
+# self-hosted runner user with Ubuntu's user-private-group umask 002 made every ancestor-cascade
+# test read an empty layer. Pin it for the whole run (subprocesses inherit it).
+os.umask(0o022)
+
 from tasklib.backends import TicketBackend  # noqa: E402
 from tasklib.config import ATTACHMENT_MODE_ENV_VAR  # noqa: E402
 from tasklib.model import State, Ticket  # noqa: E402
@@ -46,6 +53,16 @@ def _no_ambient_github_env_override(monkeypatch):
     """
     for var in ("GITHUB_API_URL", "GITHUB_UPLOADS_URL", "GITHUB_TOKEN", "GH_TOKEN"):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_fj_key_store(tmp_path, monkeypatch):
+    """On Windows the fj key store lives under %APPDATA% (credentials._fj_key_files checks it
+    first), and tests that only redirect HOME would otherwise read -- and, for an expired OAuth
+    login, run the real `fj` to refresh -- the developer's REAL Forgejo login. Point APPDATA at
+    an empty throwaway dir for every test; harmless where APPDATA is unused.
+    """
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata-isolated"))
 
 
 @pytest.fixture(autouse=True)
