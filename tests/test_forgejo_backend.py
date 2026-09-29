@@ -786,6 +786,36 @@ def test_transition_with_a_malformed_patch_response_is_an_error_not_a_stale_tick
         backend().transition("#40", State.DONE)
 
 
+def test_label_only_edit_does_not_close_an_open_issue_with_stale_cancelled_label(forge):
+    """task-cli#238: a natively-OPEN issue carrying a stale status:cancelled label must not
+    be silently re-closed by a metadata-only edit (e.g. `task change #N --label sp:3`)."""
+    forge.labels["status:cancelled"] = 99
+    forge.add(_issue(41, "Stale", state="open", labels=forge.label_rows(["status:cancelled"])))
+    b = backend()
+    t = b.get("#41")
+    assert t.state == State.CANCELLED  # derived from the stale label
+    t.labels.append("sp:3")
+    b.update(t)
+    patch_payloads = [c[2] for c in forge.calls if c[0] == "PATCH"]
+    # the only PATCH should be for labels (via PUT), NOT state
+    assert all("state" not in p for p in patch_payloads), (
+        "a label-only edit must not send state=closed in the PATCH"
+    )
+    assert forge.issues[41]["state"] == "open"  # still natively open
+
+
+def test_transition_still_closes_normally_when_state_label_changes(forge):
+    """The #238 fix must not block legitimate state transitions: when the state label itself
+    changes (e.g. status:todo → status:done), the native state should be patched."""
+    forge.add(_issue(42, "Normal", labels=forge.label_rows(["status:todo"])))
+    b = backend()
+    t = b.get("#42")
+    t.state = State.DONE
+    b.update(t)
+    patch_payloads = [c[2] for c in forge.calls if c[0] == "PATCH"]
+    assert any(p.get("state") == "closed" for p in patch_payloads)
+
+
 def test_scan_keeps_the_snapshot_of_the_ticket_it_returns(forge, monkeypatch):
     forge.add(_issue(2, "old title"))
     forge.add(_issue(1, "other"))

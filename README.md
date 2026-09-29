@@ -699,20 +699,28 @@ provider kinds:
   **Auto-install.** `laya` is never a hard dependency and never imported at module top —
   `task --help` and every other command stay dependency-free whether or not it's installed.
   The first time `task classify` actually reaches the `laya` step and finds the package not
-  importable, it auto-installs it once (`tasklib/laya_autoinstall.py`) before falling through
-  to the next provider:
-  1. `python3 -m pip install --user laya>=0.3.7,<0.4` (`python3` = `sys.executable`, i.e. the
+  importable, it auto-installs it once (`tasklib/laya_autoinstall.py`, task-cli#224) before
+  falling through to the next provider, routed to avoid ever touching a PEP-668-managed
+  system/Homebrew/pyenv Python's own site-packages rather than bypassing that protection:
+  1. Already inside a virtualenv (`sys.prefix != sys.base_prefix` — e.g. `uv tool install
+     hyper-task`, `pipx install hyper-task`, or a dev `.venv`): installs `laya>=0.3.7,<0.4`
+     straight into it via `uv pip install --python <sys.executable>` when a trusted `uv` is on
+     `$PATH` (a uv tool venv has no pip), else `<sys.executable> -m pip install` — always the
      exact interpreter `task classify` is already running under; the pin matches
-     `pyproject.toml`'s `laya` extra exactly — an unpinned install could pull a breaking
-     release `LayaClassifier`'s hand-parsed result shape can no longer read). Inside an
-     activated virtualenv, `--user` is dropped entirely (pip refuses it there outright) —
-     the venv's own site-packages is already an isolated, user-writable location.
-  2. If that fails specifically with pip's PEP 668 `externally-managed-environment` error
-     (a Homebrew/distro-managed Python — verified on real machines), retries ONCE with
-     `--user --break-system-packages` — the fix pip's own error message recommends. `--user`
-     confines the install to your OWN site-packages, never a Homebrew-managed or system file,
-     which is what makes auto-appending that flag safe without asking first. A different
-     failure (no network, disk full, ...) never gets this retry, and neither does a venv.
+     `pyproject.toml`'s `laya` extra exactly (an unpinned install could pull a breaking
+     release `LayaClassifier`'s hand-parsed result shape can no longer read). A venv's own
+     site-packages is already isolated and user-writable, so nothing further is needed.
+  2. Not in a virtualenv (a system/Homebrew/distro Python, possibly PEP-668-managed):
+     installs into a SEPARATE, dedicated venv this module owns and manages, under
+     `~/.local/state/task-cli/laya_autoinstall/laya_venv-py<major.minor>` — created once
+     (`uv venv --seed` when `uv` is on `$PATH`, else the stdlib `venv` module) and reused
+     thereafter, with `laya` going
+     into THAT venv's own interpreter. PEP 668's `externally-managed-environment` guard is a
+     property of the SYSTEM interpreter's own site-packages; it never fires against pip
+     running inside a venv, so this sidesteps the whole problem by construction — no retry
+     flag, no touching Homebrew/system-owned files, ever. A successful install is made
+     importable in the CURRENT process via `site.addsitedir()` on the venv's resolved
+     site-packages path.
 
   On success, the SAME `task classify` invocation retries and proceeds with `laya`
   immediately — no re-exec, no second run needed. On failure, it falls through to the next
@@ -721,9 +729,11 @@ provider kinds:
   (`$TASK_LAYA_AUTOINSTALL_COOLDOWN_S` to override) so a subsequent call on an offline machine
   skips the network attempt entirely instead of paying a pip-timeout tax on every invocation.
   A corrupted/unreadable cache file fails OPEN (treated as "never attempted") rather than
-  wedging auto-install off permanently. `install.sh` also attempts this same two-step install,
-  best-effort, when you first install `task` — so on most machines `laya` is already present
-  before you ever run `task classify`.
+  wedging auto-install off permanently. `install.sh` also attempts this same install
+  (`scripts/lib/install_laya.sh`, a thin bash delegation straight into
+  `tasklib.laya_autoinstall.install()` — no separate/duplicated implementation), best-effort,
+  when you first install `task` — so on most machines `laya` is already present before you
+  ever run `task classify`.
 
   Not installed (and auto-install also failed/was skipped), its first-run HuggingFace model
   download fails (no network/disk/rate-limit), or the model call itself errors (logged to

@@ -388,7 +388,12 @@ class ForgejoBackend:
         if ticket.title != base.title:
             patch["title"] = ticket.title
         state = _native_state(ticket.state)
-        if state != base.state:
+        # Only patch native open/closed state when the state LABEL is actually changing —
+        # a stale `status:cancelled` on an open issue must not silently re-close it on a
+        # label-only edit (task-cli#238).  When the label already matches (the issue was
+        # fetched with that label), the native state was already open and the label is just
+        # stale from an out-of-band reopen; let the native state stay as-is.
+        if state != base.state and _STATE_LABEL.get(ticket.state) not in base.labels:
             patch["state"] = state
         due = ticket.due.strip()
         if due != base.due:

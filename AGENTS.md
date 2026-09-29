@@ -197,18 +197,21 @@ docstring, and `test_build_classifier_chain_default_fallbacks_is_a_single_review
 
 `LayaClassifier.available()` auto-installs the package (once per instance, i.e. once per
 `task classify` invocation) the first time it's found genuinely not importable: see
-`tasklib/laya_autoinstall.py`'s module docstring for the full pip PEP-668/
-`--break-system-packages`/24h-cooldown-cache design (live-verified end to end: a real PEP 668
-externally-managed-environment failure on the first attempt, an automatic
-`--break-system-packages` retry, a real install, and a real loaded `laya` model producing a
-live classification, all in one `task classify` invocation). `available()` deliberately
-routes ONLY the `find_spec() is None` branch into the auto-installer -- a `find_spec`
-exception (broken/partial install metadata) is a different, weirder failure and is left
-alone, matching the pre-#208 "treat as not installed, don't reinstall over it" posture.
+`tasklib/laya_autoinstall.py`'s module docstring for the full dedicated-venv/24h-cooldown-cache
+design (task-cli#224, live-verified end to end against a real PEP-668-managed Homebrew Python:
+a dedicated venv created under `~/.local/state/task-cli/laya_autoinstall/laya_venv-py<major.
+minor>`, a real install into it, a `site.addsitedir` bolt-on making it importable in the
+running process, and a real loaded `laya` model producing a live classification, all in one
+`task classify` invocation — never touching system/Homebrew-managed site-packages, and no
+escalating pip flag anywhere). `available()` deliberately routes ONLY the `find_spec() is
+None` branch into the auto-installer -- a `find_spec` exception (broken/partial install
+metadata) is a different, weirder failure and is left alone, matching the pre-#208
+"treat as not installed, don't reinstall over it" posture.
 `install.sh` also attempts this same best-effort, non-fatal install
-(`scripts/lib/install_laya.sh`) against `command -v python3` (the interpreter `bin/task`'s
-shebang resolves to) when `task` itself is installed, so on most machines the runtime
-auto-install path is never even needed.
+(`scripts/lib/install_laya.sh`, a thin delegation into `tasklib.laya_autoinstall.install()`
+itself since task-cli#224) against `command -v python3` (the interpreter `bin/task`'s shebang
+resolves to) when `task` itself is installed, so on most machines the runtime auto-install
+path is never even needed.
 
 - **`ReviewCliClassifier`** — the original path, refactored in place, unchanged behavior:
   resolves the **first available** model in the per-provider fallback chain
