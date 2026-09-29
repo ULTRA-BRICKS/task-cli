@@ -131,6 +131,10 @@ def backend_coordinate(backend) -> str:
         team = str(getattr(backend, "team_key", "") or "").strip().upper()
         project = str(getattr(backend, "project", "") or "").strip()
         return f"linear:{team}/{project}" if project else f"linear:{team}"
+    if backend.name == "tasks":
+        url = str(getattr(backend, "url", "") or "").strip()
+        team = str(getattr(backend, "team_key", "") or "").strip().upper()
+        return f"tasks:{url}/{team}" if team else f"tasks:{url}"
     owner = str(getattr(backend, "owner", "") or "").strip().lower()
     repo = str(getattr(backend, "repo", "") or "").strip().lower()
     return f"github-issues:{owner}/{repo}"
@@ -189,4 +193,8 @@ def get_backend(config, *, env: dict | None = None):
         from .linear import LinearBackend
 
         return LinearBackend.from_config(config, env=env)
+    if backend == "tasks":
+        from .tasks import TasksBackend
+
+        return TasksBackend.from_config(config, env=env)
     raise BackendError(f"unknown backend {backend!r}")

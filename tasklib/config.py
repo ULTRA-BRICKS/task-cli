@@ -35,7 +35,7 @@ from typing import Any
 CONFIG_FILENAME = "task.yaml"
 RIG_CONFIG_FILENAME = "rig.yaml"
 
-VALID_BACKENDS = {"github-issues", "linear"}
+VALID_BACKENDS = {"github-issues", "linear", "tasks"}
 
 # How a screenshot/file gets attached to a ticket (tg#11652, CTO decision — originally Linear-
 # only; extended to GitHub too by tg#16794/review-cli#484, see backends/github_issues.py's module
@@ -106,7 +106,11 @@ _RIG_TASK_ALIASES: dict[str, tuple[tuple[str, ...], ...]] = {
     "team": (("linear", "team"),),
     "project": (("linear", "project"),),
     "repo": (("github", "repo"),),
-    "attachment_mode": (("linear", "attachment_mode"), ("github", "attachment_mode")),
+    "attachment_mode": (
+        ("linear", "attachment_mode"),
+        ("github", "attachment_mode"),
+        ("tasks", "attachment_mode"),
+    ),
 }
 # Keys passed through verbatim (same name in both shapes): the backend selector + the nested
 # sections a power user might want to override straight from rig.yaml. ``version`` is
@@ -118,6 +122,7 @@ _RIG_TASK_PASSTHROUGH = frozenset(
         "backend",
         "github",
         "linear",
+        "tasks",
         "projects",
         "enforce",
         "classify",
@@ -246,6 +251,7 @@ DEFAULTS: dict[str, Any] = {
     "backend": "github-issues",
     "github": {"repo": "auto", "default_labels": ["agent"], "attachment_mode": "native"},
     "linear": {"team": "", "project": "", "attachment_mode": "native"},
+    "tasks": {"url": "", "team": "", "attachment_mode": "native"},
     # Extra hostnames (repo-configured) `_save_attachments` treats as safe to auto-fetch bytes
     # from even though they aren't the tracker's own native asset domain — e.g. a repo's own
     # GitHub Pages host. Empty by default (secure-by-default: unchanged behavior). Fetched
@@ -404,6 +410,12 @@ class LoadedConfig:
         return str(self.section("github").get("attachment_mode", "native"))
 
     @property
+    def tasks_attachment_mode(self) -> str:
+        """``"native"`` (real Tasks attachment upload) or ``"link"`` (never re-host a local
+        file; only register an already-hosted URL). See :data:`VALID_ATTACHMENT_MODES`."""
+        return str(self.section("tasks").get("attachment_mode", "native"))
+
+    @property
     def trusted_attachment_hosts(self) -> frozenset[str]:
         """Extra hostnames (repo-configured, top-level ``trusted_attachment_hosts:``) that
         ``_save_attachments`` treats as safe to auto-fetch bytes from, even though they are not
@@ -537,7 +549,11 @@ def load(
             )
         merged = _deep_merge(
             merged,
-            {"linear": {"attachment_mode": override}, "github": {"attachment_mode": override}},
+            {
+                "linear": {"attachment_mode": override},
+                "github": {"attachment_mode": override},
+                "tasks": {"attachment_mode": override},
+            },
         )
         layers.append(f"env:{ATTACHMENT_MODE_ENV_VAR}={override}")
 
@@ -563,7 +579,7 @@ def validate(data: dict[str, Any]) -> None:
     if not isinstance(backend, str) or backend not in VALID_BACKENDS:
         raise ConfigError(f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r}")
 
-    for key in ("github", "linear", "enforce", "classify", "session"):
+    for key in ("github", "linear", "tasks", "enforce", "classify", "session"):
         if key in data and not isinstance(data[key], dict):
             raise ConfigError(f"'{key}' must be a mapping")
 
@@ -583,6 +599,14 @@ def validate(data: dict[str, Any]) -> None:
         # now backend-agnostic) — same isinstance-before-membership guard.
         if not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES:
             raise ConfigError(f"github.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)}, got {mode!r}")
+
+    tasks = data.get("tasks")
+    if isinstance(tasks, dict) and "attachment_mode" in tasks:
+        mode = tasks["attachment_mode"]
+        # Symmetric with `linear.attachment_mode`/`github.attachment_mode` above — same
+        # isinstance-before-membership guard.
+        if not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES:
+            raise ConfigError(f"tasks.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)}, got {mode!r}")
 
     if "trusted_attachment_hosts" in data:
         hosts = data["trusted_attachment_hosts"]
