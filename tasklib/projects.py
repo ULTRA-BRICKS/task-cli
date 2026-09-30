@@ -52,6 +52,11 @@ class Project:
             team = str(lin.get("team", "")).strip().upper()
             project = str(lin.get("project", "")).strip()
             return f"linear:{team}/{project}" if project else f"linear:{team}"
+        if self.backend == "tasks":
+            tasks = self.overlay.get("tasks", {})
+            url = str(tasks.get("url", "")).strip()
+            team = str(tasks.get("team", "")).strip().upper()
+            return f"tasks:{url}/{team}" if team else f"tasks:{url}"
         repo = str(self.overlay.get("github", {}).get("repo", "")).strip().lower()
         return f"github-issues:{repo}"
 
@@ -62,12 +67,15 @@ def projects_from_config(data: dict[str, Any]) -> list[Project]:
     Each entry is a mapping. Recognized keys::
 
         - name:    display label for the group (defaults to the repo/team coordinate)
-        - backend: github-issues | linear (defaults to the top-level ``backend``)
+        - backend: github-issues | linear | tasks (defaults to the top-level ``backend``)
         - repo:    owner/name              (github-issues shorthand)
         - github:  {repo: owner/name}      (explicit github block)
         - team:    HYP                      (linear shorthand)
         - project: <id>                     (linear project, optional)
         - linear:  {team: HYP, project: <id>}
+        - tasks:   {url: https://..., team: GL}  (tasks — no flat shorthand: ``team`` alone
+                     is already claimed by the linear shorthand above, so a tasks entry is
+                     always the nested ``tasks:`` block)
 
     A malformed entry (not a mapping, or missing the backend coordinate) is skipped rather
     than aborting the whole registry — the aggregation is best-effort by design.
@@ -97,6 +105,8 @@ def _project_from_entry(entry: Any, default_backend: str) -> Project | None:
         return _github_project(entry, backend)
     if backend == "linear":
         return _linear_project(entry, backend)
+    if backend == "tasks":
+        return _tasks_project(entry, backend)
     return None
 
 
@@ -104,18 +114,21 @@ def _backend_from_shape(entry: dict[str, Any]) -> str | None:
     """Infer a registry entry's backend from its OWN coordinate keys, before the merged default.
 
     A global ``projects:`` entry carries an unambiguous coordinate (``repo``/``github`` → GitHub,
-    ``team``/``linear`` → Linear). The top-level ``backend`` is the cwd repo's choice and must NOT
-    reinterpret these: inside a Linear-backed repo the merged default is ``linear``, which would
-    otherwise turn a registered ``{repo: acme/web}`` GitHub shorthand into a teamless Linear entry
-    and silently drop it from ``task list --all``. An entry with neither shape (or both) falls back
-    to ``default_backend`` unchanged.
+    ``team``/``linear`` → Linear, ``tasks`` → Tasks). The top-level ``backend`` is the cwd repo's
+    choice and must NOT reinterpret these: inside a Linear-backed repo the merged default is
+    ``linear``, which would otherwise turn a registered ``{repo: acme/web}`` GitHub shorthand
+    into a teamless Linear entry and silently drop it from ``task list --all``. An entry with
+    none of the three shapes (or more than one) falls back to ``default_backend`` unchanged.
     """
     has_github = bool(entry.get("repo") or isinstance(entry.get("github"), dict))
     has_linear = bool(entry.get("team") or isinstance(entry.get("linear"), dict))
-    if has_github and not has_linear:
+    has_tasks = bool(isinstance(entry.get("tasks"), dict) and entry["tasks"].get("url"))
+    if has_github and not (has_linear or has_tasks):
         return "github-issues"
-    if has_linear and not has_github:
+    if has_linear and not (has_github or has_tasks):
         return "linear"
+    if has_tasks and not (has_github or has_linear):
+        return "tasks"
     return None
 
 
@@ -139,6 +152,17 @@ def _linear_project(entry: dict[str, Any], backend: str) -> Project | None:
     project_id = str(entry.get("project") or lin.get("project") or "").strip()
     name = str(entry.get("name") or (f"{team}/{project_id}" if project_id else team)).strip()
     overlay: dict[str, Any] = {"backend": "linear", "linear": {"team": team, "project": project_id}}
+    return Project(name=name, backend=backend, overlay=overlay)
+
+
+def _tasks_project(entry: dict[str, Any], backend: str) -> Project | None:
+    tasks = entry.get("tasks") if isinstance(entry.get("tasks"), dict) else {}
+    url = str(tasks.get("url") or "").strip()
+    team = str(tasks.get("team") or "").strip()
+    if not url or not team:
+        return None
+    name = str(entry.get("name") or f"{team}@{url}").strip()
+    overlay: dict[str, Any] = {"backend": "tasks", "tasks": {"url": url, "team": team}}
     return Project(name=name, backend=backend, overlay=overlay)
 
 
