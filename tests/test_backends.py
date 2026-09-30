@@ -556,6 +556,63 @@ def test_github_current_user_returns_none_on_backend_error(monkeypatch):
     assert be.current_user() is None
 
 
+def test_github_default_labels_stamped_on_create_but_not_resurrected_on_update(monkeypatch):
+    # task-cli#244 review: update() re-prepended default_labels, so `task change --unlabel
+    # agent` PATCHed the removed label straight back while the CLI still reported success.
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", default_labels=("agent", "triage"))
+    sent = []
+
+    def fake_call(url, *, method="GET", payload=None):
+        sent.append((method, payload))
+        return {
+            "number": 1,
+            "title": payload["title"],
+            "state": payload.get("state", "open"),
+            "labels": [{"name": name} for name in payload["labels"]],
+            "body": payload["body"],
+        }
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    created = be.create(_ticket())
+    assert sent[0][0] == "POST"
+    assert {"agent", "triage", "session:s1", "status:todo"} <= set(sent[0][1]["labels"])
+
+    created.labels = [label for label in created.labels if label != "agent"]
+    updated = be.update(created)
+    assert sent[1][0] == "PATCH"
+    assert sorted(sent[1][1]["labels"]) == ["session:s1", "status:todo", "triage"]
+    assert "agent" not in updated.labels
+
+
+def test_github_update_keeps_a_status_prefixed_default_label_it_does_not_manage(monkeypatch):
+    # task-cli#244 review (Codex): with defaults stamped at create only, `_row_to_ticket`
+    # stripping EVERY `status:*` label made the next update delete a configured default like
+    # `status:security-review`. Only the managed state labels are stripped now.
+    be = GitHubIssuesBackend(owner="o", repo="r", token="t", default_labels=("status:security-review",))
+    sent = []
+
+    def fake_call(url, *, method="GET", payload=None):
+        sent.append((method, payload))
+        return {
+            "number": 1,
+            "title": payload["title"],
+            "state": "open",
+            "labels": [{"name": name} for name in payload["labels"]],
+            "body": payload["body"],
+        }
+
+    monkeypatch.setattr(be, "_call", fake_call)
+    created = be.create(_ticket())
+    assert "status:security-review" in created.labels
+    assert "status:todo" not in created.labels
+
+    created.state = State.IN_PROGRESS
+    be.update(created)
+    assert sorted(sent[1][1]["labels"]) == [
+        "agent", "session:s1", "status:in-progress", "status:security-review"
+    ]
+
+
 def test_github_list_state_filter_scans_full_page_not_just_limit(monkeypatch):
     # HYP-1347 P1 review finding: `list()` used to send `per_page=min(limit, 100)` and only
     # filter by `state` AFTER the fetch — so a repo with `limit` or more non-matching issues

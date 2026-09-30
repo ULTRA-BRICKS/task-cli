@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.22.0 — 2026-09-30
+
+- New `task change <id> --unlabel <label>` (repeatable) removes a label the ticket carries and
+  keeps every other one (task-cli#244) — e.g. a duplicate `priority:<Pn>`. A label the ticket
+  does not carry, a blank name, or one the same command also adds with `--label` is refused
+  before anything is written. `task create`/`task change --label` refuse a blank name too.
+- GitHub backend: `default_labels` are stamped only when a ticket is created; an update sends
+  exactly the ticket's labels, so removing a default label sticks instead of being re-added.
+  Only the managed `status:<state>` labels are stripped from a ticket's labels, so any other
+  `status:*` label (e.g. a `status:security-review` default) survives an update.
+
 ## 0.21.0 — 2026-09-30
 
 - `task classify` is fast on repeat calls (task-cli#245): the `laya` provider keeps the model
