@@ -6,6 +6,7 @@ shell-out is monkeypatched too. No network, no gh/linear/review subprocess.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 import pytest
@@ -6405,6 +6406,23 @@ def test_list_does_not_send_tg_notification(monkeypatch, _inject_fake):
     rc = main(["list"])
     assert rc == 0
     assert calls == [], "list must not trigger a notification"
+
+
+def test_suite_mutation_never_spawns_a_tg_binary(tmp_path, monkeypatch, _inject_fake, _no_real_tg_notifier):
+    """task-cli#239: with the zero-config `tg --tag report` notifier, a mutating command in the
+    suite must never spawn whatever `tg` is on PATH (the real one posts to Telegram)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "tg-invocations.log"
+    fake_tg = bin_dir / "tg"
+    fake_tg.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+    fake_tg.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    assert main(_create_argv()) == 0
+
+    assert not log.exists(), f"a tg binary was spawned: {log.read_text()!r}"
+    assert [notifier[0] for _msg, notifier in _no_real_tg_notifier] == ["tg"]
 
 
 def test_notification_disabled_by_config(monkeypatch, _inject_fake):

@@ -323,7 +323,8 @@ one local harness task.
 
 - `PYTHON=.venv/bin/python python3 -m pytest -q` — the unit suite. Fast, hermetic; uses the
   `FakeBackend` and `tmp_path`/isolated `$HOME`/`$XDG_*`. Tests never touch the real HOME,
-  real credentials, or a live provider.
+  real credentials, a live provider, or the real `tg` notifier (conftest's autouse
+  `_no_real_tg_notifier` records every `tg` mutation notice instead of spawning it — task-cli#239).
 - `bash tests/smoke.sh` — end-to-end: `--help`, every subcommand `--help`, the lazy-import
   invariant, zero-config load, and pytest. No token used.
 - Add a test with every behavior change. TDD red-first is the house style.

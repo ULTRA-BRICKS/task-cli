@@ -146,6 +146,34 @@ def _no_real_laya_autoinstall(monkeypatch):
     monkeypatch.setattr(_importlib_util, "find_spec", _find_spec_never_finds_laya)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_tg_notifier(monkeypatch):
+    """task-cli#239: every ticket mutation calls `daemon.notify` with the configured notifier,
+    whose zero-config default is the REAL `tg --tag report` (tg-cli) — so a plain full-suite
+    run posted a fake "[task created] #1: ..." to the owner's Telegram report channel for every
+    mutating test. A `tg` notifier (bare name or any path ending in `tg`) is recorded here and
+    never spawned; any other notifier argv passes through to the real `notify`, so the tests of
+    `notify` itself keep exercising its subprocess handling against harmless stand-ins
+    (`true`/`false`/a missing binary). Returns the recorded `(message, notifier)` calls.
+
+    Autouse so no test can leak by forgetting to opt in; a test that captures `notify` itself
+    (`monkeypatch.setattr(daemon, "notify", ...)`) still wins, being applied after this.
+    """
+    from tasklib import daemon
+
+    real_notify = daemon.notify
+    sent: list[tuple[str, tuple[str, ...]]] = []
+
+    def _notify_without_real_tg(message, notifier):
+        if notifier and Path(notifier[0]).name == "tg":
+            sent.append((message, tuple(notifier)))
+            return True
+        return real_notify(message, notifier)
+
+    monkeypatch.setattr(daemon, "notify", _notify_without_real_tg)
+    return sent
+
+
 class FakeBackend:
     """An in-memory ``TicketBackend`` — round-trips through render/parse like a real one.
 

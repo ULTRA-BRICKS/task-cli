@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.21.1 — 2026-10-01
+
+- The test suite no longer spawns the real `tg --tag report` notifier (task-cli#239): an autouse
+  fixture records any `tg` notifier call instead, so a full run posts nothing to Telegram.
+
 ## 0.21.0 — 2026-09-30
 
 - `task classify` is fast on repeat calls (task-cli#245): the `laya` provider keeps the model
