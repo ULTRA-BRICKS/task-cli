@@ -88,6 +88,20 @@ def _sane_umask():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_classify_server(monkeypatch):
+    """task-cli#245: `LayaClassifier.classify` talks to (and lazily SPAWNS) a machine-wide warm
+    classify server by default. No test may reach a real one -- that would load the real model
+    in a detached process that outlives the suite. `tests/test_classify_server.py` drives the
+    server functions directly on throwaway sockets; tests of the client wiring re-enable it
+    per-test with their own monkeypatches. Likewise the laya load never consults the REAL
+    HuggingFace cache (`_cached_laya_snapshot`), so a developer machine that has the checkpoint
+    cached sees the same `laya.load(<hub id>)` call as CI.
+    """
+    monkeypatch.setenv("TASK_CLASSIFY_SERVER", "0")
+    monkeypatch.setattr("tasklib.classifiers._cached_laya_snapshot", lambda model_id: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_laya_autoinstall(monkeypatch):
     """task-cli#208 review finding: `laya` is now the zero-config DEFAULT `classify.fallbacks`
     head (`config.DEFAULTS`), and `LayaClassifier.available()` auto-installs the real package

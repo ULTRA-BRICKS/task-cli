@@ -37,7 +37,7 @@ from .stdio import ensure_utf8_stdio
 from .transitions import TransitionError, validate_transition
 
 if TYPE_CHECKING:
-    from .classify import Classification
+    from .classify import Classification, Verdict
     from .links import LinkEntry
     from .policy import Violation
 
@@ -581,7 +581,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="classify a message change|actionable|justAsk (the tg hook entry)",
     )
-    clp.add_argument("text", help="the message text")
+    clp.add_argument("text", nargs="?", help="the message text (omit with --batch)")
     clp.add_argument(
         "--create",
         action="store_true",
@@ -589,6 +589,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     clp.add_argument(
         "--update", metavar="ID", help="on a `change` verdict, append to this ticket"
+    )
+    clp.add_argument(
+        "--batch",
+        action="store_true",
+        help=(
+            'classify many messages: stdin JSONL {"text": ..., "id"?: ...} -> stdout JSONL '
+            "(one verdict object per line, id echoed); classification only"
+        ),
+    )
+    clp.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show the local model's load progress and warnings on stderr",
     )
 
     # session
@@ -5667,6 +5680,12 @@ def cmd_classify(args: argparse.Namespace) -> int:
     is stripped again per-part by `_derive_title_from_message`, exactly as the single-item path
     already does, so it never leaks into a derived title.
     """
+    if args.batch:
+        if args.text is not None or args.create or args.update:
+            raise _UserError("--batch reads JSONL from stdin: it takes no TEXT and no --create/--update")
+        return _classify_batch(args, _load(args))
+    if args.text is None:
+        raise _UserError("classify needs the message TEXT (or --batch with JSONL on stdin)")
     cfg = _load(args)
     if args.create and not args.update:
         from .classify import detect_multi_ask
@@ -5789,89 +5808,21 @@ def _classify_one(
     `classify.route_process_to_harness` is disabled, in which case it falls through to the
     normal product-ticket path unchanged.
     """
-    from .classifiers import build_classifier_chain
-    from .classify import Verdict, default_classification
+    from .classify import Verdict
 
-    # `actionable` (task-cli#80) is deliberately EXCLUDED from the configurable-bias set (review
-    # finding): it's a genuine model-signaled verdict, never a "when confused, assume this"
-    # default. Allowing it as a bias would mean every no-provider/ambiguous message under
-    # `classify_bias: actionable` silently drops (no ticket, no execution) instead of degrading
-    # to a safe extra ticket (`change`) or a safe no-op question (`justAsk`).
-    bias = (
-        Verdict(cfg.classify_bias)
-        if cfg.classify_bias in ("change", "justAsk")
-        else Verdict.CHANGE
+    classification, used_label = _classify_text(
+        args.text, _classifier_chain(args, cfg), _classify_bias(cfg)
     )
-    # task-cli#206: `build_classifier_chain` turns `classify.fallbacks` into an ordered list of
-    # `ClassifierProvider`s (laya entries + one ReviewCliClassifier group per review-cli run —
-    # see `tasklib/classifiers.py`). Walk it and use the first provider that is BOTH available
-    # AND actually produces a classification -- a provider that looks reachable but fails at
-    # runtime (e.g. laya's model download/predict) falls through to the next one, same
-    # graceful-degradation posture as the old single-provider "no reachable provider" path.
-    #
-    # `cfg.classify_fallbacks` is passed through AS-IS (task-cli#208 review finding) -- never
-    # coalesced to `None` on an empty list. `config.py`'s cascade always supplies SOME
-    # fallbacks list (`DEFAULTS` at minimum), so `[]` here means either a repo explicitly
-    # wrote `classify: {fallbacks: []}`/`fallbacks: null` (deliberately disabling every
-    # classifier, falling straight to the bias default), OR every configured entry was
-    # malformed and silently dropped (`config.LoadedConfig.classify_fallbacks` only keeps
-    # single-key `{provider: model}` maps). Coalescing `[]` to `None` would silently
-    # reinterpret EITHER case as "unconfigured" and hand it the FULL zero-config default
-    # chain instead, the exact "explicit config is never altered" invariant this ticket's own
-    # docs promise. A malformed-entries-only config (a typo, not an intentional opt-out) now
-    # gets the SAME zero-providers outcome instead of silently falling back to a working LLM
-    # chain (the pre-#208 `or None` coalescing papered over that case too) -- a deliberate,
-    # explicit-empty-list-respecting tradeoff, not a case this ticket set out to distinguish
-    # from a genuine intentional opt-out; a malformed config silently degrading to the bias
-    # default is a pre-existing class of gap (`classify_fallbacks` already dropped malformed
-    # entries with no warning before this ticket) that this ticket does not newly fix.
-    providers = build_classifier_chain(
-        cfg.classify_fallbacks, capability=cfg.classify_capability or None
-    )
-    classification = None
-    used_label = "none"
-    for provider in providers:
-        if not provider.available():
-            continue
-        classification = provider.classify(args.text, bias)
-        if classification is not None:
-            used_label = provider.label
-            break
-    if classification is None:
-        # no provider reachable (or every reachable one failed at runtime) → bias-decide,
-        # still observable. The three new axes have no model output to read either, so they
-        # take classify.py's own fixed safe defaults (default_classification — the single
-        # source of truth, never hand-copied here).
-        classification = default_classification(bias)
-        print(
-            _warn(f"  no classifier provider available; biasing to {classification.verdict.value}"),
-            file=sys.stderr,  # a warning, not the verdict/axes/--json unit stdout callers parse
-        )
     verdict = classification.verdict
     # `actionable`/`justAsk` never mint a ticket, so their axes are moot — computed once here
-    # rather than repeating `verdict is Verdict.CHANGE` at every log_event/`--json`/human site.
+    # rather than repeating `verdict is Verdict.CHANGE` at every output site.
     axes = classification if verdict is Verdict.CHANGE else None
-
-    from .logging import log_event
-
-    log_event(
-        "classify",
-        verdict=verdict.value,
-        model=used_label,
-        process_or_product=(axes.process_or_product if axes is not None else None),
-        priority=(axes.priority if axes is not None else None),
-        story_points=(axes.story_points if axes is not None else None),
-    )
+    _log_classification(classification, used_label)
 
     if args.json:
         import json
 
-        payload = {"verdict": verdict.value}
-        if axes is not None:
-            payload["process_or_product"] = axes.process_or_product
-            payload["priority"] = axes.priority
-            payload["story_points"] = axes.story_points
-        print(json.dumps(payload, ensure_ascii=False))
+        print(json.dumps(_classification_payload(classification), ensure_ascii=False))
     else:
         print(f"{verdict.value}")
         if axes is not None:
@@ -5914,6 +5865,163 @@ def _classify_one(
             )
         return _classify_create(args, cfg, classification, batch_resolved_ids=batch_resolved_ids)
     return 0
+
+
+def _classify_bias(cfg) -> "Verdict":
+    """The verdict to fall back to when no provider classifies (`classify_bias`).
+
+    `actionable` (task-cli#80) is deliberately EXCLUDED from the configurable-bias set (review
+    finding): it's a genuine model-signaled verdict, never a "when confused, assume this"
+    default. Allowing it as a bias would mean every no-provider/ambiguous message under
+    `classify_bias: actionable` silently drops (no ticket, no execution) instead of degrading
+    to a safe extra ticket (`change`) or a safe no-op question (`justAsk`).
+    """
+    from .classify import Verdict
+
+    return Verdict(cfg.classify_bias) if cfg.classify_bias in ("change", "justAsk") else Verdict.CHANGE
+
+
+def _classifier_chain(args: argparse.Namespace, cfg) -> list:
+    """The ordered provider chain for this invocation (task-cli#206, `tasklib/classifiers.py`).
+
+    `cfg.classify_fallbacks` is passed through AS-IS (task-cli#208 review finding) -- never
+    coalesced to `None` on an empty list. `config.py`'s cascade always supplies SOME fallbacks
+    list (`DEFAULTS` at minimum), so `[]` here means either a repo explicitly wrote
+    `classify: {fallbacks: []}` (deliberately disabling every classifier, falling straight to
+    the bias default), OR every configured entry was malformed and silently dropped
+    (`config.LoadedConfig.classify_fallbacks` only keeps single-key `{provider: model}` maps).
+    Coalescing `[]` to `None` would silently reinterpret EITHER case as "unconfigured" and hand
+    it the FULL zero-config default chain instead, breaking the "explicit config is never
+    altered" invariant. A malformed-entries-only config silently degrading to the bias default
+    is a pre-existing gap this does not newly fix.
+    """
+    from .classifiers import build_classifier_chain
+
+    return build_classifier_chain(
+        cfg.classify_fallbacks,
+        capability=cfg.classify_capability or None,
+        verbose=bool(getattr(args, "verbose", False)),
+    )
+
+
+def _classify_text(text: str, providers: list, bias: "Verdict") -> tuple["Classification", str]:
+    """Classify one message: guard rules around the first provider that answers.
+
+    Walks `providers` and uses the first one that is BOTH available AND actually produces a
+    classification -- a provider that looks reachable but fails at runtime (e.g. laya's model
+    download/predict) falls through to the next one. No answer at all -> `classify_bias` with
+    classify.py's fixed safe axes (`default_classification`), plus a stderr warning.
+
+    task-cli#245 guard rules (`classify.is_small_talk`/`looks_like_bug_report`, applied to the
+    tg-cli-inbound-wrap-stripped body): a greeting or tiny text is `justAsk` WITHOUT running any
+    provider, and a `justAsk` verdict on plain defect prose is corrected to `change`
+    (keeping the provider's axes). Returns `(classification, used_label)`; a rule's involvement
+    shows in the label (`rule:small-talk`, `<provider>+rule:bug-report`).
+    """
+    import dataclasses
+
+    from .classify import Verdict, default_classification, is_small_talk, looks_like_bug_report
+    from .msgrefs import strip_inbound_wrap
+
+    body = strip_inbound_wrap(text.strip())
+    if is_small_talk(body):
+        return default_classification(Verdict.JUST_ASK), "rule:small-talk"
+    classification = None
+    used_label = "none"
+    for provider in providers:
+        if not provider.available():
+            continue
+        classification = provider.classify(text, bias)
+        if classification is not None:
+            used_label = provider.label
+            break
+    if classification is None:
+        classification = default_classification(bias)
+        print(
+            _warn(f"  no classifier provider available; biasing to {classification.verdict.value}"),
+            file=sys.stderr,  # a warning, not the verdict/axes/--json unit stdout callers parse
+        )
+    # Only justAsk: an `actionable` verdict must never become a ticket (task-cli#80).
+    if classification.verdict is Verdict.JUST_ASK and looks_like_bug_report(body):
+        classification = dataclasses.replace(classification, verdict=Verdict.CHANGE)
+        used_label = f"{used_label}+rule:bug-report"
+    return classification, used_label
+
+
+def _classification_payload(classification: "Classification") -> dict:
+    """The `--json` unit: the verdict, plus the ticket-shaping axes only on `change`."""
+    from .classify import Verdict
+
+    payload: dict = {"verdict": classification.verdict.value}
+    if classification.verdict is Verdict.CHANGE:
+        payload["process_or_product"] = classification.process_or_product
+        payload["priority"] = classification.priority
+        payload["story_points"] = classification.story_points
+    return payload
+
+
+def _log_classification(classification: "Classification", used_label: str) -> None:
+    from .logging import log_event
+
+    payload = _classification_payload(classification)
+    log_event(
+        "classify",
+        verdict=payload["verdict"],
+        model=used_label,
+        process_or_product=payload.get("process_or_product"),
+        priority=payload.get("priority"),
+        story_points=payload.get("story_points"),
+    )
+
+
+def _classify_batch(args: argparse.Namespace, cfg) -> int:
+    """`task classify --batch`: stdin JSONL in, stdout JSONL out, one provider chain for all.
+
+    Each input line is `{"text": "...", "id": <anything>?}`; each output line is that message's
+    `--json` unit with `id` echoed when given. Building the chain ONCE is the point
+    (task-cli#245): a grooming pass over N tickets pays the provider's startup (the local
+    model's load, when the warm server is off) once instead of N times. Classification only --
+    no ticket side effects. A bad line yields `{"line": n, "error": ...}` (plus its `id` when it
+    had one) and the batch continues; the exit code is then 2.
+    """
+    import json
+
+    providers = _classifier_chain(args, cfg)
+    bias = _classify_bias(cfg)
+    rc = 0
+    for lineno, raw in enumerate(sys.stdin, 1):
+        if not raw.strip():
+            continue
+        try:
+            item = json.loads(raw)
+        except ValueError:
+            item = None
+        if not isinstance(item, dict):
+            print(
+                json.dumps({"line": lineno, "error": "not a JSON object"}, ensure_ascii=False),
+                flush=True,
+            )
+            rc = 2
+            continue
+        head = {"id": item["id"]} if "id" in item else {}
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            print(
+                json.dumps(
+                    {**head, "line": lineno, "error": 'missing a non-empty "text" string'},
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            rc = 2
+            continue
+        classification, used_label = _classify_text(text, providers, bias)
+        _log_classification(classification, used_label)
+        print(
+            json.dumps({**head, **_classification_payload(classification)}, ensure_ascii=False),
+            flush=True,
+        )
+    return rc
 
 
 def _inferred_module_labels(cfg, text: str) -> list[str]:

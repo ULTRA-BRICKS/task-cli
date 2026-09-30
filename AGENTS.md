@@ -20,8 +20,9 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
 - **Backends call the provider API DIRECTLY** (stdlib `urllib`, no per-call subprocess):
   GitHub REST, Linear GraphQL. The only subprocesses are the one-shot `gh auth token`
   (credential harvest), a one-shot `fj -H <host> whoami` when fj's stored OAuth token has
-  expired (fj refreshes its own store), and the classify shell-out to `review`. Never spawn a
-  CLI per API call.
+  expired (fj refreshes its own store), the classify shell-out to `review`, and the one detached
+  warm laya classify server (`tasklib/classify_server.py`, at most one surviving per idle
+  period — see Classification). Never spawn a CLI per API call.
 - **Credentials are harvested, never re-prompted, never logged.** GitHub from
   `$GITHUB_TOKEN` → `gh auth token` → `hosts.yml`; Linear from `$LINEAR_API_KEY` →
   `~/.config/linear/credentials.toml`. All logging goes through `tasklib.logging` which
@@ -267,6 +268,21 @@ path relative to the current working directory — `laya.load()`'s underlying
 `model_id_or_path` resolution treats an existing local path as authoritative over the Hub, so
 an unguarded lookup would let a planted `convaiinnovations/laya/` directory in the target
 repo shadow the real checkpoint (mirrors `bin/task`'s existing cwd-import-shadowing posture).
+
+**Warm laya server, guard rules, batch (task-cli#245).** `LayaClassifier.classify` first asks
+`classify_server.predict` — a detached, machine-wide `python -P -m tasklib.classify_server`
+that holds the loaded model and answers over a 0600 unix socket keyed by task-cli version;
+the first call spawns it (reusing `daemon`'s child-env/`-P` bootstrap) and waits for the
+socket, and every failure returns `None` so the provider loads in-process as before. The
+server takes a flock BEFORE loading (racing cold clients load once), carries no copy of the
+question schema (the client sends it), and exits after 15 idle minutes;
+`TASK_CLASSIFY_SERVER=0` disables it (`tests/conftest.py` sets that for every test, and also
+stubs `_cached_laya_snapshot`, the load's local-HF-cache-first lookup). `cli._classify_text`
+wraps EVERY provider in two pure rules from `classify.py`: `is_small_talk` → `justAsk` with
+no provider call, `looks_like_bug_report` → a `justAsk` verdict becomes `change`, axes kept
+(`actionable` stays: task-cli#80). `task classify --batch` (stdin JSONL → stdout JSONL,
+classification only) builds the
+chain once.
 
 **SP / priority / process-vs-product** (`classify.parse_classification` → `Classification`):
 the SAME `review` round-trip that yields the verdict also yields three axes on a `change`

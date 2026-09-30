@@ -5294,11 +5294,11 @@ def test_classify_process_route_title_and_body_starting_with_dash_are_safe(
         return types.SimpleNamespace(returncode=0, stdout="-x\n", stderr="")
 
     monkeypatch.setattr(cli.subprocess, "run", _fake_run)
-    rc = main(["classify", "--create", "--", "-x"])
+    rc = main(["classify", "--create", "--", "-x cleanup"])
     assert rc == 0
     argv = calls[0]
-    assert argv[3] == "--title=-x"
-    assert argv[4] == "--body=-x"
+    assert argv[3] == "--title=-x cleanup"
+    assert argv[4] == "--body=-x cleanup"
 
 
 def test_classify_actionable_with_process_axis_never_routes_to_harness(
@@ -8216,3 +8216,146 @@ def test_audit_does_not_flag_unresolvable_msgref_reference(_inject_fake, monkeyp
     rc = main(["audit"])
     assert rc == 0
 
+
+
+# ── task-cli#245: guard rules + `classify --batch` ─────────────────────────────────────────
+
+
+def _laya_only_chain(monkeypatch):
+    from tasklib.config import LoadedConfig
+
+    monkeypatch.setattr(
+        LoadedConfig, "classify_fallbacks", property(lambda self: [("laya", "local")])
+    )
+    monkeypatch.setattr("tasklib.classifiers.LayaClassifier.available", lambda self: True)
+
+
+def test_classify_small_talk_is_just_ask_without_running_the_model(
+    capsys, monkeypatch, _inject_fake
+):
+    # Live laya said `actionable` for "hi" (task-cli#245) -- a greeting never needs a model.
+    _laya_only_chain(monkeypatch)
+
+    def _never(self, message, bias):
+        raise AssertionError("small talk must not reach the model")
+
+    monkeypatch.setattr("tasklib.classifiers.LayaClassifier.classify", _never)
+    rc = main(["classify", "hi", "--json", "--create"])
+    assert rc == 0
+    import json
+
+    assert json.loads(capsys.readouterr().out) == {"verdict": "justAsk"}
+    assert _inject_fake.list() == []
+
+
+def test_classify_bug_report_overrides_a_just_ask_model_verdict(
+    capsys, monkeypatch, _inject_fake
+):
+    # Live laya said `justAsk` for the tg-cli#486 bug report (task-cli#245); the model's own
+    # axes are kept, only the verdict is corrected.
+    from tasklib.classify import Classification, Verdict
+
+    _laya_only_chain(monkeypatch)
+    monkeypatch.setattr(
+        "tasklib.classifiers.LayaClassifier.classify",
+        lambda self, message, bias: Classification(
+            verdict=Verdict.JUST_ASK, process_or_product="product", priority="P1", story_points=2
+        ),
+    )
+    text = (
+        "tg-cli test suite leaks its mkdtemp dirs in $TMPDIR and fills the disk. Integration "
+        "tests create per-test dirs with mkdtemp and do not remove them."
+    )
+    rc = main(["classify", text, "--json"])
+    assert rc == 0
+    import json
+
+    assert json.loads(capsys.readouterr().out) == {
+        "verdict": "change",
+        "process_or_product": "product",
+        "priority": "P1",
+        "story_points": 2,
+    }
+
+
+def test_classify_bug_report_rule_keeps_an_actionable_verdict(capsys, monkeypatch, _inject_fake):
+    # task-cli#80: an execute-this instruction never becomes a ticket, even when it mentions
+    # failures the bug-report rule would otherwise match.
+    from tasklib.classify import Classification, Verdict
+
+    _laya_only_chain(monkeypatch)
+    monkeypatch.setattr(
+        "tasklib.classifiers.LayaClassifier.classify",
+        lambda self, message, bias: Classification(
+            verdict=Verdict.ACTIONABLE, process_or_product="process", priority="P2", story_points=1
+        ),
+    )
+    text = "tail the server log and pull the errors from the failed deploy"
+    rc = main(["classify", text, "--json"])
+    assert rc == 0
+    import json
+
+    assert json.loads(capsys.readouterr().out) == {"verdict": "actionable"}
+
+
+def test_classify_batch_reads_jsonl_and_builds_the_chain_once(capsys, monkeypatch, _inject_fake):
+    import io
+    import json
+
+    import tasklib.classifiers as classifiers_mod
+    from tasklib.classify import Classification, Verdict
+
+    _laya_only_chain(monkeypatch)
+    seen: list[str] = []
+
+    def _fake_classify(self, message, bias):
+        seen.append(message)
+        return Classification(
+            verdict=Verdict.CHANGE, process_or_product="product", priority="P2", story_points=3
+        )
+
+    monkeypatch.setattr("tasklib.classifiers.LayaClassifier.classify", _fake_classify)
+    real_build = classifiers_mod.build_classifier_chain
+    builds: list[int] = []
+
+    def _counting_build(*a, **kw):
+        builds.append(1)
+        return real_build(*a, **kw)
+
+    monkeypatch.setattr(classifiers_mod, "build_classifier_chain", _counting_build)
+    lines = [
+        {"id": "7", "text": "add rate limiting to the API"},
+        {"text": "hi"},
+        {"id": 9, "text": "add a --since flag to task list"},
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(json.dumps(x) for x in lines) + "\n\n"))
+    rc = main(["classify", "--batch"])
+    assert rc == 0
+    out = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    change = {"verdict": "change", "process_or_product": "product", "priority": "P2", "story_points": 3}
+    assert out == [{"id": "7", **change}, {"verdict": "justAsk"}, {"id": 9, **change}]
+    assert builds == [1]
+    assert seen == ["add rate limiting to the API", "add a --since flag to task list"]
+
+
+def test_classify_batch_reports_bad_lines_and_keeps_going(capsys, monkeypatch, _inject_fake):
+    import io
+    import json
+
+    _laya_only_chain(monkeypatch)
+    monkeypatch.setattr("tasklib.classifiers.LayaClassifier.classify", lambda self, m, b: None)
+    monkeypatch.setattr("sys.stdin", io.StringIO('not json\n{"id": 1}\n{"text": "thanks"}\n'))
+    rc = main(["classify", "--batch"])
+    assert rc == 2
+    out = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert "error" in out[0] and out[0].get("line") == 1
+    assert "error" in out[1] and out[1].get("id") == 1
+    assert out[2] == {"verdict": "justAsk"}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["classify", "--batch", "--create"], ["classify", "--batch", "--update", "3"], ["classify", "--batch", "some text"], ["classify"]],
+)
+def test_classify_batch_argument_conflicts_are_refused(capsys, argv, _inject_fake):
+    assert main(argv) == 2

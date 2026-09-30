@@ -949,3 +949,126 @@ def test_jev_classifier_collapses_newlines_with_a_real_separator_on_failure(monk
 
 def test_jev_classifier_label():
     assert JevClassifier().label == "jev:typesafe-ai/jev"
+
+
+# ── task-cli#245: quiet model load + warm-server client wiring ─────────────────────────────
+
+_LAYA_TEMPERATURE_WARNING = (
+    "laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using "
+    "choice:11+=0.1 -> 0.5. Treat confidence from the affected entries as uncalibrated."
+)
+
+
+def _warning_emitting_load(model_id_or_path):
+    import warnings
+
+    warnings.warn(_LAYA_TEMPERATURE_WARNING, RuntimeWarning, stacklevel=2)
+    return object()
+
+
+def test_laya_load_silences_the_uncalibrated_temperature_warning(fake_laya_module, recwarn):
+    fake_laya_module(_warning_emitting_load)
+    LayaClassifier(use_server=False)._load_agent()
+    assert [str(w.message) for w in recwarn] == []
+
+
+def test_laya_load_keeps_the_warning_when_verbose(fake_laya_module, recwarn):
+    fake_laya_module(_warning_emitting_load)
+    LayaClassifier(use_server=False, verbose=True)._load_agent()
+    assert [str(w.message) for w in recwarn] == [_LAYA_TEMPERATURE_WARNING]
+
+
+def test_laya_classify_uses_the_warm_server_without_loading_in_process(monkeypatch):
+    import tasklib.classify_server as server
+
+    monkeypatch.delenv("TASK_CLASSIFY_SERVER")
+    calls = []
+
+    def _fake_predict(message, questions):
+        calls.append((message, questions))
+        return _REAL_LAYA_RAW_RESULT
+
+    monkeypatch.setattr(server, "predict", _fake_predict)
+    provider = LayaClassifier()
+
+    def _no_local_load():
+        raise AssertionError("the server answered; no in-process model load")
+
+    provider._load_agent = _no_local_load
+    result = provider.classify("how does this work?", Verdict.CHANGE)
+    assert result is not None and result.verdict is Verdict.JUST_ASK
+    assert calls == [("how does this work?", _CLASSIFICATION_QUESTIONS)]
+
+
+def test_laya_classify_falls_back_in_process_when_the_server_is_unreachable(monkeypatch):
+    import tasklib.classify_server as server
+
+    monkeypatch.delenv("TASK_CLASSIFY_SERVER")
+    monkeypatch.setattr(server, "predict", lambda message, questions: None)
+
+    class _Agent:
+        def predict(self, message, questions):
+            return _REAL_LAYA_RAW_RESULT
+
+    provider = LayaClassifier()
+    provider._load_agent = lambda: _Agent()
+    result = provider.classify("how does this work?", Verdict.CHANGE)
+    assert result is not None and result.verdict is Verdict.JUST_ASK
+
+
+def test_laya_classify_never_contacts_the_server_when_disabled(monkeypatch):
+    import tasklib.classify_server as server
+
+    contacted = []
+    monkeypatch.setattr(server, "request", lambda *a, **kw: contacted.append(a))
+    monkeypatch.setattr(server, "_spawn", lambda *a, **kw: contacted.append(a))
+
+    class _Agent:
+        def predict(self, message, questions):
+            return _REAL_LAYA_RAW_RESULT
+
+    provider = LayaClassifier()
+    provider._load_agent = lambda: _Agent()
+    assert provider.classify("how does this work?", Verdict.CHANGE) is not None
+    assert contacted == []
+
+
+def test_laya_classify_verbose_loads_in_process_so_load_output_reaches_this_stderr(monkeypatch):
+    # A server's load output goes to its log file, so --verbose must not route through it.
+    import tasklib.classify_server as server
+
+    monkeypatch.delenv("TASK_CLASSIFY_SERVER")
+    contacted = []
+    monkeypatch.setattr(server, "predict", lambda *a, **kw: contacted.append(a))
+
+    class _Agent:
+        def predict(self, message, questions):
+            return _REAL_LAYA_RAW_RESULT
+
+    provider = LayaClassifier(verbose=True)
+    provider._load_agent = lambda: _Agent()
+    assert provider.classify("how does this work?", Verdict.CHANGE) is not None
+    assert contacted == []
+
+
+def test_laya_load_prefers_the_cached_snapshot_over_a_hub_round_trip(fake_laya_module, monkeypatch):
+    monkeypatch.setattr(classifiers, "_cached_laya_snapshot", lambda model_id: "/hf-cache/laya/snap")
+    loaded = []
+    fake_laya_module(lambda model_id_or_path: loaded.append(model_id_or_path) or object())
+    LayaClassifier(use_server=False)._load_agent()
+    assert loaded == ["/hf-cache/laya/snap"]
+
+
+def test_laya_load_falls_back_to_the_hub_id_when_the_cached_dir_is_broken(fake_laya_module, monkeypatch):
+    monkeypatch.setattr(classifiers, "_cached_laya_snapshot", lambda model_id: "/hf-cache/laya/snap")
+    loaded = []
+
+    def _load(model_id_or_path):
+        loaded.append(model_id_or_path)
+        if model_id_or_path.startswith("/"):
+            raise FileNotFoundError("model.safetensors missing")
+        return object()
+
+    fake_laya_module(_load)
+    LayaClassifier(use_server=False)._load_agent()
+    assert loaded == ["/hf-cache/laya/snap", "convaiinnovations/laya"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tasklib.classify import (
     CLASSIFY_PROMPT,
     DEFAULT_FALLBACKS,
@@ -870,3 +872,63 @@ def test_resolve_chain_jev_is_never_reachable_via_review_cli():
     fallbacks = [("jev", "cloud")]
     env = {"AI_GATEWAY_API_KEY": "x", "ANTHROPIC_API_KEY": "x"}
     assert resolve_chain(fallbacks, env) is None
+
+
+# ── task-cli#245: cheap guard rules over a weak local model ────────────────────────────────
+
+_TG486_BUG_REPORT = (
+    "tg-cli test suite leaks its mkdtemp dirs in $TMPDIR (3.7 GB, 3.7k dirs) and fills the disk\n"
+    "Integration tests create per-test dirs with mkdtemp (tgctl-spawn-*, tgctl-defer-*, "
+    "tg-fakebin-*) and do not remove them. On 2026-09-30 $TMPDIR held 3,719 tgctl-*/tg-* dirs "
+    "older than 60 min. Remove every created dir in afterEach/afterAll, including on failure "
+    "and timeout paths."
+)
+
+
+@pytest.mark.parametrize("text", ["hi", "Hi!", "hello there", "thanks :)", "ok", "  yo ", "?", "good morning"])
+def test_is_small_talk_catches_greetings_and_tiny_texts(text):
+    from tasklib.classify import is_small_talk
+
+    assert is_small_talk(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["fix typo", "run the tests", "ship it", "hi, the login button is broken on iOS", "#42", "how does dedup work?"],
+)
+def test_is_small_talk_leaves_real_asks_alone(text):
+    from tasklib.classify import is_small_talk
+
+    assert not is_small_talk(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _TG486_BUG_REPORT,
+        "The app crashes when I open settings",
+        "task list --json returns an empty array even though the repo has 12 open issues",
+        "Login is broken since yesterday's deploy, users get a 500 error",
+    ],
+)
+def test_looks_like_bug_report_catches_defect_prose(text):
+    from tasklib.classify import looks_like_bug_report
+
+    assert looks_like_bug_report(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "why does the app crash when I open settings?",
+        "does the error gate still fire on done?",
+        "hi",
+        "add rate limiting to the API",
+        "run the tests",
+        "crash",
+    ],
+)
+def test_looks_like_bug_report_ignores_questions_and_non_defects(text):
+    from tasklib.classify import looks_like_bug_report
+
+    assert not looks_like_bug_report(text)

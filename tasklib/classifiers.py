@@ -376,6 +376,65 @@ def _map_choice_answers(answers: object, bias: "Verdict") -> "Classification | N
 _LAYA_DEFAULT_MODEL_ID = "convaiinnovations/laya"
 
 
+# The one warning laya's shipped checkpoint emits on EVERY load (laya 0.3.x): it clamps an
+# out-of-range per-choice temperature and says so. It is a property of the published weights,
+# not of anything task-cli controls, so repeating it on every `task classify` is pure noise
+# (task-cli#245); `--verbose` keeps it.
+_LAYA_TEMPERATURE_WARNING_RE = r"laya: this checkpoint ships invalid temperatures"
+
+
+_LAYA_SNAPSHOT_PATTERNS = ["rl_agent_config.json", "model.safetensors", "tokenizer/*", "encoder/*"]
+
+
+def _cached_laya_snapshot(model_id: str) -> str | None:
+    """The local HuggingFace cache dir already holding `model_id`, or `None`.
+
+    `laya.load(<hub id>)` always re-validates the snapshot against the Hub first — normally
+    ~0.25 s, but measured at 30 s on a bad network moment (task-cli#245), on the critical path
+    of a cold classify. A checkpoint that is already cached is loaded from its local dir
+    instead; only a missing one goes to the network. The cost: a newer upstream revision is
+    picked up only once the cache is cleared — a pinned checkpoint is the safer default for a
+    classifier whose result shape `_map_result` hand-parses anyway.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(
+            model_id, local_files_only=True, allow_patterns=_LAYA_SNAPSHOT_PATTERNS
+        )
+    except Exception:
+        return None
+
+
+def _load_laya(laya_module, model_id: str, *, verbose: bool):
+    """`laya.load(model_id)`, from the local cache when possible, quiet unless `verbose`.
+
+    Quiet = no HF snapshot progress bar and no uncalibrated-temperature RuntimeWarning. A
+    cached dir that fails to load (e.g. a half-finished earlier download) falls back to the
+    Hub id, which re-fetches what is missing.
+    """
+    import warnings
+
+    source = _cached_laya_snapshot(model_id) or model_id
+    with warnings.catch_warnings():
+        if not verbose:
+            try:
+                from huggingface_hub.utils import disable_progress_bars
+
+                disable_progress_bars()
+            except Exception:
+                pass  # a hub without this helper just keeps its bar
+            warnings.filterwarnings(
+                "ignore", message=_LAYA_TEMPERATURE_WARNING_RE, category=RuntimeWarning
+            )
+        try:
+            return laya_module.load(model_id_or_path=source)
+        except Exception:
+            if source == model_id:
+                raise
+            return laya_module.load(model_id_or_path=model_id)
+
+
 @dataclass
 class LayaClassifier:
     """Convai Innovations' free, local, Apache-2.0 laya "System 1" decision model (PyPI
@@ -395,9 +454,18 @@ class LayaClassifier:
     weights -- on the order of ~400M params for the English checkpoint -- so it must only
     happen once per instance, not once per `classify()` call). `model_id` always resolves to
     `_LAYA_DEFAULT_MODEL_ID` — see the module docstring's SECURITY note.
+
+    task-cli#245: loading costs ~3 s and every `task classify` is a fresh process, so
+    `classify()` first asks the warm machine-wide server (`tasklib/classify_server.py`, spawned
+    on first use) and only loads in-process when that returns nothing. `use_server=False` is how
+    the server itself loads its model. The load is quiet (no HF download progress bar, no
+    laya "uncalibrated temperatures" RuntimeWarning) unless `verbose`; `verbose` skips the
+    server and loads in-process, since a server's load output goes to its log, not this stderr.
     """
 
     model_id: str = _LAYA_DEFAULT_MODEL_ID
+    use_server: bool = True
+    verbose: bool = False
     _agent: object | None = field(default=None, init=False, repr=False, compare=False)
     # task-cli#208: at most one auto-install attempt per INSTANCE (`build_classifier_chain`
     # mints a fresh `LayaClassifier` per `task classify` invocation), matching the "one time
@@ -441,8 +509,13 @@ class LayaClassifier:
 
     def classify(self, message: str, bias: "Verdict") -> "Classification | None":
         try:
-            agent = self._load_agent()
-            result = agent.predict(message, _CLASSIFICATION_QUESTIONS)
+            result = None
+            if self.use_server and not self.verbose:
+                from . import classify_server
+
+                result = classify_server.predict(message, _CLASSIFICATION_QUESTIONS)
+            if result is None:
+                result = self._load_agent().predict(message, _CLASSIFICATION_QUESTIONS)
             return self._map_result(result, bias)
         except Exception as exc:
             # SECURITY: `exc` can embed `message` (an untrusted inbound tg-cli/agent string —
@@ -468,7 +541,7 @@ class LayaClassifier:
                 )
             import laya
 
-            self._agent = laya.load(model_id_or_path=self.model_id)
+            self._agent = _load_laya(laya, self.model_id, verbose=self.verbose)
         return self._agent
 
     def _map_result(self, result: object, bias: "Verdict") -> "Classification | None":
@@ -653,6 +726,7 @@ def build_classifier_chain(
     env: dict[str, str] | None = None,
     *,
     capability: str | None = None,
+    verbose: bool = False,
 ) -> list[ClassifierProvider]:
     """Turn a `classify.fallbacks` chain into an ordered list of `ClassifierProvider`s.
 
@@ -667,7 +741,8 @@ def build_classifier_chain(
     `None`), so this function only ever groups whatever chain it's handed -- see `config.py`'s
     `DEFAULTS` comment for the actual default-construction mechanism and why keeping that
     policy in exactly one place (rather than also duplicating it here) was a deliberate,
-    review-driven simplification.
+    review-driven simplification. `verbose` only reaches `LayaClassifier` (whether its model
+    load shows progress/warnings on stderr).
 """
     from .classify import DEFAULT_FALLBACKS
 
@@ -692,7 +767,7 @@ def build_classifier_chain(
     for provider_name, model in chain:
         if provider_name == "laya":
             _flush()
-            providers.append(LayaClassifier())
+            providers.append(LayaClassifier(verbose=verbose))
         elif provider_name == "jev":
             _flush()
             providers.append(JevClassifier(env=env))

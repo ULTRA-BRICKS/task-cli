@@ -853,3 +853,82 @@ def parse_classification(
         priority=priority,
         story_points=story_points,
     )
+
+
+# ── task-cli#245: cheap guard rules around a weak model ─────────────────────────────────────
+#
+# The zero-config local laya checkpoint spreads its verdict probabilities almost evenly
+# (measured live: "hi" -> actionable at 0.34/0.33/0.32; the tg-cli#486 bug report -> justAsk
+# at 0.40/0.30/0.30), so its winning label is close to noise on the two most common inbound
+# shapes. These two deterministic rules run around EVERY provider in `cli._classify_text`: a
+# greeting never needs a model at all, and prose that plainly reports a defect is a `change`
+# whatever the model's near-coin-flip says. Both are deliberately narrow -- anything they do
+# not match is left entirely to the provider.
+
+_SMALL_TALK_WORDS = frozenset(
+    {
+        "hi", "hello", "hey", "heya", "hiya", "yo", "sup", "howdy", "greetings",
+        "thanks", "thank", "thx", "ty", "cheers", "you", "much", "a", "lot", "so",
+        "ok", "okay", "k", "kk", "cool", "nice", "great", "got", "it", "sure", "yes", "no",
+        "yep", "nope", "good", "morning", "afternoon", "evening", "night", "gm", "gn",
+        "there", "all", "everyone", "bye", "ping", "test",
+    }
+)
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_SMALL_TALK_MAX_WORDS = 4
+_TINY_TEXT_MAX_CHARS = 2
+
+
+def is_small_talk(message: str) -> bool:
+    """``True`` for a greeting/acknowledgement or a text too tiny to carry an ask.
+
+    Tiny = at most two letters/digits in total ("ok", "?", "k"). Greeting = at most four words,
+    every one of them from a small closed vocabulary ("hi", "thanks a lot", "good morning"), and
+    no ``#ref``. A single real word outside the vocabulary ("fix typo", "ship it") disqualifies.
+    """
+    if not message.strip():
+        return False  # nothing at all is not small talk; the normal path refuses it
+    words = _WORD_RE.findall(message.lower())
+    if sum(len(w) for w in words) <= _TINY_TEXT_MAX_CHARS and "#" not in message:
+        return True
+    if not words or len(words) > _SMALL_TALK_MAX_WORDS or "#" in message:
+        return False
+    return all(w in _SMALL_TALK_WORDS for w in words)
+
+
+_DEFECT_RE = re.compile(
+    r"\b(?:"
+    r"bugs?|broken|breaks|regress(?:ed|ion)|"
+    r"crash(?:es|ed|ing)?|hangs?|hung|freez(?:es|ing)|froze|"
+    r"leak(?:s|ed|ing)?|fails?|failing|failed|failure|"
+    r"errors?|exceptions?|traceback|panic(?:s|ked)?|"
+    r"not\s+working|stopped\s+working|"
+    r"(?:does|do|did|is|are|was|were)\s*(?:not|n't)\s+(?:work|load|start|remove|respond|"
+    r"clean|save|show|open|close|exit|return)\w*|"
+    r"returns?\s+(?:an?\s+)?(?:empty|wrong|nothing|null|none|garbage)|"
+    r"fills?\s+(?:up\s+)?the\s+disk|"
+    r"[45]\d\d\s+(?:error|status|response)"
+    r")\b",
+    re.IGNORECASE,
+)
+_QUESTION_START_RE = re.compile(
+    r"^\s*(?:how|why|what|when|where|which|who|is|are|does|do|did|can|could|should|would|will)\b",
+    re.IGNORECASE,
+)
+_BUG_REPORT_MIN_WORDS = 5
+
+
+def looks_like_bug_report(message: str) -> bool:
+    """``True`` when ``message`` reads as a defect report rather than a question.
+
+    Needs a concrete defect signal (crash/leak/fails/broken/"does not work"/"returns an empty
+    ..."/an HTTP 4xx/5xx error), at least five words, and must not be phrased as a question
+    (a trailing ``?`` or a leading interrogative) -- "why does the app crash?" asks about a
+    defect and stays with the provider's verdict.
+    """
+    text = message.strip()
+    if len(_WORD_RE.findall(text)) < _BUG_REPORT_MIN_WORDS:
+        return False
+    if text.endswith("?") or _QUESTION_START_RE.match(text):
+        return False
+    return _DEFECT_RE.search(text) is not None

@@ -97,6 +97,7 @@ task status <id> [<new-state>]     # read or transition state (works outside a r
 task classify "<text>" [--create]  # change|actionable|justAsk (+ SP/priority/process-vs-product
                                     # on `change`) via review; --create makes/dedups a product
                                     # ticket, or files a local `harness task` for a `process` item
+task classify --batch < in.jsonl   # {"text","id"?} per line -> one verdict JSON per line
 task session [show|bind <id>]      # show/bind the current session and its tickets
 task module list [--json]         # show the repo's configured product-module taxonomy
 task module add <name> --description "..."  # print the task.yaml snippet to add by hand
@@ -766,6 +767,36 @@ provider kinds:
   same posture as `laya` — the `{ jev: <value> }` value only decides routing, never which
   endpoint/model gets called (both fixed), so a repo-scoped config can't redirect the call
   (and your API key) to an attacker-controlled host.
+
+**Speed: the warm `laya` server (task-cli#245).** Loading the laya checkpoint costs ~3 s and
+every `task classify` is a fresh process, so the `laya` provider does not load the model
+itself: the first call spawns a detached, machine-wide server
+(`python -P -m tasklib.classify_server`, `tasklib/classify_server.py`) that loads the model
+once and answers over a unix socket under `~/.local/state/task-cli/classify/` (dir 0700,
+socket 0600, one per task-cli version, log alongside it). Later calls are one socket
+round-trip; the server exits after 15 minutes without a request. Measured on the M-series dev
+host: cold ~4 s (spawn + load), warm ~0.3 s, versus 4-8 s for EVERY call before. If the server
+cannot start or answer, the provider loads the model in-process exactly as before.
+`TASK_CLASSIFY_SERVER=0` keeps classification in-process. The model load is quiet — no
+HuggingFace "Fetching N files" bar and no laya "invalid temperatures" RuntimeWarning — unless
+`task classify --verbose` (which skips the warm server and loads in-process, so that output
+reaches your terminal).
+
+**Batch mode.** `task classify --batch` reads JSONL on stdin — one `{"text": "...", "id": ...}`
+object per line, `id` optional and echoed back — and writes one `--json`-shaped verdict object
+per line to stdout, building the provider chain once for the whole batch (for grooming
+passes). Classification only: `--batch` refuses `--create`/`--update` and a positional text.
+A malformed line yields `{"line": n, "error": ...}` and the batch continues, exiting 2.
+
+**Guard rules** (`classify.is_small_talk` / `classify.looks_like_bug_report`, applied around
+every provider): a greeting/acknowledgement or a text of at most two letters (`hi`, `thanks!`,
+`ok`) is `justAsk` without running any provider, and plain defect prose that is not phrased as
+a question (a crash/leak/"fails"/"does not remove"/HTTP 5xx report of five words or more) is
+`change` when the provider said `justAsk` (an `actionable` verdict is kept: an execute-this
+instruction never becomes a ticket, task-cli#80) — the local model's verdict probabilities are
+close to uniform on exactly these shapes (live: "hi" → `actionable`, the tg-cli#486 leak
+report → `justAsk`). The `classify` log event's `model` field records a rule's involvement
+(`rule:small-talk`, `laya:…+rule:bug-report`).
 
 **Bias is to `change` on ambiguity between change/justAsk** — most questions to a dev agent
 are latent change requests; that bias never applies to a genuine `actionable` signal, which is
