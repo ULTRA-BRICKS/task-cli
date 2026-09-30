@@ -52,6 +52,7 @@ class Project:
             team = str(lin.get("team", "")).strip().upper()
             project = str(lin.get("project", "")).strip()
             return f"linear:{team}/{project}" if project else f"linear:{team}"
+<<<<<<< Updated upstream
         if self.backend == "tasks":
             tasks = self.overlay.get("tasks", {})
             url = _normalized_origin(str(tasks.get("url", "")))
@@ -61,6 +62,14 @@ class Project:
             fj = self.overlay.get("forgejo", {})
             url = _normalized_origin(str(fj.get("url", "")))
             return f"forgejo:{url}/{str(fj.get('repo', '')).strip().lower()}"
+||||||| Stash base
+=======
+        if self.backend == "tasks":
+            tasks = self.overlay.get("tasks", {})
+            url = str(tasks.get("url", "")).strip()
+            team = str(tasks.get("team", "")).strip().upper()
+            return f"tasks:{url}/{team}" if team else f"tasks:{url}"
+>>>>>>> Stashed changes
         repo = str(self.overlay.get("github", {}).get("repo", "")).strip().lower()
         return f"github-issues:{repo}"
 
@@ -95,12 +104,19 @@ def projects_from_config(data: dict[str, Any]) -> list[Project]:
         - team:    HYP                      (linear shorthand)
         - project: <id>                     (linear project, optional)
         - linear:  {team: HYP, project: <id>}
+<<<<<<< Updated upstream
         - tasks:   {url: https://..., team: GL}  (tasks — no flat shorthand: ``team`` alone
                      is already claimed by the linear shorthand above, so a tasks entry is
                      always the nested ``tasks:`` block)
         - forgejo: {url: https://..., repo: owner/name}  (forgejo — nested only, for the same
                      reason: the flat ``repo`` shorthand is GitHub's; ``repo`` must be explicit,
                      ``auto`` has no single cwd to resolve against here)
+||||||| Stash base
+=======
+        - tasks:   {url: https://..., team: GL}  (tasks — no flat shorthand: ``team`` alone
+                     is already claimed by the linear shorthand above, so a tasks entry is
+                     always the nested ``tasks:`` block)
+>>>>>>> Stashed changes
 
     A malformed entry (not a mapping, or missing the backend coordinate) is skipped rather
     than aborting the whole registry — the aggregation is best-effort by design.
@@ -130,10 +146,16 @@ def _project_from_entry(entry: Any, default_backend: str) -> Project | None:
         return _github_project(entry, backend)
     if backend == "linear":
         return _linear_project(entry, backend)
+<<<<<<< Updated upstream
     if backend == "tasks":
         return _tasks_project(entry, backend)
     if backend == "forgejo":
         return _forgejo_project(entry, backend)
+||||||| Stash base
+=======
+    if backend == "tasks":
+        return _tasks_project(entry, backend)
+>>>>>>> Stashed changes
     return None
 
 
@@ -141,19 +163,50 @@ def _backend_from_shape(entry: dict[str, Any]) -> str | None:
     """Infer a registry entry's backend from its OWN coordinate keys, before the merged default.
 
     A global ``projects:`` entry carries an unambiguous coordinate (``repo``/``github`` → GitHub,
+<<<<<<< Updated upstream
     ``team``/``linear`` → Linear, ``tasks`` → Tasks, ``forgejo`` → Forgejo). The top-level
     ``backend`` is the cwd repo's choice and must NOT reinterpret these: inside a Linear-backed
     repo the merged default is ``linear``, which would otherwise turn a registered ``{repo: acme/web}`` GitHub shorthand
     into a teamless Linear entry and silently drop it from ``task list --all``. An entry with
     none of these shapes (or more than one) falls back to ``default_backend`` unchanged.
+||||||| Stash base
+    ``team``/``linear`` → Linear). The top-level ``backend`` is the cwd repo's choice and must NOT
+    reinterpret these: inside a Linear-backed repo the merged default is ``linear``, which would
+    otherwise turn a registered ``{repo: acme/web}`` GitHub shorthand into a teamless Linear entry
+    and silently drop it from ``task list --all``. An entry with neither shape (or both) falls back
+    to ``default_backend`` unchanged.
+=======
+    ``team``/``linear`` → Linear, ``tasks`` → Tasks). The top-level ``backend`` is the cwd repo's
+    choice and must NOT reinterpret these: inside a Linear-backed repo the merged default is
+    ``linear``, which would otherwise turn a registered ``{repo: acme/web}`` GitHub shorthand
+    into a teamless Linear entry and silently drop it from ``task list --all``. An entry with
+    none of the three shapes (or more than one) falls back to ``default_backend`` unchanged.
+>>>>>>> Stashed changes
     """
     has_github = bool(entry.get("repo") or isinstance(entry.get("github"), dict))
     has_linear = bool(entry.get("team") or isinstance(entry.get("linear"), dict))
+<<<<<<< Updated upstream
     has_tasks = bool(isinstance(entry.get("tasks"), dict) and entry["tasks"].get("url"))
     has_forgejo = bool(isinstance(entry.get("forgejo"), dict) and entry["forgejo"].get("url"))
     shapes = {"github-issues": has_github, "linear": has_linear, "tasks": has_tasks, "forgejo": has_forgejo}
     present = [name for name, flag in shapes.items() if flag]
     return present[0] if len(present) == 1 else None
+||||||| Stash base
+    if has_github and not has_linear:
+        return "github-issues"
+    if has_linear and not has_github:
+        return "linear"
+    return None
+=======
+    has_tasks = bool(isinstance(entry.get("tasks"), dict) and entry["tasks"].get("url"))
+    if has_github and not (has_linear or has_tasks):
+        return "github-issues"
+    if has_linear and not (has_github or has_tasks):
+        return "linear"
+    if has_tasks and not (has_github or has_linear):
+        return "tasks"
+    return None
+>>>>>>> Stashed changes
 
 
 def _github_project(entry: dict[str, Any], backend: str) -> Project | None:
@@ -176,6 +229,7 @@ def _linear_project(entry: dict[str, Any], backend: str) -> Project | None:
     project_id = str(entry.get("project") or lin.get("project") or "").strip()
     name = str(entry.get("name") or (f"{team}/{project_id}" if project_id else team)).strip()
     overlay: dict[str, Any] = {"backend": "linear", "linear": {"team": team, "project": project_id}}
+<<<<<<< Updated upstream
     return Project(name=name, backend=backend, overlay=overlay)
 
 
@@ -198,6 +252,20 @@ def _forgejo_project(entry: dict[str, Any], backend: str) -> Project | None:
         return None
     name = str(entry.get("name") or repo).strip()
     overlay: dict[str, Any] = {"backend": "forgejo", "forgejo": {"url": url, "repo": repo}}
+||||||| Stash base
+=======
+    return Project(name=name, backend=backend, overlay=overlay)
+
+
+def _tasks_project(entry: dict[str, Any], backend: str) -> Project | None:
+    tasks = entry.get("tasks") if isinstance(entry.get("tasks"), dict) else {}
+    url = str(tasks.get("url") or "").strip()
+    team = str(tasks.get("team") or "").strip()
+    if not url or not team:
+        return None
+    name = str(entry.get("name") or f"{team}@{url}").strip()
+    overlay: dict[str, Any] = {"backend": "tasks", "tasks": {"url": url, "team": team}}
+>>>>>>> Stashed changes
     return Project(name=name, backend=backend, overlay=overlay)
 
 

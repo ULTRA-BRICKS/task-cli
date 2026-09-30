@@ -868,6 +868,7 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
         name = f"{team}/{project}" if project else team
         return name, {"backend": "linear", "linear": {"team": team, "project": project}}
 
+<<<<<<< Updated upstream
     if backend == "forgejo":
         return _current_forgejo_overlay(cfg)
 
@@ -889,6 +890,27 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
         name = f"{team}@{url}"
         return name, {"backend": "tasks", "tasks": {"url": url, "team": team}}
 
+||||||| Stash base
+=======
+    if backend == "tasks":
+        sec = cfg.section("tasks")
+        url = str(sec.get("url", "")).strip()
+        team = str(sec.get("team", "")).strip()
+        if not url or not team:
+            # Same reasoning as the teamless-linear branch above: a misconfigured `backend:
+            # tasks` INSIDE a repo is a real, actionable misconfig, not "outside a repo".
+            if not _in_git_repo(cfg.repo_root):
+                return None
+            _backend(
+                cfg
+            )  # NoReturn here: raises _UserError("tasks backend requires a url"/"...team key")
+            raise AssertionError(
+                "unreachable: _backend raises on a misconfigured tasks config"
+            )
+        name = f"{team}@{url}"
+        return name, {"backend": "tasks", "tasks": {"url": url, "team": team}}
+
+>>>>>>> Stashed changes
     # github-issues
     gh = cfg.section("github")
     repo_spec = str(gh.get("repo", "auto")).strip()
@@ -1031,6 +1053,7 @@ def _route_id_to_project(ticket_id: str, projects: list):
         hits = [p for p in projects if p.backend in _FORGE_BACKENDS and _repo_of(p) == named]
         return hits[0] if len(hits) == 1 else None
     if tid.startswith("#") or tid.lstrip("#").isdigit():
+<<<<<<< Updated upstream
         # A bare number is only meaningful inside ONE repository: with more than one registered
         # GitHub/Forgejo repository it is ambiguous, whichever backends they use.
         forge = [p for p in projects if p.backend in _FORGE_BACKENDS]
@@ -1041,6 +1064,22 @@ def _route_id_to_project(ticket_id: str, projects: list):
     # tracker resolve the same issue — pick the first deterministically. Across trackers (Linear
     # vs Tasks, or two Tasks deployments) the same `HYP-3` names DIFFERENT tickets, so that is
     # ambiguous and refused, never guessed (UB-25 review).
+||||||| Stash base
+        gh = [p for p in projects if p.backend == "github-issues"]
+        return gh[0] if len(gh) == 1 else None
+    # Linear-shaped id: TEAM-123 → route by the team prefix. A Linear identifier is team-scoped,
+    # and get/update resolve by the identifier alone (they ignore the project), so ANY registered
+    # project on that team can fetch it — pick the first deterministically rather than calling two
+    # same-team projects "ambiguous" (they'd resolve the same issue either way).
+=======
+        gh = [p for p in projects if p.backend == "github-issues"]
+        return gh[0] if len(gh) == 1 else None
+    # TEAM-123-shaped id: Linear AND Tasks both use this identifier shape and are both
+    # team-scoped, so route by team prefix across BOTH backends — get/update resolve by the
+    # identifier alone (ignoring the project), so ANY registered project on that team (either
+    # backend) can fetch it — pick the first deterministically rather than calling two
+    # same-team projects "ambiguous" (they'd resolve the same issue either way).
+>>>>>>> Stashed changes
     prefix = tid.partition("-")[0].upper() if "-" in tid else ""
     if prefix:
         matches = [
@@ -1097,6 +1136,7 @@ def _create_without_repo_error(cfg) -> str:
         how = (
             "  fix: run inside the repo whose `task.yaml` sets `linear.team`, "
             "or set `linear: {team: KEY}` in ~/.config/task-cli/config.yaml."
+<<<<<<< Updated upstream
         )
     elif backend == "tasks":
         how = (
@@ -1107,6 +1147,14 @@ def _create_without_repo_error(cfg) -> str:
         how = (
             "  fix: run inside the target Forgejo repository's checkout (its origin must be on "
             "`forgejo.url`'s host), or pin `forgejo.repo: owner/name`."
+||||||| Stash base
+=======
+        )
+    elif backend == "tasks":
+        how = (
+            "  fix: run inside the repo whose `task.yaml` sets `tasks.url`/`tasks.team`, "
+            "or set `tasks: {url: URL, team: KEY}` in ~/.config/task-cli/config.yaml."
+>>>>>>> Stashed changes
         )
     else:
         how = (

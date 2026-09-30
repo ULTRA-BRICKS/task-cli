@@ -56,6 +56,12 @@ class ForgejoCreds:
     source: str  # provenance, for diagnostics (never the token itself)
 
 
+@dataclass
+class TasksCreds:
+    token: str
+    source: str  # provenance, for diagnostics (never the token itself)
+
+
 # ── GitHub ─────────────────────────────────────────────────────────────────────────
 
 
@@ -178,6 +184,7 @@ def _linear_credentials_toml(env: dict[str, str], workspace: str | None) -> Line
         if isinstance(key, str) and key.startswith("lin_api_"):
             return LinearCreds(api_key=key.strip(), workspace=str(name), source="~/.config/linear/credentials.toml")
     return None
+<<<<<<< Updated upstream
 
 
 # ── Tasks ──────────────────────────────────────────────────────────────────────────
@@ -467,3 +474,91 @@ def _same_origin_str(a: str, b: str) -> bool:
         and (pa.hostname or "").lower() == (pb.hostname or "").lower()
         and port_a == port_b
     )
+||||||| Stash base
+=======
+
+
+# ── Tasks ──────────────────────────────────────────────────────────────────────────
+
+
+def tasks_token(url: str, env: dict[str, str] | None = None) -> TasksCreds:
+    """Resolve a Tasks API token for the (already origin-validated) ``url``. Raises
+    :class:`CredentialError` if none is available.
+
+    Resolution order mirrors GitHub/Linear above: ``$TASKS_TOKEN`` (task-cli's own env var,
+    the name ``get_backend`` documents) → ``$TICKETS_TOKEN`` (the native ``tasks-app`` CLI's
+    own env var — reusing it means a shell that already exports it for that CLI needs no
+    second variable) → the ``tasks-app`` CLI's own persisted credential file, reused ONLY when
+    its stored ``url`` is the SAME origin as ``url`` (origin-bound: a token minted for a
+    different tasks-app deployment must never be sent to this one).
+    """
+    env = os.environ if env is None else env
+
+    for var in ("TASKS_TOKEN", "TICKETS_TOKEN"):
+        val = env.get(var)
+        if val and val.strip():
+            return TasksCreds(token=val.strip(), source=f"env:{var}")
+
+    creds = _tasks_app_cli_config(env, url)
+    if creds:
+        return creds
+
+    raise CredentialError(
+        f"no Tasks API token found for {url}. Run `tasks-app auth login --url {url}` "
+        "(or set $TASKS_TOKEN). (task-cli reads the tasks-app CLI's stored credential; "
+        "it never re-prompts.)"
+    )
+
+
+def _tasks_app_cli_config(env: dict[str, str], url: str) -> TasksCreds | None:
+    """Read the native ``tasks-app`` CLI's own credential file (``config.json``, mode 0600),
+    reusing its token ONLY when the file's own stored ``url`` is the same origin as ``url``.
+
+    The file holds a single ``{"url": ..., "token": ...}`` pair (whichever workspace the user
+    last ran ``tasks-app auth login`` against) — NOT keyed per-origin itself, so the origin
+    check here is what keeps a token minted for one tasks-app deployment from being replayed
+    against a different ``url`` this backend happens to be configured for.
+    """
+    base = env.get("TICKETS_CONFIG_DIR") or os.path.join(
+        env.get("HOME", os.path.expanduser("~")), ".config", "tickets-app"
+    )
+    path = Path(base) / "config.json"
+    if not path.is_file():
+        return None
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    stored_url = str(data.get("url", "")).strip()
+    stored_token = str(data.get("token", "")).strip()
+    if not stored_token or not _same_origin_str(stored_url, url):
+        return None
+    return TasksCreds(token=stored_token, source=f"{path}")
+
+
+def _same_origin_str(a: str, b: str) -> bool:
+    """Whether ``a`` and ``b`` are the same origin (scheme + host + effective port).
+
+    A small, self-contained comparison (not delegated to ``tasklib.backends.http``) so this
+    module — imported before a backend is even chosen — never has to import the network layer
+    just to compare two strings.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        pa, pb = urlsplit(a), urlsplit(b)
+    except ValueError:
+        return False
+    default_ports = {"https": 443, "http": 80}
+    port_a = pa.port if pa.port is not None else default_ports.get(pa.scheme)
+    port_b = pb.port if pb.port is not None else default_ports.get(pb.scheme)
+    return (
+        pa.scheme == pb.scheme
+        and (pa.hostname or "").lower() == (pb.hostname or "").lower()
+        and port_a == port_b
+    )
+>>>>>>> Stashed changes

@@ -132,6 +132,7 @@ def backend_coordinate(backend) -> str:
         team = str(getattr(backend, "team_key", "") or "").strip().upper()
         project = str(getattr(backend, "project", "") or "").strip()
         return f"linear:{team}/{project}" if project else f"linear:{team}"
+<<<<<<< Updated upstream
     if backend.name == "tasks":
         url = str(getattr(backend, "url", "") or "").strip()
         team = str(getattr(backend, "team_key", "") or "").strip().upper()
@@ -143,6 +144,13 @@ def backend_coordinate(backend) -> str:
         owner = str(getattr(backend, "owner", "") or "").strip().lower()
         repo = str(getattr(backend, "repo", "") or "").strip().lower()
         return f"forgejo:{url}/{owner}/{repo}"
+||||||| Stash base
+=======
+    if backend.name == "tasks":
+        url = str(getattr(backend, "url", "") or "").strip()
+        team = str(getattr(backend, "team_key", "") or "").strip().upper()
+        return f"tasks:{url}/{team}" if team else f"tasks:{url}"
+>>>>>>> Stashed changes
     owner = str(getattr(backend, "owner", "") or "").strip().lower()
     repo = str(getattr(backend, "repo", "") or "").strip().lower()
     return f"github-issues:{owner}/{repo}"
@@ -201,6 +209,7 @@ def get_backend(config, *, env: dict | None = None):
         from .linear import LinearBackend
 
         return LinearBackend.from_config(config, env=env)
+<<<<<<< Updated upstream
     if backend == "tasks":
         from .tasks import TasksBackend
 
@@ -209,4 +218,11 @@ def get_backend(config, *, env: dict | None = None):
         from .forgejo import ForgejoBackend
 
         return ForgejoBackend.from_config(config, env=env)
+||||||| Stash base
+=======
+    if backend == "tasks":
+        from .tasks import TasksBackend
+
+        return TasksBackend.from_config(config, env=env)
+>>>>>>> Stashed changes
     raise BackendError(f"unknown backend {backend!r}")
