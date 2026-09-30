@@ -67,6 +67,7 @@ task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-o
 #   follow-up-of|followed-up-by — records a relationship in ## Links, mirrored on the other
 #   ticket (except duplicate-of, one-sided)
 task change <id> --acceptance "..." --screenshot proof.png
+task change <id> --unlabel priority:P3  # remove a label the ticket carries (--label adds one)
 task attach <id> shot.png            # add implementation screenshot (repeatable paths)
 task check <id> 1 2 --proof a.png --proof b.png   # tick criteria WITH a proof each (in order)
 task check <id> --all --proof shot.png            # every criterion, one shared proof
