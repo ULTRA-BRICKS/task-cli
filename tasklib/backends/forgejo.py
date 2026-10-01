@@ -52,7 +52,7 @@ from ..model import State, Ticket
 from ..render import BodyMergeError, merge_body, parse, render
 from ..taskref import TaskRefError, forgejo_issue_number
 from . import AmbiguousBackendError, BackendError
-from .github_issues import _LABEL_STATE, _STATE_LABEL, _derive_state
+from .github_issues import _LABEL_STATE, _STATE_LABEL, _derive_state, _state_label_conflict
 from .http import (
     AmbiguousHttpError,
     HttpError,
@@ -259,13 +259,14 @@ class ForgejoBackend:
     def _row_to_ticket(self, row: dict) -> Ticket:
         labels = _label_names(row.get("labels"))
         self._snapshots[str(row.get("number"))] = _Snapshot.of(row)
+        state = _derive_state(row, labels)
         base = Ticket(
             title=str(row.get("title") or ""),
             # only the managed state labels are stripped: update() sends exactly `ticket.labels`,
             # so stripping any other `status:*` label (a configured default such as
             # `status:security-review`) would delete it on the next label change (#244).
             labels=[lbl for lbl in labels if lbl not in _LABEL_STATE],
-            state=_derive_state(row, labels),
+            state=state,
             id=f"#{row.get('number')}",
             url=str(row.get("html_url") or ""),
             updated_at=str(row.get("updated_at") or ""),
@@ -273,6 +274,7 @@ class ForgejoBackend:
             closed_at=str(row.get("closed_at") or ""),
             reporter=str((row.get("user") or {}).get("login") or ""),
             provider_closed=row.get("state") == "closed",
+            state_label_conflict=_state_label_conflict(row, state),
         )
         ticket = parse(str(row.get("body") or ""), base)
         if "due_date" in row:

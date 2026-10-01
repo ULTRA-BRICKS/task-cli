@@ -232,6 +232,7 @@ class GitHubIssuesBackend:
             # the issue's own open/closed truth, independent of the (possibly stale)
             # status:<state> label `_derive_state` prioritizes — see Ticket.provider_closed.
             provider_closed=row.get("state") == "closed",
+            state_label_conflict=_state_label_conflict(row, state),
         )
         body = row.get("body") or ""
         return parse(body, base)
@@ -516,6 +517,12 @@ def _derive_state(row: dict, labels: list[str]) -> State:
         if lbl in _LABEL_STATE:
             return _LABEL_STATE[lbl]
     return State.DONE if row.get("state") == "closed" else State.TODO
+
+
+def _state_label_conflict(row: dict, state: State) -> bool:
+    """Whether the ``state`` :func:`_derive_state` returned disagrees with the issue's native
+    open/closed flag — only possible when a stale managed ``status:*`` label won (task-cli#238)."""
+    return (row.get("state") == "closed") != (state in (State.DONE, State.CANCELLED))
 
 
 def _resolve_repo(repo_spec: str, repo_root) -> tuple[str, str]:

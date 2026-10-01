@@ -1251,7 +1251,25 @@ def _ticket_dict(t: Ticket) -> dict:
         # (`--json`) must get the SAME signal, not silently treat a capped list as complete.
         if t.attachments_truncated:
             d["attachments_truncated"] = True
+    # Only emitted on a conflict, same reasoning as `attachments` above (task-cli#238).
+    conflict = _state_conflict_note(t)
+    if conflict:
+        d["state_conflict"] = conflict
     return d
+
+
+def _state_conflict_note(t: Ticket) -> str:
+    """`""`, or why `t.state` can't be trusted: a label-state backend (GitHub/Forgejo) derived
+    it from a managed `status:*` label that disagrees with the issue's native open/closed flag
+    (task-cli#238) — e.g. an issue reopened in the web UI that still carries `status:cancelled`.
+    `task read` shows it instead of silently presenting the stale label as the truth."""
+    if not t.state_label_conflict:
+        return ""
+    native = "closed" if t.provider_closed else "open"
+    return (
+        f"the status label says `{t.state.value}` but the issue is natively {native}; "
+        f"reconcile with `task status {t.id} <state>`"
+    )
 
 
 # ── policy enforcement helper (shared by create + change/close) ─────────────────────
@@ -3402,6 +3420,9 @@ def cmd_read(args: argparse.Namespace) -> int:
         return 0
     print(_bold(f"{ticket.id}  {ticket.title}"))
     print(_dim(f"  state: {ticket.state.value}   {ticket.url}"))
+    conflict = _state_conflict_note(ticket)
+    if conflict:
+        print(_warn(f"  warning: {conflict}"))
     if ticket.labels:
         print(_dim(f"  labels: {', '.join(ticket.labels)}"))
     if ticket.attachments:

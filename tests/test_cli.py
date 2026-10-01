@@ -2071,6 +2071,29 @@ def test_read_shows_sections(capsys, _inject_fake):
     assert "## What" in out and "## Acceptance criteria" in out
 
 
+@pytest.mark.parametrize("conflict", [True, False])
+def test_read_warns_only_when_the_status_label_disagrees_with_the_native_state(capsys, _inject_fake, conflict):
+    """task-cli#238: a stale status label (`status:cancelled` left on an issue reopened in the web
+    UI) is surfaced by `task read`, human and --json, instead of being silently trusted."""
+    import json
+
+    from tasklib.model import State
+
+    main(_create_argv())
+    _inject_fake.update(
+        replace(_inject_fake.get("#1"), state=State.CANCELLED, provider_closed=not conflict,
+                state_label_conflict=conflict)
+    )
+    capsys.readouterr()
+    assert main(["read", "#1"]) == 0
+    warning = "warning: the status label says `cancelled` but the issue is natively open"
+    assert (warning in capsys.readouterr().out) is conflict
+    assert main(["read", "#1", "--json"]) == 0
+    note = json.loads(capsys.readouterr().out).get("state_conflict", "")
+    assert ("natively open" in note) is conflict
+
+
+
 def test_change_adds_acceptance(capsys, _inject_fake):
     main(_create_argv())
     capsys.readouterr()

@@ -66,7 +66,9 @@ task list --all                    # every known project's tickets, grouped by p
 task gantt        [--all] [--json] # read-only due-date timeline (Gantt) — see below
 task burn         [--all] [--json] [--since YYYY-MM-DD] [--until YYYY-MM-DD]  # remaining-over-time burn chart — see below
 task web start|stop|status|run [--port N]  # local HTML burn chart (default http://127.0.0.1:8765/burn)
-task read <id>     (alias: view)   # the full ticket — every section (works outside a repo)
+task read <id>     (alias: view)   # the full ticket — every section (works outside a repo); on
+#   GitHub/Forgejo it warns (--json: "state_conflict") when a stale status:<state> label
+#   disagrees with the issue's native open/closed state
 task find "<query>"                # search title+body (cross-project when outside a repo)
 task link <id> <relation> <other-id>  # blocks|blocked-by|relates-to|duplicate-of|follow-up-of|
 #   followed-up-by — writes a structured ## Links entry, mirrored on the other ticket (see

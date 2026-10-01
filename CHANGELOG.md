@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.1 — 2026-10-01
+
+- `task read` warns when a ticket's `status:<state>` label disagrees with the issue's native
+  open/closed state (task-cli#238), e.g. an issue reopened in the web UI that still carries
+  `status:cancelled`; `--json` (read and list) adds a `state_conflict` key only when they disagree.
+
 ## 0.22.0 — 2026-10-01
 
 - New `task change <id> --unlabel <label>` (repeatable) removes a label the ticket carries and

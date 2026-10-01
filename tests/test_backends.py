@@ -518,6 +518,7 @@ def test_github_row_to_ticket_marks_provider_closed_when_label_lags_native_state
         ticket.state.value == "todo"
     )  # unchanged — label still wins for the derived state
     assert ticket.provider_closed is True
+    assert ticket.state_label_conflict is True  # task-cli#238: `task read` warns on this
 
 
 def test_github_row_to_ticket_provider_closed_false_when_open():
@@ -525,7 +526,9 @@ def test_github_row_to_ticket_provider_closed_false_when_open():
 
     be = GitHubIssuesBackend(owner="o", repo="r", token="t")
     row = {"number": 1, "title": "a", "state": "open", "labels": [], "body": ""}
-    assert be._row_to_ticket(row).provider_closed is False
+    ticket = be._row_to_ticket(row)
+    assert ticket.provider_closed is False
+    assert ticket.state_label_conflict is False
 
 
 def test_github_current_user_returns_login(monkeypatch):

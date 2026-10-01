@@ -259,6 +259,14 @@ class Ticket:
     # into rendered text and never read back into a field is lost on the next backend update.
     deployed_note: str = ""
 
+    # Also appended last (same reasoning as ``due`` above). True when ``state`` came from a managed
+    # ``status:<state>`` label that disagrees with the backend's native open/closed flag
+    # (``provider_closed``) — e.g. a Forgejo/GitHub issue reopened natively that still carries
+    # ``status:cancelled`` (task-cli#238). Set only by the label-state backends (a native-state
+    # backend like Linear cannot disagree with itself); ``task read`` surfaces it as a warning
+    # instead of silently trusting the label. Never part of the rendered body.
+    state_label_conflict: bool = False
+
     def __post_init__(self) -> None:
         # Coerce plain-string criteria to unchecked Criterion objects. This keeps construction
         # ergonomic (`Ticket(acceptance=["a", "b"])`) while the rest of the code — render, parse,

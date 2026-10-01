@@ -830,14 +830,20 @@ def test_transition_with_a_malformed_patch_response_is_an_error_not_a_stale_tick
         backend().transition("#40", State.DONE)
 
 
-def test_label_only_edit_does_not_close_an_open_issue_with_stale_cancelled_label(forge):
-    """task-cli#238: a natively-OPEN issue carrying a stale status:cancelled label must not
-    be silently re-closed by a metadata-only edit (e.g. `task change #N --label sp:3`)."""
-    forge.labels["status:cancelled"] = 99
-    forge.add(_issue(41, "Stale", state="open", labels=forge.label_rows(["status:cancelled"])))
+@pytest.mark.parametrize(
+    ("stale_label", "stale_state"),
+    [("status:cancelled", State.CANCELLED), ("status:done", State.DONE)],
+)
+def test_label_only_edit_does_not_close_an_open_issue_with_a_stale_closed_label(
+    forge, stale_label, stale_state
+):
+    """task-cli#238: a natively-OPEN issue carrying a stale status:cancelled/status:done label
+    must not be silently re-closed by a metadata-only edit (e.g. `task change #N --label sp:3`)."""
+    forge.labels[stale_label] = 99
+    forge.add(_issue(41, "Stale", state="open", labels=forge.label_rows([stale_label])))
     b = backend()
     t = b.get("#41")
-    assert t.state == State.CANCELLED  # derived from the stale label
+    assert t.state == stale_state  # derived from the stale label
     t.labels.append("sp:3")
     b.update(t)
     patch_payloads = [c[2] for c in forge.calls if c[0] == "PATCH"]
@@ -858,6 +864,26 @@ def test_transition_still_closes_normally_when_state_label_changes(forge):
     b.update(t)
     patch_payloads = [c[2] for c in forge.calls if c[0] == "PATCH"]
     assert any(p.get("state") == "closed" for p in patch_payloads)
+
+
+@pytest.mark.parametrize(
+    ("native", "status_label", "conflict"),
+    [
+        ("open", "status:cancelled", True),  # reopened in the web UI, label left behind
+        ("closed", "status:in-progress", True),  # closed in the web UI, label left behind
+        ("closed", "status:done", False),
+        ("open", "status:todo", False),
+        ("closed", None, False),  # no managed label: state comes from the native flag itself
+    ],
+)
+def test_get_flags_a_status_label_that_disagrees_with_the_native_state(forge, native, status_label, conflict):
+    """task-cli#238: `task read` needs to know when the label-derived state is stale."""
+    labels = []
+    if status_label:
+        forge.labels.setdefault(status_label, 90 + len(forge.labels))
+        labels = forge.label_rows([status_label])
+    forge.add(_issue(43, "Drift", state=native, labels=labels))
+    assert backend().get("#43").state_label_conflict is conflict
 
 
 def test_scan_keeps_the_snapshot_of_the_ticket_it_returns(forge, monkeypatch):
