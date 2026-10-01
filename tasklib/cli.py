@@ -361,6 +361,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chp.add_argument("--label", action="append", default=[], help="add label")
     chp.add_argument(
+        "--unlabel",
+        action="append",
+        default=[],
+        metavar="LABEL",
+        help="remove a label the ticket carries (repeatable), e.g. a duplicate priority:<Pn>",
+    )
+    chp.add_argument(
         "--due",
         metavar="YYYY-MM-DD",
         help="set/replace the due date (empty string clears it)",
@@ -1878,6 +1885,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         if expand
         else None
     )
+    _refuse_blank_labels("--label", args.label)
     labels = list(dict.fromkeys([*args.label, session.label]))
     screenshots = [Screenshot(ref=p, kind="creation") for p in args.screenshot]
     due = _normalize_due(getattr(args, "due", None)) or ""
@@ -3504,6 +3512,31 @@ def _record_post_merge_acceptance(ticket: Ticket, reason: str | None) -> None:
     ticket.skips[POST_MERGE_ACCEPTANCE] = text
 
 
+def _refuse_blank_labels(flag: str, labels: list[str]) -> None:
+    if any(not label.strip() for label in labels):
+        raise _UserError(f"{flag} needs a label name (got an empty one)")
+
+
+def _check_unlabel(ticket: Ticket, added: list[str], removed: list[str]) -> frozenset[str]:
+    """Refuse a ``--label``/``--unlabel`` that can't mean what it says, before anything is
+    edited: a blank name, a label the ticket does not carry (a typo would otherwise "succeed" as
+    a silent no-op), or one the same command also adds with ``--label``. Returns the labels to
+    remove."""
+    _refuse_blank_labels("--label", added)
+    _refuse_blank_labels("--unlabel", removed)
+    both = sorted(set(added) & set(removed))
+    if both:
+        raise _UserError(f"--label and --unlabel both name {', '.join(both)} — pass one or the other")
+    missing = [label for label in dict.fromkeys(removed) if label not in ticket.labels]
+    if missing:
+        carried = ", ".join(ticket.labels) or "none"
+        raise _UserError(
+            f"cannot remove {', '.join(missing)} from {ticket.id}: not on the ticket "
+            f"(its labels: {carried})"
+        )
+    return frozenset(removed)
+
+
 def cmd_change(args: argparse.Namespace) -> int:
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
@@ -3534,6 +3567,7 @@ def cmd_change(args: argparse.Namespace) -> int:
             f"  fix: close the ticket first (`task done {ticket.id}`), then re-run "
             f"`task change {ticket.id} --deployed \"...\"`"
         )
+    unlabel = _check_unlabel(ticket, args.label, args.unlabel)
 
     # A --skip-msgref-quote passed on THIS edit turns expansion off for this command — the skip
     # governs the quote machinery, not only the gate (review finding), so a waived false positive
@@ -3587,6 +3621,7 @@ def cmd_change(args: argparse.Namespace) -> int:
     for label in args.label:
         if label not in ticket.labels:
             ticket.labels.append(label)
+    ticket.labels = [label for label in ticket.labels if label not in unlabel]
     ticket.skips.update(new_skips)
     _record_post_merge_acceptance(ticket, args.post_merge_acceptance)
     if args.deployed is not None:

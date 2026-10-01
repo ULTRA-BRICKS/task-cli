@@ -52,7 +52,7 @@ from ..model import State, Ticket
 from ..render import BodyMergeError, merge_body, parse, render
 from ..taskref import TaskRefError, forgejo_issue_number
 from . import AmbiguousBackendError, BackendError
-from .github_issues import _STATE_LABEL, _derive_state
+from .github_issues import _LABEL_STATE, _STATE_LABEL, _derive_state
 from .http import (
     AmbiguousHttpError,
     HttpError,
@@ -261,7 +261,10 @@ class ForgejoBackend:
         self._snapshots[str(row.get("number"))] = _Snapshot.of(row)
         base = Ticket(
             title=str(row.get("title") or ""),
-            labels=[lbl for lbl in labels if not lbl.startswith("status:")],
+            # only the managed state labels are stripped: update() sends exactly `ticket.labels`,
+            # so stripping any other `status:*` label (a configured default such as
+            # `status:security-review`) would delete it on the next label change (#244).
+            labels=[lbl for lbl in labels if lbl not in _LABEL_STATE],
             state=_derive_state(row, labels),
             id=f"#{row.get('number')}",
             url=str(row.get("html_url") or ""),
@@ -422,7 +425,7 @@ class ForgejoBackend:
         row = self._issue_row(ticket_id)
         number = str(row["number"])
         current = _label_names(row.get("labels"))
-        wanted = [n for n in current if not n.startswith("status:")] + [_STATE_LABEL[state]]
+        wanted = [n for n in current if n not in _LABEL_STATE] + [_STATE_LABEL[state]]
         if set(wanted) != set(current):
             row["labels"] = [{"name": n} for n in self._put_labels(number, wanted)]
         native = _native_state(state)

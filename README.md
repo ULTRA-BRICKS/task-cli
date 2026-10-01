@@ -90,7 +90,9 @@ task comment <id> --body-file F    # the same, body read from a file (`-` = stdi
 task done <id>    [--screenshot p] # close a ticket — runs the on-done gates (all criteria checked)
 task change <id>  [--due ...] [--done] [--deployed "<note>"]  # update; --due sets/clears the
 #   due date; --done closes (gates); --deployed records a production deploy (state must
-#   already be `done` — see "Deploy + follow-up traceability" below)
+#   already be `done` — see "Deploy + follow-up traceability" below); --label adds a label,
+#   --unlabel removes one the ticket carries (repeatable; e.g. a duplicate priority:<Pn>).
+#   `default_labels` are stamped at create only, so an unlabeled default stays removed
 task status <id> [<new-state>]     # read or transition state (works outside a repo)
 #   close/transition verbs validate legality first: a cancelled ticket is a dead-end and a
 #   re-close of an already-done ticket is rejected (no silent re-write). `--force` overrides.

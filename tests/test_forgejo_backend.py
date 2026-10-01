@@ -263,6 +263,23 @@ def test_update_metadata_only_never_sends_body_and_uses_labels_endpoint(forge):
     assert {lbl["name"] for lbl in forge.issues[8]["labels"]} == {"bug", "status:todo"}
 
 
+def test_a_non_managed_status_label_survives_update_and_transition(forge):
+    # task-cli#244 review: stripping every `status:*` label on read made a configured default
+    # such as `status:security-review` vanish on the next label change or state transition.
+    forge.labels["status:security-review"] = 7
+    forge.add(_issue(9, "Labelled", labels=forge.label_rows(["status:todo", "status:security-review"])))
+    b = backend()
+    t = b.get("#9")
+    assert t.labels == ["status:security-review"]
+    t.labels = [*t.labels, "bug"]
+    b.update(t)
+    assert {lbl["name"] for lbl in forge.issues[9]["labels"]} == {"status:todo", "status:security-review", "bug"}
+    b.transition("9", State.IN_PROGRESS)
+    assert {lbl["name"] for lbl in forge.issues[9]["labels"]} == {
+        "status:in-progress", "status:security-review", "bug"
+    }
+
+
 def test_update_refuses_lossy_body_rewrite_before_any_write(forge):
     custom = "# Imported\n\nFree-form text.\n"
     forge.add(_issue(9, "Imported", body=custom))

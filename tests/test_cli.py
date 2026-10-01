@@ -2079,6 +2079,75 @@ def test_change_adds_acceptance(capsys, _inject_fake):
     assert "also handles edge case" in [c.text for c in fetched.acceptance]
 
 
+def test_change_unlabel_removes_only_that_label(_inject_fake):
+    main(_create_argv() + ["--label", "priority:P1", "--label", "priority:P3"])
+    before = list(_inject_fake.get("#1").labels)
+    assert main(["change", "#1", "--unlabel", "priority:P3"]) == 0
+    assert _inject_fake.get("#1").labels == [label for label in before if label != "priority:P3"]
+
+
+def test_change_label_and_unlabel_swap_a_priority_in_one_command(_inject_fake):
+    main(_create_argv() + ["--label", "priority:P1", "--label", "sp:3"])
+    assert main(["change", "#1", "--label", "priority:P2", "--unlabel", "priority:P1"]) == 0
+    labels = _inject_fake.get("#1").labels
+    assert "priority:P2" in labels and "sp:3" in labels
+    assert "priority:P1" not in labels
+
+
+def test_change_repeated_unlabel_removes_every_named_label(_inject_fake):
+    main(_create_argv() + ["--label", "priority:P1", "--label", "priority:P3", "--label", "sp:3"])
+    before = list(_inject_fake.get("#1").labels)
+    argv = ["change", "#1", "--unlabel", "priority:P1", "--unlabel", "priority:P3", "--unlabel", "priority:P3"]
+    assert main(argv) == 0
+    assert _inject_fake.get("#1").labels == [
+        label for label in before if label not in ("priority:P1", "priority:P3")
+    ]
+
+
+def test_change_unlabel_alongside_a_text_edit_applies_both(_inject_fake):
+    main(_create_argv() + ["--label", "priority:P3"])
+    assert main(["change", "#1", "--unlabel", "priority:P3", "--what", "the refined change"]) == 0
+    fetched = _inject_fake.get("#1")
+    assert "priority:P3" not in fetched.labels
+    assert fetched.what == "the refined change"
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--unlabel", "priority:P2", "--label", "urgent"], "cannot remove priority:P2"),
+        (["--unlabel", "priority:P2", "--unlabel", "sp:8"], "cannot remove priority:P2, sp:8"),
+        (["--unlabel", "priority:P1", "--label", "priority:P1"], "both name"),
+        (["--unlabel", " "], "--unlabel needs a label name"),
+        (["--label", " "], "--label needs a label name"),
+        # the managed state label is not a ticket label: state moves via start/review/done
+        (["--unlabel", "status:todo"], "cannot remove status:todo"),
+    ],
+)
+def test_change_unlabel_that_cannot_apply_refuses_without_writing(capsys, _inject_fake, extra, message):
+    main(_create_argv() + ["--label", "priority:P1"])
+    before = list(_inject_fake.get("#1").labels)
+    capsys.readouterr()
+    assert main(["change", "#1", *extra]) == 2
+    assert message in capsys.readouterr().out
+    assert _inject_fake.get("#1").labels == before
+
+
+def test_create_refuses_a_blank_label_without_creating(capsys, _inject_fake):
+    assert main(_create_argv() + ["--label", " "]) == 2
+    assert "--label needs a label name" in capsys.readouterr().out
+    assert _inject_fake.list() == []
+
+
+def test_change_unlabel_on_a_ticket_with_no_labels_refuses_and_says_so(capsys, _inject_fake):
+    main(_create_argv())
+    _inject_fake.get("#1").labels = []
+    capsys.readouterr()
+    assert main(["change", "#1", "--unlabel", "priority:P1"]) == 2
+    assert "(its labels: none)" in capsys.readouterr().out
+    assert _inject_fake.get("#1").labels == []
+
+
 def test_status_read_only(capsys, _inject_fake):
     main(_create_argv())
     capsys.readouterr()

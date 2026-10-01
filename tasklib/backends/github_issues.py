@@ -201,10 +201,16 @@ class GitHubIssuesBackend:
         except HttpError as exc:
             raise BackendError(f"github: {exc} {exc.body}".strip()) from exc
 
-    def _all_labels(self, ticket: Ticket) -> list[str]:
-        labels = list(dict.fromkeys([*self.default_labels, *ticket.labels]))
-        labels.append(_STATE_LABEL[ticket.state])
-        return list(dict.fromkeys(labels))
+    def _all_labels(self, ticket: Ticket, *, with_defaults: bool) -> list[str]:
+        """The whole label set to send: the ticket's labels plus its managed state label.
+
+        ``default_labels`` are stamped only at create (``with_defaults=True``). An update sends
+        exactly what the ticket carries, so a default deliberately removed with ``task change
+        --unlabel`` stays removed instead of being silently re-added by the PATCH (#244) — the
+        same create-only contract as the Forgejo backend's ``update``.
+        """
+        base = [*self.default_labels, *ticket.labels] if with_defaults else ticket.labels
+        return list(dict.fromkeys([*base, _STATE_LABEL[ticket.state]]))
 
     def _row_to_ticket(self, row: dict) -> Ticket:
         labels = [lbl["name"] for lbl in row.get("labels", []) if isinstance(lbl, dict)]
@@ -212,7 +218,10 @@ class GitHubIssuesBackend:
         reporter = (row.get("user") or {}).get("login") or ""
         base = Ticket(
             title=row.get("title", ""),
-            labels=[lbl for lbl in labels if not lbl.startswith("status:")],
+            # only the labels this backend manages (the `_STATE_LABEL` set) are stripped: an
+            # update sends exactly `ticket.labels`, so stripping any other `status:*` label —
+            # a configured default such as `status:security-review` — would delete it (#244).
+            labels=[lbl for lbl in labels if lbl not in _LABEL_STATE],
             state=state,
             id=f"#{row.get('number')}",
             url=row.get("html_url", ""),
@@ -229,7 +238,11 @@ class GitHubIssuesBackend:
 
     # ── protocol ──────────────────────────────────────────────────────────────────
     def create(self, ticket: Ticket) -> Ticket:
-        payload = {"title": ticket.title, "body": render(ticket), "labels": self._all_labels(ticket)}
+        payload = {
+            "title": ticket.title,
+            "body": render(ticket),
+            "labels": self._all_labels(ticket, with_defaults=True),
+        }
         row = self._call(self._issues_url(), method="POST", payload=payload)
         return self._row_to_ticket(row)
 
@@ -243,7 +256,7 @@ class GitHubIssuesBackend:
         payload = {
             "title": ticket.title,
             "body": render(ticket),
-            "labels": self._all_labels(ticket),
+            "labels": self._all_labels(ticket, with_defaults=False),
             "state": "closed" if ticket.state in (State.DONE, State.CANCELLED) else "open",
         }
         row = self._call(self._issues_url(f"/{num}"), method="PATCH", payload=payload)
