@@ -4,8 +4,20 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from tasklib.model import Criterion, Screenshot, Ticket
-from tasklib.render import SECTIONS, parse, render, split_sections, validate_format
+from tasklib.render import (
+    SECTIONS,
+    BodyMergeError,
+    merge_body,
+    parse,
+    render,
+    split_sections,
+    validate_format,
+)
+
+from .conftest import GROOMING_2026_09_10_BODY
 
 
 def _full_ticket() -> Ticket:
@@ -744,3 +756,222 @@ def test_unwrap_link_value_survives_url_containing_parens():
     body = _body_with_section("Links", f"\n* Docs: [{url}](<{url}>)\n")
     links = parse(body).links
     assert links == {"Docs": url}
+
+
+# ── merge_body: in-place edits of a body with non-template content (task-cli#240) ─────────
+
+
+def test_checking_criteria_on_a_grooming_body_rewrites_only_those_checkbox_lines():
+    body = GROOMING_2026_09_10_BODY
+    ticket = parse(body)
+    first, _, third = ticket.acceptance
+    ticket.acceptance[0] = replace(first, checked=True, proof="https://forge.example.test/attachments/p1")
+    ticket.acceptance[2] = replace(third, checked=True, force_reason="verified on main at 836094b")
+
+    merged = merge_body(body, ticket)
+
+    old, new = body.split("\n"), merged.split("\n")
+    assert len(new) == len(old)
+    changed = [i for i, (a, b) in enumerate(zip(old, new)) if a != b]
+    assert [old[i] for i in changed] == [f"- [ ] {first.text}", f"- [ ] {third.text}"]
+    assert [new[i] for i in changed] == [
+        f"- [x] {first.text} — proof: ![proof](https://forge.example.test/attachments/p1)",
+        f"- [x] {third.text} — forced: verified on main at 836094b",
+    ]
+    assert parse(merged).acceptance == ticket.acceptance
+
+
+def test_a_skip_on_a_grooming_body_is_appended_after_it_byte_for_byte():
+    body = GROOMING_2026_09_10_BODY
+    ticket = parse(body)
+    ticket.skips["links-url"] = "provenance URLs are evidence, not tracker entities"
+
+    merged = merge_body(body, ticket)
+
+    assert merged == body + "\n\n## Skipped gates\n- links-url: provenance URLs are evidence, not tracker entities\n"
+    assert parse(merged).skips == ticket.skips
+
+
+def test_a_skip_joins_an_existing_skipped_gates_section_in_place():
+    body = (
+        "<!-- rig-editorial-correction:2026-09-11 -->\n\n## What\nx\n\n## Acceptance criteria\n"
+        "- [ ] a\n\n## Skipped gates\n- screenshots: CLI-only; no UI.\n\n<!-- trailer -->\n"
+    )
+    ticket = parse(body)
+    ticket.skips["screenshots"] = "CLI-only"
+    ticket.skips["links"] = "file paths, not entities"
+
+    merged = merge_body(body, ticket)
+
+    assert merged == body.replace(
+        "- screenshots: CLI-only; no UI.\n", "- screenshots: CLI-only\n- links: file paths, not entities\n"
+    )
+
+
+def test_a_tick_and_a_skip_in_one_merge_compose_on_a_grooming_body():
+    body = GROOMING_2026_09_10_BODY
+    ticket = parse(body)
+    first = ticket.acceptance[0]
+    ticket.acceptance[0] = replace(first, checked=True, force_reason="verified")
+    ticket.skips["links-url"] = "provenance URLs are evidence"
+
+    merged = merge_body(body, ticket)
+
+    assert merged == body.replace(f"- [ ] {first.text}", f"- [x] {first.text} — forced: verified") + (
+        "\n\n## Skipped gates\n- links-url: provenance URLs are evidence\n"
+    )
+
+
+def test_dropping_one_skip_removes_only_its_line():
+    body = "<!-- x -->\n\n## Acceptance criteria\n- [ ] a\n\n## Skipped gates\n- links: y\n- screenshots: z\n\n<!-- t -->\n"
+    ticket = parse(body)
+    del ticket.skips["links"]
+
+    assert merge_body(body, ticket) == body.replace("- links: y\n", "")
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        pytest.param("## Skipped gates\n", "## Skipped gates\n- links: none\n", id="heading-at-end"),
+        pytest.param(
+            "## Skipped gates\n\n<!-- t -->\n", "## Skipped gates\n- links: none\n\n<!-- t -->\n", id="blank-then-trailer"
+        ),
+    ],
+)
+def test_a_skip_goes_right_under_an_empty_skipped_gates_heading(section, expected):
+    body = "<!-- x -->\n\n## Acceptance criteria\n- [ ] a\n\n" + section
+    ticket = parse(body)
+    ticket.skips["links"] = "none"
+
+    assert merge_body(body, ticket) == body.replace(section, expected)
+
+
+@pytest.mark.parametrize(
+    ("skips_section", "expected_tail"),
+    [
+        pytest.param(
+            "\r\n## Skipped gates\r\n- screenshots: CLI\r\n",
+            "\r\n## Skipped gates\r\n- screenshots: CLI-only\r\n- links: none\r\n",
+            id="existing-section",
+        ),
+        pytest.param("", "\r\n## Skipped gates\r\n- links: none\r\n- screenshots: CLI-only\r\n", id="appended-section"),
+    ],
+)
+def test_lines_written_into_a_crlf_body_keep_its_crlf_endings(skips_section, expected_tail):
+    head = "<!-- imported -->\r\n\r\n## What\r\nx\r\n\r\n## Acceptance criteria\r\n- [ ] a\r\n- [ ] b\r\n"
+    ticket = parse(head + skips_section)
+    ticket.acceptance[0] = replace(ticket.acceptance[0], checked=True, force_reason="r")
+    ticket.skips.update(screenshots="CLI-only", links="none")
+
+    merged = merge_body(head + skips_section, ticket)
+
+    assert merged == head.replace("- [ ] a\r\n", "- [x] a — forced: r\r\n") + expected_tail
+
+
+@pytest.mark.parametrize(
+    ("body", "edit"),
+    [
+        pytest.param(
+            "<!-- x -->\n\n## Notes\n```markdown\n## Skipped gates\n- links: illustrative\n```\n",
+            lambda t: t.skips.update(links="real reason"),
+            id="skipped-gates-in-fence",
+        ),
+        pytest.param(
+            "<!-- x -->\n\n## Notes\n<!--\n## Acceptance criteria\n- [ ] quoted\n-->\n",
+            lambda t: setattr(t.acceptance[0], "checked", True) or setattr(t.acceptance[0], "force_reason", "r"),
+            id="acceptance-in-html-comment",
+        ),
+        pytest.param(
+            "<!-- x -->\n\n## Acceptance criteria\n- [ ] a\n\n```\nunclosed fence\n",
+            lambda t: t.skips.update(links="r"),
+            id="append-into-unclosed-fence",
+        ),
+    ],
+)
+def test_an_edit_of_a_heading_inside_a_code_block_or_comment_is_refused(body, edit):
+    ticket = parse(body)
+    edit(ticket)
+    with pytest.raises(BodyMergeError, match="code block or HTML comment"):
+        merge_body(body, ticket)
+
+
+def test_the_real_heading_after_a_fenced_example_is_the_one_edited():
+    body = (
+        "<!-- x -->\n\n```\n## Acceptance criteria\n- [ ] example\n```\n\n"
+        "## Acceptance criteria\n- [ ] real\n"
+    )
+    ticket = parse(body)
+    ticket.acceptance[0] = replace(ticket.acceptance[0], checked=True, force_reason="r")
+
+    assert merge_body(body, ticket) == body.replace("- [ ] real", "- [x] real — forced: r")
+
+
+def test_a_rewritten_skip_line_keeps_its_indent_and_bullet_marker():
+    body = "<!-- x -->\n\n## Acceptance criteria\n- [ ] a\n\n## Skipped gates\n  * links: old\n"
+    ticket = parse(body)
+    ticket.skips["links"] = "new"
+
+    assert merge_body(body, ticket) == body.replace("  * links: old", "  * links: new")
+
+
+def test_a_lf_body_with_a_stray_crlf_elsewhere_gets_lf_skip_lines():
+    body = "<!-- x -->\r\n\n## Acceptance criteria\n- [ ] a\n"
+    ticket = parse(body)
+    ticket.skips["links"] = "none"
+
+    assert merge_body(body, ticket) == body + "\n## Skipped gates\n- links: none\n"
+
+
+def test_only_the_acceptance_section_parse_reads_is_edited_when_the_heading_repeats():
+    body = (
+        "## Acceptance criteria\n- [ ] legacy copy\n\n## Notes\nhand-written\n\n"
+        "## Acceptance criteria\n- [ ] live\n"
+    )
+    ticket = parse(body)
+    assert [c.text for c in ticket.acceptance] == ["live"]
+    ticket.acceptance[0] = replace(ticket.acceptance[0], checked=True, force_reason="r")
+
+    assert merge_body(body, ticket) == body.replace("- [ ] live", "- [x] live — forced: r")
+
+
+def test_reproofing_a_linear_split_criterion_folds_its_continuation_inline():
+    body = (
+        "<!-- imported -->\n\n## Acceptance criteria\n"
+        "* [x] works — proof:\n\n  ![proof](https://old.example/p.png)\n* [ ] other\n"
+    )
+    ticket = parse(body)
+    assert ticket.acceptance[0].proof == "https://old.example/p.png"
+    ticket.acceptance[0] = replace(ticket.acceptance[0], proof="https://new.example/p.png")
+
+    assert merge_body(body, ticket) == (
+        "<!-- imported -->\n\n## Acceptance criteria\n"
+        "* [x] works — proof: ![proof](https://new.example/p.png)\n\n* [ ] other\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda t: setattr(t, "why", "reworded"), id="prose"),
+        pytest.param(lambda t: t.acceptance.append(Criterion("a new criterion")), id="added-criterion"),
+        pytest.param(lambda t: setattr(t.acceptance[0], "text", "reworded"), id="reworded-criterion"),
+        pytest.param(lambda t: t.links.update(PR="https://forge.example.test/pulls/1"), id="links"),
+    ],
+)
+def test_an_edit_beyond_checkboxes_and_skips_on_a_grooming_body_is_refused(edit):
+    ticket = parse(GROOMING_2026_09_10_BODY)
+    edit(ticket)
+    with pytest.raises(BodyMergeError):
+        merge_body(GROOMING_2026_09_10_BODY, ticket)
+
+
+def test_a_tick_that_would_not_read_back_as_requested_is_refused():
+    # Hand-checked in a tracker UI with a dangling "— proof:" and no image: forcing it renders
+    # "… — proof: — forced: r", which parses back as a PROOF of "— forced: r" (the ambiguity
+    # _split_criterion_rest documents). Refuse rather than persist a different criterion.
+    body = "<!-- imported -->\n\n## Acceptance criteria\n- [X] resolves its own source — proof:\n- [x] b — forced: ok\n"
+    ticket = parse(body)
+    ticket.acceptance[0] = replace(ticket.acceptance[0], force_reason="verified")
+    with pytest.raises(BodyMergeError, match="read back"):
+        merge_body(body, ticket)

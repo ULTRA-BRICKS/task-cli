@@ -55,7 +55,7 @@ from dataclasses import dataclass, field, replace
 from urllib.parse import quote, urlencode
 
 from ..model import State, Ticket
-from ..render import parse, render, round_trips_losslessly
+from ..render import BodyMergeError, merge_body, parse, render
 from ..taskref import TaskRefError, tasks_identifier
 from . import AmbiguousBackendError, BackendError
 from .http import (
@@ -67,25 +67,6 @@ from .http import (
 )
 
 _DEFAULT_PORTS = {"https": 443, "http": 80}
-
-# The Ticket fields render()/parse() derive from the body (§5 template — see render.py's
-# SECTIONS/`_SKIP_MARKER`). `update()`'s metadata-only-edit check (`_update_description`)
-# compares exactly these fields against what raw_body parses back to. `skips` IS a body field
-# (render() writes it into the "## Skipped gates" section — integration review finding: a
-# skips-only edit was silently dropped when this tuple omitted it) but `due`/`state`/`labels`/
-# `title` are deliberately excluded — those ride their OWN PATCH fields (`due_date`/`status_id`/
-# `label_ids`), never `description`, so a due-date-only or status-only edit must not be treated
-# as a body change just because `due`/`state`/`labels` differ.
-_BODY_FIELDS = (
-    "what",
-    "why",
-    "user_impact",
-    "cost_of_inaction",
-    "acceptance",
-    "screenshots",
-    "links",
-    "skips",
-)
 
 # A team's workflow status carries a `category` (see the module docstring — there is no native
 # "review" category), never a free-form State. Preference order per normalized State: the
@@ -491,30 +472,24 @@ class TasksBackend:
 
     def _update_description(self, ticket: Ticket) -> str | None:
         """Whether/what to send as ``description`` — ``None`` omits the key entirely (see
-        :meth:`update`'s docstring, rule 2). Compares ``ticket``'s body-derived fields against
-        :func:`~tasklib.render.parse` of its own :attr:`Ticket.raw_body` (the verbatim body this
-        backend last read) to tell a metadata-only edit (status/labels/due/title — the body
-        untouched) from a genuine body edit, without ever assuming the caller re-serialized an
-        unchanged body identically.
+        :meth:`update`'s docstring, rule 2). :func:`~tasklib.render.merge_body` compares
+        ``ticket``'s body-derived fields against a parse of its own :attr:`Ticket.raw_body` (the
+        verbatim body this backend last read) to tell a metadata-only edit (status/labels/due/
+        title — the body untouched) from a genuine body edit, without ever assuming the caller
+        re-serialized an unchanged body identically. A body carrying custom Markdown (extra
+        headings, imported prose, ...) is edited in place rather than re-rendered, and an edit
+        that can't be merged that way is refused instead of clobbering it (UB-23 review,
+        option b; task-cli#240).
         """
-        original = parse(ticket.raw_body)
-        if all(getattr(ticket, f) == getattr(original, f) for f in _BODY_FIELDS):
-            return None
-        # A body change WAS requested. Only safe to send render(ticket) if raw_body round-trips
-        # losslessly through parse()/render() — i.e. it holds nothing outside the managed
-        # section template. If it doesn't, raw_body carries custom Markdown (extra headings,
-        # imported prose, ...) this backend doesn't understand and render(ticket) would silently
-        # drop on the way back out — refuse instead of clobbering it (UB-23 review, option b).
-        # Tolerates only the heading spacing an editor UI adds (see round_trips_losslessly).
-        if not round_trips_losslessly(ticket.raw_body):
+        try:
+            return merge_body(ticket.raw_body, ticket)
+        except BodyMergeError as exc:
             raise BackendError(
                 f"tasks: update refuses to overwrite ticket {ticket.id!r}'s body — its current "
-                "Markdown contains content this backend's parser doesn't fully understand "
-                "(round-tripping it through the managed template would lose it), so the "
-                "requested body change cannot be merged losslessly. Edit the body directly in "
-                "tasks-app instead."
-            )
-        return render(ticket)
+                "Markdown contains content this backend's parser doesn't fully understand, where "
+                f"only acceptance checkboxes and Skipped gates can be edited in place, and {exc}. "
+                "Edit the body directly in tasks-app instead."
+            ) from exc
 
     def list(self, *, labels=None, state=None, limit=30) -> list[Ticket]:
         self._ensure_catalog()

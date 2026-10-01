@@ -23,7 +23,9 @@ from tasklib.backends.forgejo import ForgejoBackend, _git_origin_url_from_config
 from tasklib.config import ConfigError, load, validate
 from tasklib.credentials import CredentialError, forgejo_token
 from tasklib.model import State, Ticket
-from tasklib.render import render
+from tasklib.render import parse, render
+
+from .conftest import GROOMING_2026_09_10_BODY
 
 ORIGIN = "https://forge.example.test"
 TOKEN = "dummy-forgejo-value"
@@ -282,6 +284,31 @@ def test_update_managed_body_change_is_sent(forge):
     b.update(t)
     patch = next(c for c in forge.calls if c[0] == "PATCH")
     assert "changed what" in patch[2]["body"]
+
+
+def test_check_and_done_close_a_grooming_body_ticket_touching_only_boxes_and_skips(
+    forge, isolated_state, monkeypatch, capsys
+):
+    """task-cli#240: `task check --all --force` then `task done --skip-<gate>` on a body with a
+    provenance preamble closes it; the stored Markdown keeps every other byte."""
+    from tasklib.cli import main
+
+    # isolated_state runs every command from its hermetic repo; the config goes there.
+    (Path.cwd() / "task.yaml").write_text("version: 1\nnotifications: {on_mutation: false}\n", encoding="utf-8")
+    monkeypatch.setattr("tasklib.backends.get_backend", lambda cfg, env=None: backend())
+    forge.add(_issue(20, "Audit release metadata", body=GROOMING_2026_09_10_BODY,
+                     labels=forge.label_rows(["status:todo"])))
+
+    assert main(["check", "#20", "--all", "--force", "verified on main at 836094b"]) == 0
+    assert main(["done", "#20", "--skip-links-url", "provenance URLs are evidence"]) == 0
+
+    expected = GROOMING_2026_09_10_BODY
+    for crit in parse(GROOMING_2026_09_10_BODY).acceptance:
+        expected = expected.replace(f"- [ ] {crit.text}", f"- [x] {crit.text} — forced: verified on main at 836094b")
+    expected += "\n\n## Skipped gates\n- links-url: provenance URLs are evidence\n"
+    assert forge.issues[20]["body"] == expected
+    assert forge.issues[20]["state"] == "closed"
+    assert "#20 → done" in capsys.readouterr().out
 
 
 def test_transition_swaps_status_label_and_closes_without_body(forge):

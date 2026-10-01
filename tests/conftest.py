@@ -174,6 +174,68 @@ def _no_real_tg_notifier(monkeypatch):
     return sent
 
 
+# A ticket body as the 2026-09-10 rig grooming pass rewrote it (recorded from
+# ultrabricks/rig-cli#435, prose trimmed): a provenance preamble, a retained copy of the original
+# task-cli template under "## Original technical scope, acceptance and delivery history", and
+# HTML-comment markers — content outside the managed template that a re-render would drop
+# (task-cli#240). Its "## What" is empty, so parse() reads the template fields from the tail.
+# The Russian quote lines are kept verbatim on purpose: they are part of the recorded body and
+# pin that the in-place merge preserves non-ASCII bytes.
+GROOMING_2026_09_10_BODY = """<!-- rig-grooming:2026-09-10:v1 -->
+
+## Request provenance and intended outcome
+
+**Scope:** Auxiliary CLI behavior and end-to-end user workflows. **Record:** product-or-maintenance.
+
+> Все доказательства должны быть проверяемыми.
+
+Source **Q028**; compiled-fragment-attribution; PDF page(s) 39.
+
+<details><summary>Original wording (before editorial correction)</summary>
+
+> все пруфы должны быть проверяемы
+
+</details>
+
+## Current evidence and next verification
+
+Inspected source: [rig-cli@97023cfd0c1e](https://github.com/alex-mextner/rig-cli/tree/97023cfd0c1e). **This does not certify a live account.**
+
+**Expected outcomes from this ticket, not invented from its title:**
+- Trace every runtime and packaging consumer of the project version.
+- Report only concrete code-quality findings with file and line references.
+
+
+
+## Original technical scope, acceptance and delivery history
+
+## What
+
+
+## Why (motivation)
+The release version must remain a readable, single-source freshness signal.
+
+## User impact
+Users and release automation receive consistent package and CLI version metadata.
+
+## Cost of inaction
+The published package, source checkout, or CLI may report inconsistent versions, obscuring which build is running.
+
+## Acceptance criteria
+- [ ] Trace every runtime and packaging consumer of the project version and verify they resolve from pyproject.toml.
+- [ ] Adversarially test stale installed metadata, source-checkout execution, and built distribution metadata.
+- [ ] Report only concrete code-quality findings with file and line references, or an evidence-backed clean verdict.
+
+## Screenshots
+(none)
+
+## Links
+- (none)
+
+
+<!-- /rig-grooming:2026-09-10:v1 -->"""
+
+
 class FakeBackend:
     """An in-memory ``TicketBackend`` — round-trips through render/parse like a real one.
 

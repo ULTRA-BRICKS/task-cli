@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.2 — 2026-10-01
+
+- Verified tickets whose body carries content outside the managed template (e.g. the
+  2026-09-10 grooming provenance preamble) can be closed (task-cli#240): on Forgejo and
+  tasks-app, `task check` / `task done --skip-<gate>` now edit such a body in place — only
+  the changed checkbox lines and the `## Skipped gates` lines are rewritten, every other byte
+  is kept (CRLF line endings included). Prose, links, screenshots and added/removed/reworded
+  criteria on such a body are still refused before any write, as is a body whose `## Acceptance
+  criteria` / `## Skipped gates` heading sits inside a fenced code block or HTML comment (or
+  that ends inside an unclosed one).
+
 ## 0.21.1 — 2026-10-01
 
 - The test suite no longer spawns the real `tg --tag report` notifier (task-cli#239): an autouse

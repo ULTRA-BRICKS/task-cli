@@ -1036,11 +1036,15 @@ task:
   downloaded back (same origin, with the token) and compared before it counts as proof. If the
   follow-up comment linking it fails, the attachment still exists: `task` reports the partial
   success and does not upload it again.
-- **Body safety:** label/state/due changes and comments never rewrite the issue body. A body edit
-  is refused when the stored Markdown holds content outside task-cli's section template
-  (rewriting it would lose that content) — edit such an issue in Forgejo or use
-  `task comment`. That includes `task attach` on such an issue: the upload and its comment
-  succeed, the body's Screenshots section update is refused.
+- **Body safety:** label/state/due changes and comments never rewrite the issue body. When the
+  stored Markdown holds content outside task-cli's section template (a provenance preamble,
+  hand-written sections, HTML comments), the body is never re-rendered: `task check` rewrites
+  only the ticked criteria's checkbox lines and `--skip-<gate>` reasons go into the last
+  `## Skipped gates` section (appended at the end when there is none), every other byte kept —
+  so such a ticket can still be checked off and closed with `task done`. Any other body edit
+  on it (prose, links, screenshots, adding/rewording criteria) is refused — edit such an issue
+  in Forgejo or use `task comment`. That includes `task attach` on such an issue: the upload
+  and its comment succeed, the body's Screenshots section update is refused.
 
 **API limitations (Forgejo 16):** issues have no version, ETag or `If-Match` support
 (`EditIssueOption.updated_at` only overrides the timestamp; it is not a concurrency check). The

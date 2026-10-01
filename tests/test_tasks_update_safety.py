@@ -25,6 +25,8 @@ from tasklib.backends.tasks import TasksBackend
 from tasklib.model import State, Ticket
 from tasklib.render import parse, render
 
+from .conftest import GROOMING_2026_09_10_BODY
+
 ORIGIN = "https://tasks.example.test"
 FAKE_TOKEN = "FAKE-TEST-TOKEN-NOT-REAL"  # placeholder credential for the hermetic mock below
 TEAM = "HYP"
@@ -286,14 +288,27 @@ def test_metadata_only_edit_on_ui_spaced_body_still_omits_description(api):
     assert "description" not in patch[2]
 
 
-def test_ui_spaced_body_with_an_unknown_section_is_still_refused(api):
+def test_skips_change_on_a_body_with_an_unknown_section_is_merged_in_place(api):
     original = ticket_from_original_read()
     spaced = _ui_spaced(original.raw_body) + "## Custom notes\n\nhand-written\n"
     read = dc_replace(parse(spaced, original), raw_body=spaced)
     read.skips["post-merge-acceptance"] = "x"
-    with pytest.raises(BackendError, match="refuses to overwrite"):
-        backend().update(read)
-    assert patch_calls(api) == []
+    backend().update(read)
+    (patch,) = patch_calls(api)
+    assert patch[2]["description"] == spaced + "\n## Skipped gates\n- post-merge-acceptance: x\n"
+
+
+def test_ticking_a_criterion_on_a_grooming_body_sends_only_that_line_changed(api):
+    """task-cli#240 on the tasks-app backend: `task check` on a body with a provenance
+    preamble sends the stored description with just the ticked checkbox line rewritten."""
+    read = dc_replace(parse(GROOMING_2026_09_10_BODY), id="HYP-1", backend_version=7)
+    first = read.acceptance[0]
+    read.acceptance[0] = dc_replace(first, checked=True, force_reason="verified on main")
+    backend().update(read)
+    (patch,) = patch_calls(api)
+    assert patch[2]["description"] == GROOMING_2026_09_10_BODY.replace(
+        f"- [ ] {first.text}", f"- [x] {first.text} — forced: verified on main"
+    )
 
 
 def test_blank_lines_inside_prose_survive_a_body_update(api):

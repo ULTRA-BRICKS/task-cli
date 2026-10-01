@@ -49,7 +49,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from ..model import State, Ticket
-from ..render import parse, render, round_trips_losslessly
+from ..render import BodyMergeError, merge_body, parse, render
 from ..taskref import TaskRefError, forgejo_issue_number
 from . import AmbiguousBackendError, BackendError
 from .github_issues import _STATE_LABEL, _derive_state
@@ -60,10 +60,6 @@ from .http import (
     request_bytes,
     safe_urlparse,
 )
-
-# Body-derived Ticket fields (render.py's template). `due` is NOT one: it is a native Forgejo
-# field, so a due-only edit never touches the Markdown.
-_BODY_FIELDS = ("what", "why", "user_impact", "cost_of_inaction", "acceptance", "screenshots", "links", "skips")
 
 # One owner or repository path segment. Forgejo names are alnum plus `-_.`; `..`/`.` are
 # rejected separately so a configured coordinate can never walk the API path.
@@ -407,20 +403,18 @@ class ForgejoBackend:
         return patch
 
     def _new_body(self, ticket: Ticket, stored: str) -> str | None:
-        """``None`` = leave the body untouched; otherwise the new rendered body. Refuses a body
-        edit whose stored Markdown holds content outside the managed template."""
-        original = parse(stored)
-        if all(getattr(ticket, f) == getattr(original, f) for f in _BODY_FIELDS):
-            return None
-        # Tolerates only the heading spacing an editor UI adds (see round_trips_losslessly).
-        if not round_trips_losslessly(stored):
+        """``None`` = leave the body untouched; otherwise the new body — re-rendered, or edited in
+        place when the stored Markdown holds content outside the managed template (see
+        :func:`~tasklib.render.merge_body`). Refuses an edit that can't be merged losslessly."""
+        try:
+            return merge_body(stored, ticket)
+        except BodyMergeError as exc:
             raise BackendError(
                 f"forgejo: update refuses to overwrite {self.owner}/{self.repo}{ticket.id}'s body — "
-                "its Markdown holds content outside task-cli's managed template, so the requested "
-                "body change cannot be merged losslessly. Edit the body in Forgejo directly, or "
-                "use `task comment` to add information."
-            )
-        return render(ticket)
+                "its Markdown holds content outside task-cli's managed template, where only "
+                f"acceptance checkboxes and Skipped gates can be edited in place, and {exc}. Edit "
+                "the body in Forgejo directly, or use `task comment` to add information."
+            ) from exc
 
     def transition(self, ticket_id: str, state: State) -> Ticket:
         """Swap the managed ``status:*`` label and open/close the issue from ONE fresh read.
