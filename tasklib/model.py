@@ -217,6 +217,17 @@ class Ticket:
     # never part of the rendered body.
     closed_at: str = ""
 
+    # Also appended last (same reasoning as ``due`` above). Optimistic-concurrency version
+    # integer for a backend that requires one on every write (the Tasks backend — see
+    # ``backends/tasks.py``; GitHub/Linear have no equivalent, so it stays 0 there). A
+    # transition/update MUST send back the version it actually READ, not a value re-derived
+    # from a second fetch — reusing a stale version races a concurrent editor into a clean
+    # 409 instead of silently clobbering their change, and reading twice widens the same race
+    # window it exists to close. 0 means "unknown / not a versioned backend", never a real
+    # server version (the Tasks API's own ``version`` starts at 1). Never part of the rendered
+    # body — operational metadata, not ticket content.
+    backend_version: int = 0
+
     def __post_init__(self) -> None:
         # Coerce plain-string criteria to unchecked Criterion objects. This keeps construction
         # ergonomic (`Ticket(acceptance=["a", "b"])`) while the rest of the code — render, parse,
