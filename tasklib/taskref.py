@@ -107,6 +107,29 @@ def linear_identifier(code: str, team: str) -> str:
     return f"{team.upper()}-{match.group(2)}"
 
 
+def tasks_identifier(code: str, team: str) -> str:
+    """Return TEAM-N for ``team``, or raise TaskRefError.
+
+    Same ``TEAM-<n>`` shape as :func:`linear_identifier` (the Tasks backend's human-readable
+    issue keys use the identical convention) — reuses the same ``_LINEAR`` shape regex rather
+    than duplicating it under a Tasks-specific name.
+    """
+    team = str(team).strip()
+    text = str(code).strip()
+    if not team:
+        raise TaskRefError(
+            f"{_shown(code)!r} cannot be validated as a Tasks identifier because no team is configured. "
+            f"{_FIX}"
+        )
+    match = _LINEAR.fullmatch(text)
+    if match is None or match.group(1).upper() != team.upper():
+        raise TaskRefError(
+            f"{_shown(code)!r} is not a Tasks identifier for team {team.upper()}. "
+            f"Codes must look like {team.upper()}-<n>. {_FIX}"
+        )
+    return f"{team.upper()}-{match.group(2)}"
+
+
 def _github_canonical(code: str) -> str | None:
     text = str(code).strip()
     cross = _GITHUB_CROSS.fullmatch(text)

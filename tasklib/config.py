@@ -3,15 +3,25 @@
 Layers, cascaded by **location** (no scope flag), exactly like rig-cli — later layers win:
 
 1. **Built-in defaults** — GitHub Issues, every gate on (the zero-config path).
-2. **Global** — ``~/.config/task-cli/config.yaml`` (or ``$XDG_CONFIG_HOME/...``). Machine-wide
-   defaults a developer carries across repos.
-3. **Per-repo ``rig.yaml`` ``task:`` block** — the repo's committed ``rig.yaml`` is the single
+2. **rig-global** — rig-cli's OWN global config's ``task:`` block, ``~/.config/rig/config.yaml``
+   (or ``$XDG_CONFIG_HOME/rig/config.yaml``). A workspace-wide DEFAULT (rig-cli's own machine
+   config), below the user's own explicit task-cli global choice (layer 3) — a default must not
+   silently outrank an explicit override. See :func:`_global_rig_task_overlay`.
+3. **Global** — ``~/.config/task-cli/config.yaml`` (or ``$XDG_CONFIG_HOME/...``). The user's own
+   explicit, task-cli-native machine-wide config; wins over rig-global (layer 2) on any key both
+   set, same relationship the per-repo layers below have (``rig.yaml`` loses to ``task.yaml``).
+4. **Ancestor ``rig.yaml`` ``task:`` blocks, outer → inner** — every directory strictly above
+   the repo root that has its own ``rig.yaml`` (e.g. ``~/xp/rig.yaml``, ``~/work/rig.yaml``),
+   bounded by ``$HOME`` or the filesystem root. Folder/workspace-scoped, NOT skipped by
+   ``include_global=False``. See :func:`_ancestor_rig_paths`.
+5. **Per-repo ``rig.yaml`` ``task:`` block** — the repo's committed ``rig.yaml`` is the single
    source of truth for the whole agent toolchain (rig provisions it). Its ``task:`` block
    selects the tracker backend per repo (CTO decision #4136.4: hyperide → Linear/HYP, every
    other repo → GitHub Issues by default). See :func:`rig_task_overlay` for the shape.
-4. **Per-repo ``task.yaml``** — the native task-cli config, if a repo keeps one. It still wins
+6. **Per-repo ``task.yaml``** — the native task-cli config, if a repo keeps one. It still wins
    over ``rig.yaml`` so an existing repo with a hand-tuned ``task.yaml`` is untouched.
-5. **``--config P``** — an explicit file replaces the ``task.yaml`` layer.
+7. **``--config P``** — an explicit file replaces the ``task.yaml`` layer.
+8. **``TASK_CLI_ATTACHMENT_MODE`` env var** — highest precedence, a personal per-machine override.
 
 The merge is a deep dict merge: later keys win, dicts merge recursively, scalars and lists
 replace wholesale. ``yaml`` is imported lazily so ``task --help`` works without PyYAML; the
@@ -20,7 +30,10 @@ loader degrades to built-in defaults if no config file is present (so the tool w
 ``task.yaml`` at all).
 
 Validation is fail-closed on the few enum-ish keys (backend, version), lenient on the rest —
-this is a personal-tooling config, not a hostile-input parser.
+this is a personal-tooling config, not a hostile-input parser. The two NEW layers (rig-global,
+ancestor) are the exception: they are fail-closed on malformed ``task:``/``tasks:`` content,
+naming the offending file — see :func:`_load_rig_task_layer` and
+``docs/plans/2026-09-22-tasks-rig-routing.md``.
 """
 
 from __future__ import annotations
@@ -35,7 +48,7 @@ from typing import Any
 CONFIG_FILENAME = "task.yaml"
 RIG_CONFIG_FILENAME = "rig.yaml"
 
-VALID_BACKENDS = {"github-issues", "linear"}
+VALID_BACKENDS = {"github-issues", "linear", "tasks"}
 
 # How a screenshot/file gets attached to a ticket (tg#11652, CTO decision — originally Linear-
 # only; extended to GitHub too by tg#16794/review-cli#484, see backends/github_issues.py's module
@@ -106,7 +119,11 @@ _RIG_TASK_ALIASES: dict[str, tuple[tuple[str, ...], ...]] = {
     "team": (("linear", "team"),),
     "project": (("linear", "project"),),
     "repo": (("github", "repo"),),
-    "attachment_mode": (("linear", "attachment_mode"), ("github", "attachment_mode")),
+    "attachment_mode": (
+        ("linear", "attachment_mode"),
+        ("github", "attachment_mode"),
+        ("tasks", "attachment_mode"),
+    ),
 }
 # Keys passed through verbatim (same name in both shapes): the backend selector + the nested
 # sections a power user might want to override straight from rig.yaml. ``version`` is
@@ -118,6 +135,7 @@ _RIG_TASK_PASSTHROUGH = frozenset(
         "backend",
         "github",
         "linear",
+        "tasks",
         "projects",
         "enforce",
         "classify",
@@ -147,8 +165,8 @@ def _nested_override_set(block: dict[str, Any], path: tuple[str, ...]) -> bool:
     return isinstance(cursor, dict) and path[-1] in cursor
 
 
-def rig_task_overlay(rig_data: dict[str, Any]) -> dict[str, Any]:
-    """Translate a ``rig.yaml`` ``task:`` block into a task-cli config overlay.
+def rig_task_overlay(rig_data: dict[str, Any], *, source: str = RIG_CONFIG_FILENAME) -> dict[str, Any]:
+    """Translate a ``rig.yaml``-shaped ``task:`` block into a task-cli config overlay.
 
     The block is the per-repo tracker selection the CTO drops into a repo's ``rig.yaml``::
 
@@ -164,6 +182,12 @@ def rig_task_overlay(rig_data: dict[str, Any]) -> dict[str, Any]:
     already guards this, but this keeps the function safe on any caller). A non-mapping
     ``task:`` is a config error (fail-closed before any backend call).
 
+    ``source`` names the file this block came from in error messages — defaults to the plain
+    ``rig.yaml`` filename (the repo's own layer, matching pre-existing message text exactly).
+    The ancestor-walk and rig-global layers (see :func:`_load_rig_task_layer`) pass the file's
+    full path here, so a malformed ancestor's error names the actual offending file instead of
+    the generic filename, which is ambiguous when several ancestor ``rig.yaml`` files exist.
+
     Unknown sub-keys inside ``task:`` are **warned-and-ignored**, not fatal: ``rig.yaml`` is
     owned and evolved by rig-cli, so a sub-key a newer rig writes must not crash every ``task``
     command in a repo just because this task-cli predates it (forward-compat across two tools
@@ -175,7 +199,7 @@ def rig_task_overlay(rig_data: dict[str, Any]) -> dict[str, Any]:
     if block is None:
         return {}
     if not isinstance(block, dict):
-        raise ConfigError(f"'task' block in {RIG_CONFIG_FILENAME} must be a mapping, got {type(block).__name__}")
+        raise ConfigError(f"'task' block in {source} must be a mapping, got {type(block).__name__}")
 
     # Each key contributes a fragment; we deep-merge them so a flat shorthand (team: HYP →
     # {linear: {team}}) and a same-named nested section (linear: {project}) in the SAME block
@@ -218,26 +242,29 @@ def rig_task_overlay(rig_data: dict[str, Any]) -> dict[str, Any]:
 
             log_event("rig.task: ignoring unknown key", level="WARN", key=str(key))
             continue
-        _assert_no_leaf_conflict(overlay, fragment, prefix=f"{RIG_CONFIG_FILENAME} task")
+        _assert_no_leaf_conflict(overlay, fragment, prefix=f"{source} task", source=source)
         overlay = _deep_merge(overlay, fragment)
     return overlay
 
 
-def _assert_no_leaf_conflict(base: dict[str, Any], over: dict[str, Any], *, prefix: str) -> None:
+def _assert_no_leaf_conflict(
+    base: dict[str, Any], over: dict[str, Any], *, prefix: str, source: str = RIG_CONFIG_FILENAME
+) -> None:
     """Raise ConfigError if ``over`` would overwrite a leaf that ``base`` already set.
 
     Deep-merge silently lets a later scalar replace an earlier one; for the ``task:`` block we
     want a true collision (e.g. ``team: HYP`` AND ``linear: {team: X}`` both setting
-    ``linear.team``) to be a hard error, not a last-writer-wins surprise.
+    ``linear.team``) to be a hard error, not a last-writer-wins surprise. ``source`` names the
+    offending file in the error message (see :func:`rig_task_overlay`'s ``source`` param).
     """
     for k, v in over.items():
         if k not in base:
             continue
         bv = base[k]
         if isinstance(bv, dict) and isinstance(v, dict):
-            _assert_no_leaf_conflict(bv, v, prefix=f"{prefix}.{k}")
+            _assert_no_leaf_conflict(bv, v, prefix=f"{prefix}.{k}", source=source)
         elif bv != v:
-            raise ConfigError(f"conflicting value for '{prefix}.{k}' in {RIG_CONFIG_FILENAME}")
+            raise ConfigError(f"conflicting value for '{prefix}.{k}' in {source}")
 
 
 # Built-in defaults — what the tool uses with zero config (GitHub Issues, everything enforced).
@@ -246,6 +273,7 @@ DEFAULTS: dict[str, Any] = {
     "backend": "github-issues",
     "github": {"repo": "auto", "default_labels": ["agent"], "attachment_mode": "native"},
     "linear": {"team": "", "project": "", "attachment_mode": "native"},
+    "tasks": {"url": "", "team": "", "attachment_mode": "native"},
     # Extra hostnames (repo-configured) `_save_attachments` treats as safe to auto-fetch bytes
     # from even though they aren't the tracker's own native asset domain — e.g. a repo's own
     # GitHub Pages host. Empty by default (secure-by-default: unchanged behavior). Fetched
@@ -299,13 +327,18 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _ignore_rig(exc: Exception) -> dict[str, Any]:
+def _ignore_rig(exc: Exception, *, label: str = RIG_CONFIG_FILENAME) -> dict[str, Any]:
     """Log a foreign-rig.yaml problem at WARN and yield an empty overlay (clean fall-through).
 
-    Shared by the rig.yaml load's tolerated failures — unreadable/invalid content
+    Shared by every ``rig.yaml``-shaped load's TOLERATED failures — unreadable/invalid content
     (``ConfigError``) and PyYAML being absent (``ModuleNotFoundError`` on the yaml import) — so
     both warn-and-ignore identically. The message says "not loaded" rather than "unreadable": a
     missing-PyYAML file is perfectly readable, only unparsed.
+
+    ``label`` names the file in the log message — defaults to the plain ``rig.yaml`` filename
+    (the repo's own layer, matching the pre-existing message text exactly). The ancestor-walk
+    and rig-global layers pass their own full path, since "rig.yaml not loaded" is ambiguous
+    once more than one ``rig.yaml``-shaped file can be in play.
 
     The ``log_event`` import is deliberately call-time (not hoisted to module top): tests patch
     ``tasklib.logging.log_event`` to assert the WARN, which only works while the lookup is
@@ -313,8 +346,187 @@ def _ignore_rig(exc: Exception) -> dict[str, Any]:
     """
     from .logging import log_event
 
-    log_event("rig.yaml not loaded; ignoring", level="WARN", error=str(exc))
+    log_event(f"{label} not loaded; ignoring", level="WARN", error=str(exc))
     return {}
+
+
+def _validate_layer_backend(overlay: dict[str, Any], *, source_label: str) -> None:
+    """Fail-closed ``backend:`` enum check at LIFT time, for a single ancestor/rig-global layer.
+
+    The final post-merge :func:`validate` call also checks ``backend`` — but by the time it
+    runs, every layer has already been folded into one dict, so its error can't say WHICH file
+    set the bad value. Ancestor/rig-global layers (never the repo's own tolerant ``rig.yaml``
+    layer, which keeps its pre-existing behavior) get this extra, earlier check so a typo in
+    (say) the second of three ancestor ``rig.yaml`` files names that exact file.
+    """
+    if "backend" not in overlay:
+        return
+    backend = overlay["backend"]
+    # isinstance-before-membership guard, same reasoning as validate()'s own backend check: a
+    # non-hashable value (dict/list from a malformed `backend:`) must fail-closed cleanly here
+    # too, not raise an unhandled TypeError on the `in` membership test.
+    if not isinstance(backend, str) or backend not in VALID_BACKENDS:
+        raise ConfigError(
+            f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r} (from {source_label})"
+        )
+
+
+# Keys the `tasks:` nested section actually understands — mirrors DEFAULTS["tasks"]. Used ONLY
+# by the ancestor/rig-global LIFT-time check below; the repo's own rig.yaml/task.yaml layers
+# stay lenient here (an unknown nested key there is caught, if at all, only by the general
+# post-merge validate(), which does not reject unknown keys within `tasks:` at all today).
+_VALID_TASKS_SECTION_KEYS = frozenset({"url", "team", "attachment_mode"})
+
+
+def _validate_layer_tasks_section(overlay: dict[str, Any], *, source_label: str) -> None:
+    """Fail-closed shape check for a ``tasks:`` section folded from an ancestor/rig-global layer.
+
+    Mirrors :func:`_validate_layer_backend`'s LIFT-time, per-file checking, but for the nested
+    ``tasks:`` section's own fields. The general post-merge :func:`validate` only checks that
+    ``tasks`` overall is a mapping and that ``attachment_mode`` (if present) is a valid enum — it
+    never checks ``url``/``team``'s types, never rejects an unknown key inside ``tasks:``, and by
+    the time it runs every layer has already merged into one dict, so it cannot say WHICH file
+    set a bad value. A workspace-level typo in a Tasks routing key (e.g. ``teem:`` instead of
+    ``team:``) must fail loud here, naming its file, before any backend I/O — never silently
+    fall through to a differently-configured (or wrong) tracker.
+    """
+    tasks_section = overlay.get("tasks")
+    if tasks_section is None:
+        return
+    if not isinstance(tasks_section, dict):
+        raise ConfigError(f"'tasks' must be a mapping (from {source_label}), got {tasks_section!r}")
+    unknown = sorted(set(tasks_section) - _VALID_TASKS_SECTION_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"tasks: unknown key(s) {unknown} (from {source_label}); "
+            f"valid keys: {sorted(_VALID_TASKS_SECTION_KEYS)}"
+        )
+    for key in ("url", "team"):
+        value = tasks_section.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"tasks.{key} must be a string (from {source_label}), got {value!r}")
+    mode = tasks_section.get("attachment_mode")
+    if mode is not None and (not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES):
+        raise ConfigError(
+            f"tasks.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)} "
+            f"(from {source_label}), got {mode!r}"
+        )
+
+
+def _strip_code_prefix(data: dict[str, Any]) -> dict[str, Any]:
+    """Return ``data`` with ``task.code_prefix`` removed, if present — SILENTLY (no WARN).
+
+    ``code_prefix`` is a legitimate key nested under ``task:`` in rig-cli's own schema
+    (materialized into ``.ship-config``'s ``SHIP_TASK_CODE_PREFIX`` for the repo that owns it —
+    see ``riglib/config.py``'s ``_validate_task`` docstring), but it is repo-specific: a
+    folder-level ancestor ``rig.yaml`` (e.g. ``~/xp/rig.yaml``) must not hand its own
+    ``code_prefix`` down to every repo nested under it. Stripping it here — before the block
+    reaches :func:`rig_task_overlay` — keeps it out of the forward-compat "unknown key" WARN
+    path (it isn't a typo, it just doesn't belong at this layer), and out of the merged config
+    entirely (task-cli itself has no use for it).
+    """
+    block = data.get("task")
+    if not isinstance(block, dict) or "code_prefix" not in block:
+        return data
+    out = dict(data)
+    out["task"] = {k: v for k, v in block.items() if k != "code_prefix"}
+    return out
+
+
+def _load_rig_task_layer(
+    path: Path,
+    *,
+    tolerant: bool,
+    source_label: str,
+    strip_code_prefix: bool = False,
+) -> dict[str, Any]:
+    """Load one ``rig.yaml``-shaped file's ``task:`` block into a config overlay.
+
+    Shared by all three ``rig.yaml``-shaped layers (the repo's own, each ancestor, and
+    rig-global) — the only difference is ``tolerant``:
+
+    - ``tolerant=True`` (the repo's own ``rig.yaml``): unreadable/malformed content is
+      warned-and-ignored (:func:`_ignore_rig`), matching this layer's pre-existing forward-compat
+      behavior. Missing PyYAML is tolerated the same way.
+    - ``tolerant=False`` (ancestor / rig-global): malformed CONTENT (bad YAML, non-mapping root,
+      non-mapping ``task:``, a leaf conflict, an invalid ``backend:``) is fail-closed —
+      propagated as ``ConfigError`` naming ``source_label``. Missing PyYAML is still tolerated
+      (an environmental condition, not a content problem) — same as the tolerant case.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        data = _load_yaml(path)
+    except ConfigError as exc:
+        if tolerant:
+            return _ignore_rig(exc, label=source_label)
+        raise
+    except ModuleNotFoundError as exc:
+        # Scoped to the yaml package by exc.name (never the message) — see the identical guard
+        # this mirrors in load()'s original inline repo-rig.yaml handling.
+        name = exc.name or ""
+        if not (name == "yaml" or name == "_yaml" or name.startswith("yaml.")):
+            raise
+        return _ignore_rig(exc, label=source_label)
+
+    if strip_code_prefix and isinstance(data, dict):
+        data = _strip_code_prefix(data)
+
+    overlay = rig_task_overlay(data, source=source_label)
+    if not tolerant:
+        _validate_layer_backend(overlay, source_label=source_label)
+        _validate_layer_tasks_section(overlay, source_label=source_label)
+    return overlay
+
+
+def _ancestor_rig_paths(repo_root: Path, env: dict[str, str]) -> list[Path]:
+    """Ancestor directories (STRICTLY above ``repo_root``) that may carry their own
+    ``rig.yaml`` ``task:`` block — folder-level routing defaults (e.g. ``~/xp/rig.yaml``,
+    ``~/work/rig.yaml``) that apply to every repo nested under them.
+
+    Bounded by ``$HOME`` (from ``env``, never ``Path.home()`` — callers/tests control HOME via
+    the ``env`` param): if ``repo_root`` is inside HOME, the walk goes up to and including HOME
+    itself (a ``~/rig.yaml`` is a legitimate, distinct file from the rig-global config at
+    ``~/.config/rig/config.yaml`` — different filename, different directory, so including HOME
+    here creates no double-read). If ``repo_root`` is outside HOME (e.g. a repo checked out
+    under ``/opt`` or ``/tmp``), the walk goes up to but EXCLUDES the filesystem root.
+
+    Returned OUTER-to-INNER (farthest ancestor first) so folding in that order lets a nearer
+    ancestor's explicit setting override a farther one — the same "later wins" rule as every
+    other cascade layer.
+
+    Uses ``Path.is_relative_to`` (never ``str.startswith``) so a sibling directory whose name
+    happens to prefix-match (``~/xp-other`` vs ``~/xp``) is never treated as an ancestor of a
+    repo under ``~/xp`` — ``is_relative_to`` compares path SEGMENTS, not string prefixes.
+    """
+    home = Path(env.get("HOME") or os.path.expanduser("~")).resolve()
+    ancestors = list(repo_root.parents)  # nearest-first
+    if repo_root.is_relative_to(home):
+        selected = [p for p in ancestors if p.is_relative_to(home)]
+    else:
+        fs_root = Path(repo_root.anchor)
+        selected = [p for p in ancestors if p != fs_root]
+    selected.reverse()  # outer → inner
+    return [p / RIG_CONFIG_FILENAME for p in selected]
+
+
+def _global_rig_task_overlay(env: dict[str, str]) -> tuple[dict[str, Any], Path]:
+    """rig-cli's OWN global config's ``task:`` block.
+
+    ``~/.config/rig/config.yaml`` (or ``$XDG_CONFIG_HOME/rig/config.yaml``) — rig-cli's own
+    machine-wide layer (confirmed via ``riglib/config.py``'s ``global_config_path()``), read
+    here for its ``task:`` block only. Distinct from task-cli's OWN global config
+    (``~/.config/task-cli/config.yaml``, see :func:`global_config_path`) — this reads rig-cli's
+    file, not task-cli's own; the two never collide because they live at different paths.
+
+    Sits BELOW the ancestor-walk layer in the cascade (a folder-level ``rig.yaml`` wins over
+    this truly-global one) and is skipped entirely when ``include_global=False``, same as the
+    native global layer.
+    """
+    base = env.get("XDG_CONFIG_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".config")
+    path = Path(base) / "rig" / "config.yaml"
+    overlay = _load_rig_task_layer(path, tolerant=False, source_label=str(path))
+    return overlay, path
 
 
 def _deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
@@ -404,6 +616,12 @@ class LoadedConfig:
         return str(self.section("github").get("attachment_mode", "native"))
 
     @property
+    def tasks_attachment_mode(self) -> str:
+        """``"native"`` (real Tasks attachment upload) or ``"link"`` (never re-host a local
+        file; only register an already-hosted URL). See :data:`VALID_ATTACHMENT_MODES`."""
+        return str(self.section("tasks").get("attachment_mode", "native"))
+
+    @property
     def trusted_attachment_hosts(self) -> frozenset[str]:
         """Extra hostnames (repo-configured, top-level ``trusted_attachment_hosts:``) that
         ``_save_attachments`` treats as safe to auto-fetch bytes from, even though they are not
@@ -445,14 +663,30 @@ def load(
 ) -> LoadedConfig:
     """Cascade-load config for ``repo_root``, layered over the built-in :data:`DEFAULTS`.
 
-    Layer order (later wins): defaults → global → ``rig.yaml`` ``task:`` block → ``task.yaml``
-    → ``--config P`` (the last replaces the ``task.yaml`` layer) → the
-    ``TASK_CLI_ATTACHMENT_MODE`` env var (highest precedence — a personal, per-machine override
-    that beats even a repo-committed pin; see :data:`ATTACHMENT_MODE_ENV_VAR`). The ``rig.yaml``
-    block is the canonical per-repo tracker selector (rig provisions it); a native ``task.yaml``
-    still wins so a repo that keeps one is unaffected. The result is validated (fail-closed on
-    backend/version) before return. With no config file at all the built-in defaults are
-    returned (the zero-config GitHub-Issues path).
+    Layer order (later wins): defaults → rig-global (rig-cli's own ``~/.config/rig/config.yaml``
+    ``task:`` block — a workspace-wide DEFAULT) → global (task-cli's own
+    ``~/.config/task-cli/config.yaml`` — the user's own EXPLICIT machine-wide choice, which must
+    win over rig-global's default, same as ``task.yaml`` winning over ``rig.yaml`` below) →
+    ancestor ``rig.yaml`` ``task:`` blocks, outer-to-inner (every directory strictly above
+    ``repo_root``, bounded by ``$HOME`` or the filesystem root — see :func:`_ancestor_rig_paths`)
+    → the repo's own ``rig.yaml`` ``task:`` block → ``task.yaml`` → ``--config P`` (the last
+    replaces the ``task.yaml`` layer) → the ``TASK_CLI_ATTACHMENT_MODE`` env var (highest
+    precedence — a personal, per-machine override that beats even a repo-committed pin; see
+    :data:`ATTACHMENT_MODE_ENV_VAR`).
+
+    ``include_global`` skips BOTH truly-global layers (task-cli's own global config and
+    rig-global) — it does NOT skip the ancestor walk, which is folder/workspace-scoped, not
+    machine-global (see :func:`_ancestor_rig_paths`'s docstring and
+    ``docs/plans/2026-09-22-tasks-rig-routing.md``).
+
+    The repo's own ``rig.yaml`` layer keeps its pre-existing TOLERANT behavior (a parse error or
+    unexpected root shape falls through to the github default — it is a foreign file rig-cli
+    owns). The ancestor and rig-global layers are FAIL-CLOSED on malformed content (bad YAML,
+    non-mapping ``task:``, a leaf conflict, an invalid ``backend:``) — they only tolerate PyYAML
+    being absent, same as the repo layer. See :func:`_load_rig_task_layer`.
+
+    The result is validated (fail-closed on backend/version) before return. With no config file
+    at all the built-in defaults are returned (the zero-config GitHub-Issues path).
     """
     import copy
 
@@ -465,41 +699,40 @@ def load(
     layers: list[str] = ["builtin-defaults"]
 
     if include_global:
+        # rig-global folds FIRST (a workspace-wide DEFAULT), so the user's own explicit
+        # task-cli-native global config (right below) can override it on any shared key — the
+        # same relationship task.yaml has with rig.yaml (an explicit per-repo choice always
+        # outranks a rig-provisioned default), not the reverse.
+        rig_global_overlay, rig_global_path = _global_rig_task_overlay(env)
+        if rig_global_overlay:
+            merged = _deep_merge(merged, rig_global_overlay)
+            layers.append(f"rig-global:{rig_global_path}")
+
         gpath = global_config_path(env)
         if gpath.is_file():
             merged = _deep_merge(merged, _load_yaml(gpath))
             layers.append(f"global:{gpath}")
 
+    # Ancestor rig.yaml task: blocks, outer → inner — folder-level routing defaults (e.g.
+    # ~/xp/rig.yaml, ~/work/rig.yaml) that apply to every repo nested under them. NOT gated by
+    # include_global: this is workspace-scoped, an extension of the repo's own rig.yaml layer
+    # below, not a machine-global layer.
+    for ancestor_path in _ancestor_rig_paths(repo_root, env):
+        ancestor_overlay = _load_rig_task_layer(
+            ancestor_path, tolerant=False, source_label=str(ancestor_path), strip_code_prefix=True
+        )
+        if ancestor_overlay:
+            merged = _deep_merge(merged, ancestor_overlay)
+            layers.append(f"rig-ancestor:{ancestor_path}")
+
     # rig.yaml task: block — the per-repo tracker selector, below the native task.yaml so a
     # repo keeping a hand-tuned task.yaml is untouched. Read whether or not --config is given:
     # --config replaces the task.yaml layer, not the toolchain's rig.yaml selection.
-    # rig.yaml is a FOREIGN file (owned/evolved by rig-cli): a parse error or unexpected root
-    # shape must NOT crash every `task` command in the repo — it falls through to the github
-    # default (forward-compat). This tolerance is rig.yaml-only; task-cli's own task.yaml/global
-    # stay fail-closed below.
     rig_path = rig_config_path(repo_root)
-    if rig_path.is_file():
-        try:
-            rig_data = _load_yaml(rig_path)
-        except ConfigError as exc:
-            rig_data = _ignore_rig(exc)
-        except ModuleNotFoundError as exc:
-            # PyYAML absent — the installer may continue without it, promising built-in defaults.
-            # A repo merely CONTAINING a rig.yaml must NOT traceback then; it falls through to the
-            # github default, same as any other foreign-file problem above. ModuleNotFoundError
-            # (not the broader ImportError: a circular/broken-init ImportError is a real bug that
-            # must surface) scoped to the yaml package by exc.name keeps this to "PyYAML not
-            # installed" — any other missing module is a broken environment and is re-raised.
-            # Matched on exc.name only (CPython always sets it), never the message, so a missing
-            # module that merely has "yaml" in its name (e.g. yaml_processor) still surfaces.
-            name = exc.name or ""
-            if not (name == "yaml" or name == "_yaml" or name.startswith("yaml.")):
-                raise
-            rig_data = _ignore_rig(exc)
-        overlay = rig_task_overlay(rig_data)
-        if overlay:
-            merged = _deep_merge(merged, overlay)
-            layers.append(f"rig:{rig_path}")
+    repo_overlay = _load_rig_task_layer(rig_path, tolerant=True, source_label=RIG_CONFIG_FILENAME)
+    if repo_overlay:
+        merged = _deep_merge(merged, repo_overlay)
+        layers.append(f"rig:{rig_path}")
 
     if explicit_config is not None:
         rpath = explicit_config.resolve()
@@ -537,7 +770,11 @@ def load(
             )
         merged = _deep_merge(
             merged,
-            {"linear": {"attachment_mode": override}, "github": {"attachment_mode": override}},
+            {
+                "linear": {"attachment_mode": override},
+                "github": {"attachment_mode": override},
+                "tasks": {"attachment_mode": override},
+            },
         )
         layers.append(f"env:{ATTACHMENT_MODE_ENV_VAR}={override}")
 
@@ -563,7 +800,7 @@ def validate(data: dict[str, Any]) -> None:
     if not isinstance(backend, str) or backend not in VALID_BACKENDS:
         raise ConfigError(f"backend must be one of {sorted(VALID_BACKENDS)}, got {backend!r}")
 
-    for key in ("github", "linear", "enforce", "classify", "session"):
+    for key in ("github", "linear", "tasks", "enforce", "classify", "session"):
         if key in data and not isinstance(data[key], dict):
             raise ConfigError(f"'{key}' must be a mapping")
 
@@ -583,6 +820,14 @@ def validate(data: dict[str, Any]) -> None:
         # now backend-agnostic) — same isinstance-before-membership guard.
         if not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES:
             raise ConfigError(f"github.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)}, got {mode!r}")
+
+    tasks = data.get("tasks")
+    if isinstance(tasks, dict) and "attachment_mode" in tasks:
+        mode = tasks["attachment_mode"]
+        # Symmetric with `linear.attachment_mode`/`github.attachment_mode` above — same
+        # isinstance-before-membership guard.
+        if not isinstance(mode, str) or mode not in VALID_ATTACHMENT_MODES:
+            raise ConfigError(f"tasks.attachment_mode must be one of {sorted(VALID_ATTACHMENT_MODES)}, got {mode!r}")
 
     if "trusted_attachment_hosts" in data:
         hosts = data["trusted_attachment_hosts"]

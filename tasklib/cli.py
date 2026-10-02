@@ -150,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-C", "--cwd", default=".", help="repo root to operate on (default: cwd)"
     )
     common.add_argument(
-        "--backend", help="override the configured backend (github-issues|linear)"
+        "--backend", help="override the configured backend (github-issues|linear|tasks)"
     )
     common.add_argument("--repo", help="override github repo (owner/name)")
     common.add_argument(
@@ -751,6 +751,24 @@ def _current_project_overlay(cfg) -> tuple[str, dict[str, Any]] | None:
         name = f"{team}/{project}" if project else team
         return name, {"backend": "linear", "linear": {"team": team, "project": project}}
 
+    if backend == "tasks":
+        sec = cfg.section("tasks")
+        url = str(sec.get("url", "")).strip()
+        team = str(sec.get("team", "")).strip()
+        if not url or not team:
+            # Same reasoning as the teamless-linear branch above: a misconfigured `backend:
+            # tasks` INSIDE a repo is a real, actionable misconfig, not "outside a repo".
+            if not _in_git_repo(cfg.repo_root):
+                return None
+            _backend(
+                cfg
+            )  # NoReturn here: raises _UserError("tasks backend requires a url"/"...team key")
+            raise AssertionError(
+                "unreachable: _backend raises on a misconfigured tasks config"
+            )
+        name = f"{team}@{url}"
+        return name, {"backend": "tasks", "tasks": {"url": url, "team": team}}
+
     # github-issues
     gh = cfg.section("github")
     repo_spec = str(gh.get("repo", "auto")).strip()
@@ -853,16 +871,18 @@ def _route_id_to_project(ticket_id: str, projects: list):
     if tid.startswith("#") or tid.lstrip("#").isdigit():
         gh = [p for p in projects if p.backend == "github-issues"]
         return gh[0] if len(gh) == 1 else None
-    # Linear-shaped id: TEAM-123 → route by the team prefix. A Linear identifier is team-scoped,
-    # and get/update resolve by the identifier alone (they ignore the project), so ANY registered
-    # project on that team can fetch it — pick the first deterministically rather than calling two
+    # TEAM-123-shaped id: Linear AND Tasks both use this identifier shape and are both
+    # team-scoped, so route by team prefix across BOTH backends — get/update resolve by the
+    # identifier alone (ignoring the project), so ANY registered project on that team (either
+    # backend) can fetch it — pick the first deterministically rather than calling two
     # same-team projects "ambiguous" (they'd resolve the same issue either way).
     prefix = tid.partition("-")[0].upper() if "-" in tid else ""
     if prefix:
         matches = [
             p
             for p in projects
-            if p.backend == "linear" and _linear_team_of(p) == prefix
+            if (p.backend == "linear" and _linear_team_of(p) == prefix)
+            or (p.backend == "tasks" and _tasks_team_of(p) == prefix)
         ]
         if matches:
             return matches[0]
@@ -871,6 +891,10 @@ def _route_id_to_project(ticket_id: str, projects: list):
 
 def _linear_team_of(project) -> str:
     return str(project.overlay.get("linear", {}).get("team", "")).strip().upper()
+
+
+def _tasks_team_of(project) -> str:
+    return str(project.overlay.get("tasks", {}).get("team", "")).strip().upper()
 
 
 def _unroutable_id_error(ticket_id: str, projects: list) -> str:
@@ -894,6 +918,11 @@ def _create_without_repo_error(cfg) -> str:
         how = (
             "  fix: run inside the repo whose `task.yaml` sets `linear.team`, "
             "or set `linear: {team: KEY}` in ~/.config/task-cli/config.yaml."
+        )
+    elif backend == "tasks":
+        how = (
+            "  fix: run inside the repo whose `task.yaml` sets `tasks.url`/`tasks.team`, "
+            "or set `tasks: {url: URL, team: KEY}` in ~/.config/task-cli/config.yaml."
         )
     else:
         how = (
