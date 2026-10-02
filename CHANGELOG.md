@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.3 — 2026-09-30
+
+- `ruff check` (0.16) is clean on the laya auto-installer and its tests (task-cli#224): explicit
+  `check=False` on `subprocess.run`, and the "never raises" handlers log what they swallowed at
+  DEBUG instead of discarding it.
+
 ## 0.21.0 — 2026-09-30
 
 - `task classify` is fast on repeat calls (task-cli#245): the `laya` provider keeps the model

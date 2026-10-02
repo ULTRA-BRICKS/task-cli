@@ -163,6 +163,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import logging
 import math
 import os
 import shutil
@@ -181,6 +182,12 @@ _MAX_DETAIL_CHARS = 200  # truncate a printed failure detail so one failure can'
 # The spec `pyproject.toml`'s `laya` extra pins -- see module docstring's VERSION PIN note.
 # `tests/test_laya_autoinstall.py` asserts this matches `pyproject.toml` via `tomllib`.
 _LAYA_PIP_SPEC = "laya>=0.3.7,<0.4"
+
+# The "never raises" boundaries below (`install`, `ensure_installed`, `_activate_venv_site`,
+# `_laya_importable`) catch everything by contract, so each records what it swallowed here at
+# DEBUG: silent by default (no stderr beyond the one status line), but the traceback is one
+# `logging.basicConfig(level=logging.DEBUG)` away instead of being discarded.
+_logger = logging.getLogger(__name__)
 
 
 def _in_virtualenv() -> bool:
@@ -415,8 +422,9 @@ def _run_subprocess(
     call site threads a non-default one through.
     """
     try:
+        # check=False: every caller reads `returncode` itself (`_run_and_check` folds it).
         return subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=proc_env
+            argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=proc_env, check=False
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
@@ -684,7 +692,7 @@ def _activate_venv_site(site_packages: str) -> None:
     try:
         site.addsitedir(site_packages)
     except Exception:
-        pass
+        _logger.debug("site.addsitedir(%r) failed", site_packages, exc_info=True)
 
 
 def _is_within_dedicated_venv(site_packages: str, venv_dir: Path) -> bool:
@@ -834,6 +842,7 @@ def install(
             return (True, "installed") if ok else (False, detail)
         return _install_into_dedicated_venv(timeout=timeout, env=env)
     except Exception as exc:
+        _logger.debug("unexpected error installing laya", exc_info=True)
         return False, _truncate(str(exc)) or "unexpected error installing laya"
 
 
@@ -845,6 +854,7 @@ def _laya_importable() -> bool:
     try:
         return importlib.util.find_spec("laya") is not None
     except Exception:
+        _logger.debug("find_spec('laya') raised", exc_info=True)
         return False
 
 
@@ -891,5 +901,6 @@ def ensure_installed(*, env: dict[str, str] | None = None, now: float | None = N
         mark_failed_attempt(now=now, env=env)
         return False
     except Exception:
+        _logger.debug("ensure_installed failed unexpectedly", exc_info=True)
         mark_failed_attempt(now=now, env=env)
         return False

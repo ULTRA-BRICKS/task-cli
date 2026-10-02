@@ -37,6 +37,7 @@ def _run(
 ) -> subprocess.CompletedProcess:
     # `set -euo pipefail` matches install.sh's OWN context exactly (review finding) -- a
     # harness that omits it can't catch a script that only breaks under those exact options.
+    # check=False: every caller asserts on returncode/stdout itself, including nonzero exits.
     return subprocess.run(
         [bash, "-c", f'set -euo pipefail; source "{lib_path}"; task_install_laya "$1" "$2"', "--", python_exe, repo_root],
         capture_output=True,
@@ -44,6 +45,7 @@ def _run(
         timeout=timeout,
         cwd=cwd,
         env=env,
+        check=False,
     )
 
 

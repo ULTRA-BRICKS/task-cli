@@ -321,7 +321,7 @@ def test_install_reuses_an_already_working_dedicated_venv(monkeypatch, dedicated
 
     monkeypatch.setattr(laya_autoinstall.subprocess, "run", fake_run)
     ok, detail = laya_autoinstall.install()
-    assert ok is True
+    assert (ok, detail) == (True, "installed (venv)")
     kinds = [_classify(c) for c in calls]
     assert kinds == ["probe", "install", "site_query"]  # exactly one probe, no (re)creation
 
@@ -1152,13 +1152,16 @@ def test_ensure_installed_second_call_after_failure_is_silent_within_cooldown(tm
     assert capsys.readouterr().err == ""
 
 
-def test_ensure_installed_never_raises_on_an_unexpected_exception(tmp_path, monkeypatch):
+def test_ensure_installed_never_raises_on_an_unexpected_exception(tmp_path, monkeypatch, caplog):
     env = {"XDG_STATE_HOME": str(tmp_path)}
 
     def _boom(**kw):
         raise RuntimeError("simulated unexpected failure")
 
     monkeypatch.setattr(laya_autoinstall, "install", _boom)
-    result = laya_autoinstall.ensure_installed(env=env, now=9_000_000.0)
+    with caplog.at_level("DEBUG", logger=laya_autoinstall.__name__):
+        result = laya_autoinstall.ensure_installed(env=env, now=9_000_000.0)
     assert result is False
     assert laya_autoinstall.cache_path(env).exists()  # cooldown marked even on a weird failure
+    # swallowed, not discarded: the traceback is recoverable through logging
+    assert any(isinstance(r.exc_info and r.exc_info[1], RuntimeError) for r in caplog.records)
