@@ -370,10 +370,11 @@ def test_grouped_list_is_paged_on_tty(capsys, tmp_path, monkeypatch):
     assert "acme/backend" in paged and "#7" in paged
 
 
+@pytest.mark.parametrize("ticket_id", ["#42", "42"])
 def test_read_outside_repo_routes_to_single_github_project(
-    capsys, tmp_path, monkeypatch
+    capsys, tmp_path, monkeypatch, ticket_id
 ):
-    # exactly one github project registered → a `#id` routes there unambiguously.
+    # exactly one github project registered → a numeric id routes there unambiguously.
     class _Get:
         def __call__(self, cfg, env=None):
             assert cfg.section("github").get("repo") == "acme/only"
@@ -381,7 +382,7 @@ def test_read_outside_repo_routes_to_single_github_project(
 
     class _One:
         def get(self, tid):
-            assert tid == "#42"
+            assert tid == ticket_id
             return Ticket(
                 title="The one", what="body", state=State.TODO, id="#42", url="u"
             )
@@ -390,7 +391,7 @@ def test_read_outside_repo_routes_to_single_github_project(
     monkeypatch.setenv(
         "XDG_CONFIG_HOME", _gh_config(tmp_path, "projects:\n  - {repo: acme/only}\n")
     )
-    rc = main(["read", "#42", "-C", str(tmp_path)])
+    rc = main(["read", ticket_id, "-C", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "#42" in out and "The one" in out
@@ -753,3 +754,146 @@ def test_status_outside_repo_same_team_linear_attention_notice_surfaces_earlier_
     # the read side used a naive (unrouted) coordinate instead of HYP-1's own verified one.
     assert "HYP-1" in out
     assert "attention" in out.lower() or "recently touched" in out.lower()
+
+
+@pytest.mark.parametrize(
+    "ticket_id", ["##1", "# 1", "#\t1", "TEST-1", "CODE", "HYP-123"]
+)
+def test_read_outside_repo_rejects_invalid_ref_before_backend(
+    capsys, tmp_path, monkeypatch, ticket_id
+):
+    calls = 0
+
+    def _backend_was_not_needed(cfg, env=None):
+        nonlocal calls
+        calls += 1
+        return _Read()
+
+    class _Read:
+        def get(self, ticket_id):
+            return Ticket(title="unexpected", state=State.TODO, id=ticket_id, url="u")
+
+    monkeypatch.setattr("tasklib.backends.get_backend", _backend_was_not_needed)
+    monkeypatch.setenv(
+        "XDG_CONFIG_HOME", _gh_config(tmp_path, "projects:\n  - {repo: acme/only}\n")
+    )
+
+    rc = main(["read", ticket_id, "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert calls == 0
+    assert "not a GitHub issue number" in out
+    assert "task find" in out
+    assert "task new" in out
+
+
+@pytest.mark.parametrize("ticket_id", ["TEST-1", "other/repo#42"])
+def test_read_current_project_rejects_invalid_ref_before_backend(
+    capsys, tmp_path, monkeypatch, ticket_id
+):
+    calls = 0
+
+    def _backend_was_not_needed(cfg, env=None):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("backend construction should not be reached")
+
+    monkeypatch.setattr("tasklib.backends.get_backend", _backend_was_not_needed)
+    monkeypatch.setattr(
+        cli,
+        "_current_project_overlay",
+        lambda cfg: (
+            "acme/pinned",
+            {"backend": "github-issues", "github": {"repo": "acme/pinned"}},
+        ),
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", _gh_config(tmp_path, "projects:\n"))
+
+    rc = main(["read", ticket_id, "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert calls == 0
+    assert "not a GitHub issue number" in out
+    assert "task find" in out and "task new" in out
+
+def test_read_outside_repo_cross_repo_github_ref_is_not_routed(
+    capsys, tmp_path, monkeypatch
+):
+    calls = 0
+
+    def _backend_was_not_needed(cfg, env=None):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("backend construction should not be reached")
+
+    monkeypatch.setattr("tasklib.backends.get_backend", _backend_was_not_needed)
+    monkeypatch.setenv(
+        "XDG_CONFIG_HOME", _gh_config(tmp_path, "projects:\n  - {repo: acme/only}\n")
+    )
+
+    rc = main(["read", "other/repo#42", "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert calls == 0
+    assert "not a GitHub issue number" in out
+
+
+def test_read_teamless_linear_rejects_malformed_ref_before_backend(
+    capsys, tmp_path, monkeypatch
+):
+    import subprocess
+
+    repo = tmp_path / "linear"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "task.yaml").write_text("version: 1\nbackend: linear\n", encoding="utf-8")
+    calls = 0
+
+    def _backend_was_not_needed(cfg, env=None):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("backend construction should not be reached")
+
+    monkeypatch.setattr("tasklib.backends.get_backend", _backend_was_not_needed)
+
+    rc = main(["read", "TEST-1", "-C", str(repo)])
+    out = capsys.readouterr().out
+
+    assert rc == 2
+    assert calls == 0
+    assert "cannot be validated as a Linear identifier" in out
+
+
+def test_read_outside_repo_teamless_linear_routes_to_registered_project(
+    capsys, tmp_path, monkeypatch
+):
+    cfg_home = tmp_path / "config"
+    config_dir = cfg_home / "task-cli"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "version: 1\nbackend: linear\nlinear: {team: ''}\n"
+        "projects:\n  - {name: HYP, backend: linear, team: HYP}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
+
+    class LinearBackend:
+        def get(self, ticket_id):
+            assert ticket_id == "HYP-3"
+            return Ticket(id="HYP-3")
+
+    def get_backend(cfg, env=None):
+        assert cfg.backend == "linear"
+        assert cfg.section("linear").get("team") == "HYP"
+        return LinearBackend()
+
+    monkeypatch.setattr("tasklib.backends.get_backend", get_backend)
+
+    rc = main(["read", "HYP-3", "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "HYP-3" in out

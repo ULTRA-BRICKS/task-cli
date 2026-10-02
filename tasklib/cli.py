@@ -809,6 +809,23 @@ def _known_projects(cfg) -> tuple[list, str | None]:
     return projects, current_coordinate
 
 
+def _validate_id_for_config(cfg, ticket_id: str):
+    """Reject a ticket id whose shape does not match the config before building a backend."""
+    from .taskref import TaskRefError, github_issue_number, validate
+
+    if cfg.backend == "github-issues":
+        try:
+            github_issue_number(ticket_id)
+        except TaskRefError as exc:
+            raise _UserError(str(exc)) from exc
+        return
+
+    team = cfg.section("linear").get("team", "") if cfg.backend == "linear" else ""
+    result = validate(ticket_id, backend=cfg.backend, linear_team=team)
+    if not result.ok:
+        raise _UserError(result.reason)
+
+
 def _config_for_id(cfg, ticket_id: str):
     """Resolve the config to use for ``ticket_id`` — the cwd's when inside a repo (or with a
     pinned coordinate / ``--repo``), else the config the registered project's overlay resolves
@@ -820,15 +837,24 @@ def _config_for_id(cfg, ticket_id: str):
     entry's overlay — ``enforce:`` always resolves to the CALLER's own config, whether pinned
     or registry-routed, never the ticket's owning project's committed `task.yaml` (cross-project
     `enforce:` override tracked in task-cli#117, an open design question, not an obvious bug)."""
+    if cfg.backend == "linear" and not str(cfg.section("linear").get("team", "")).strip() and _in_git_repo(cfg.repo_root):
+        # Validate before `_current_project_overlay` can surface the in-repo teamless-config
+        # error through `_backend`; malformed ids must fail closed without backend construction.
+        _validate_id_for_config(cfg, ticket_id)
     if _current_project_overlay(cfg) is not None:
+        _validate_id_for_config(cfg, ticket_id)
         return cfg
 
     projects, _ = _known_projects(cfg)
     candidates = [p for p in projects if p.explicit]
     chosen = _route_id_to_project(ticket_id, candidates)
     if chosen is None:
+        _validate_id_for_config(cfg, ticket_id)
         raise _UserError(_unroutable_id_error(ticket_id, candidates))
-    return _config_for_overlay(cfg, chosen.overlay)
+    project_cfg = _config_for_overlay(cfg, chosen.overlay)
+    _validate_id_for_config(project_cfg, ticket_id)
+    return project_cfg
+
 
 
 def _backend_for_id(cfg, ticket_id: str):
@@ -849,23 +875,32 @@ def _routing_for_id(cfg, ticket_id: str):
 
 def _route_id_to_project(ticket_id: str, projects: list):
     """Pick the registered project that owns ``ticket_id``, or ``None`` if ambiguous/none."""
-    tid = ticket_id.strip()
-    if tid.startswith("#") or tid.lstrip("#").isdigit():
-        gh = [p for p in projects if p.backend == "github-issues"]
-        return gh[0] if len(gh) == 1 else None
-    # Linear-shaped id: TEAM-123 → route by the team prefix. A Linear identifier is team-scoped,
-    # and get/update resolve by the identifier alone (they ignore the project), so ANY registered
-    # project on that team can fetch it — pick the first deterministically rather than calling two
-    # same-team projects "ambiguous" (they'd resolve the same issue either way).
-    prefix = tid.partition("-")[0].upper() if "-" in tid else ""
-    if prefix:
-        matches = [
-            p
-            for p in projects
-            if p.backend == "linear" and _linear_team_of(p) == prefix
-        ]
-        if matches:
-            return matches[0]
+    from .taskref import TaskRefError, github_issue_number, validate
+
+    valid = []
+    for project in projects:
+        if project.backend == "github-issues":
+            # `validate` also accepts owner/repo#N as a library-level cross-repo reference,
+            # but GitHubIssuesBackend._issue_number only accepts same-repo #N / N.
+            try:
+                github_issue_number(ticket_id)
+            except TaskRefError:
+                continue
+            valid.append(project)
+        elif validate(
+            ticket_id,
+            backend=project.backend,
+            linear_team=_linear_team_of(project),
+        ).ok:
+            valid.append(project)
+    gh = [p for p in valid if p.backend == "github-issues"]
+    if len(gh) == 1:
+        return gh[0]
+    if gh:
+        return None
+    linear = [p for p in valid if p.backend == "linear"]
+    if linear:
+        return linear[0]
     return None
 
 
