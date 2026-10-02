@@ -110,3 +110,150 @@ def test_tasks_errors_never_echo_the_token_or_url_credentials(monkeypatch):
         with pytest.raises(BackendError) as info:
             TasksBackend(url=url, token=TOKEN, team_key='HYP')
         assert 'hunter2-secret' not in str(info.value)
+
+
+@pytest.mark.parametrize("operation", ["read", "comment", "transition"])
+def test_foreign_team_key_is_rejected_before_any_request(api, operation):
+    instance = backend()
+    with pytest.raises(BackendError, match="configured.*HYP"):
+        if operation == "read":
+            instance.get("GL-264")
+        elif operation == "comment":
+            instance.comment("GL-264", "Must not be written")
+        else:
+            instance.transition("GL-264", State.DONE)
+    assert api == []
+
+
+@pytest.mark.parametrize("code", ["not-a-ticket", "https://linear.app/glide/issue/GL-264", "GL-264/extra"])
+def test_malformed_or_other_tracker_reference_is_not_a_tasks_lookup(api, code):
+    with pytest.raises(BackendError, match="Tasks identifier"):
+        backend().get(code)
+    assert api == []
+
+
+def test_explicit_uuid_remains_a_supported_tasks_lookup(api):
+    ticket = backend().get(ROW["id"])
+    assert ticket.url.endswith(ROW["id"])
+    assert len(api) == 1
+
+
+def test_cross_team_update_refuses_before_creating_labels(api):
+    from dataclasses import replace
+    b = backend()
+    ticket = b.get('HYP-1')
+    api.clear()
+    with pytest.raises(BackendError, match='configured.*HYP'):
+        b.update(replace(ticket, id='GL-264', labels=['new-label']))
+    assert api == []
+
+
+def test_comment_refuses_a_response_for_a_different_identifier(monkeypatch):
+    b = backend()
+    calls = []
+    def wrong_issue(path, **kwargs):
+        calls.append((path, kwargs))
+        return {**ROW, 'key': 'HYP-2'}
+    monkeypatch.setattr(b, '_call', wrong_issue)
+    with pytest.raises(BackendError, match='different issue'):
+        b.comment('HYP-1', 'Must not attach to HYP-2')
+    assert len(calls) == 1
+    assert calls[0][1].get('method', 'GET') == 'GET'
+
+
+def test_uuid_lookup_refuses_a_response_for_a_different_uuid(monkeypatch):
+    b = backend()
+    monkeypatch.setattr(b, '_call', lambda *args, **kwargs: {**ROW, 'id': '22222222-2222-4222-8222-222222222222'})
+    with pytest.raises(BackendError, match='different issue'):
+        b.get(ROW['id'])
+
+
+
+def test_comment_uses_verified_uuid_not_a_reassignable_short_key(api):
+    backend().comment('hyp-1', 'Verified target')
+    assert api[-1][1].endswith('/issues/' + ROW['id'] + '/comments')
+    assert api[-1][0] == 'POST'
+
+
+def test_foreign_update_on_a_cold_backend_makes_no_requests(api):
+    from dataclasses import replace
+    b = backend()
+    ticket = b._row_to_ticket(ROW)
+    assert b._team_id == ''
+    with pytest.raises(BackendError, match='configured.*HYP'):
+        b.update(replace(ticket, id='GL-264', labels=['new-label']))
+    assert api == []
+
+
+def test_invalid_provider_url_is_not_reflected_in_errors(api):
+    url = 'https://linear.app/glide/issue/GL-264?access=fixture-private-value'
+    with pytest.raises(BackendError) as error:
+        backend().get(url)
+    assert 'fixture-private-value' not in str(error.value)
+    assert api == []
+
+
+
+def test_invalid_reference_is_not_leaked_by_exception_traceback(api):
+    import traceback
+    url = 'https://linear.app/glide/issue/GL-264?access=fixture-private-value'
+    with pytest.raises(BackendError) as error:
+        backend().get(url)
+    rendered = ''.join(traceback.format_exception(error.value))
+    assert 'fixture-private-value' not in rendered
+    assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize('form', [ROW['id'].replace('-', ''), '{' + ROW['id'] + '}', 'urn:uuid:' + ROW['id']])
+def test_uuid_forms_outside_the_canonical_contract_are_refused(api, form):
+    with pytest.raises(BackendError, match='Tasks identifier'):
+        backend().get(form)
+    assert api == []
+
+
+def test_uppercase_uuid_request_is_canonicalized(monkeypatch):
+    uid = 'abcdefab-1234-4567-8abc-123456abcdef'
+    b = backend()
+    paths = []
+    def request(path, **kwargs):
+        paths.append(path)
+        return {**ROW, 'id': uid}
+    monkeypatch.setattr(b, '_call', request)
+    b.get(uid.upper())
+    assert paths == ['/api/v1/issues/' + uid]
+
+
+def test_uuid_does_not_apply_configured_team_status_to_a_foreign_team(api, monkeypatch):
+    b = backend()
+    b._ensure_catalog()
+    api.clear()
+    calls = []
+    def request(path, **kwargs):
+        calls.append((path, kwargs))
+        return {**ROW, 'key': 'GL-264', 'team_id': 'team-gl'}
+    monkeypatch.setattr(b, '_call', request)
+    with pytest.raises(BackendError, match='configured.*HYP'):
+        b.transition(ROW['id'], State.DONE)
+    assert len(calls) == 1
+    assert calls[0][1].get('method', 'GET') == 'GET'
+
+
+
+def test_update_requires_the_team_key_returned_by_the_original_read(api):
+    from dataclasses import replace
+    b = backend()
+    ticket = b.get(ROW['id'])
+    assert ticket.id == 'HYP-1'
+    api.clear()
+    with pytest.raises(BackendError, match='configured.*HYP'):
+        b.update(replace(ticket, id=ROW['id'], labels=['new-label']))
+    assert api == []
+
+
+def test_uuid_read_then_update_preserves_normal_supported_flow(api):
+    b = backend()
+    ticket = b.get(ROW['id'])
+    result = b.update(ticket)
+    assert result.id == 'HYP-1'
+    write = next(call for call in api if call[0] == 'PATCH')
+    assert write[2]['version'] == ROW['version']
