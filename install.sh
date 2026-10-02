@@ -91,3 +91,11 @@ echo "         task change <id> --done — close (runs the on-done gates)"
 echo "         task classify \"<text>\"  — change|actionable|justAsk (the tg hook entry)"
 echo "         task --help             — full usage"
 echo ""
+
+# ── refresh rig's zsh completion for `task` ──────────────────────────────────
+# rig-cli's zsh-completion mechanism (docs/specs/rig-zsh-completion.md there) re-execs
+# `task --print-completion zsh` to regenerate the cached `_task` compsys file whenever
+# this tool installs/updates, so completion never goes stale. Non-fatal: a machine
+# without `rig` on PATH yet (e.g. task-cli installed before rig-cli, or rig-cli not
+# adopted at all) must not fail task-cli's own install.
+rig completion refresh --tool task || true

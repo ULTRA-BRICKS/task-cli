@@ -10,10 +10,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Alex Mextner" }]
-# pyyaml is the only hard runtime dep (task.yaml parse). It is imported lazily so
-# `task --help` runs even if it is missing; the tool degrades to built-in defaults.
+# pyyaml is a hard runtime dep (task.yaml parse); shtab powers the hidden
+# `--print-completion {bash,zsh,tcsh}` flag rig-cli's zsh-completion mechanism execs
+# (docs/specs/rig-zsh-completion.md in rig-cli). Both are imported lazily inside
+# build_parser()/_load_yaml() so `task --help` runs even if either is missing; the tool
+# degrades to built-in defaults / a completion-less parser rather than failing.
 # tomllib (Linear credentials) is stdlib on 3.11+. The HTTP backends use stdlib urllib.
-dependencies = ["pyyaml"]
+dependencies = ["pyyaml", "shtab>=1.6,<2"]
 
 [project.optional-dependencies]
 test = ["pytest"]

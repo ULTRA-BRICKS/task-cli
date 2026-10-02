@@ -590,6 +590,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="listen port (default 8765)",
     )
 
+    # shtab hidden --print-completion hook: rig-cli's zsh-completion mechanism execs
+    # `task --print-completion zsh` to generate a real, cached zsh compsys script
+    # (docs/specs/rig-zsh-completion.md in rig-cli) — never imports this parser directly,
+    # always the installed binary, so it works identically regardless of install method.
+    # Added last, after every subcommand/subparser above is assembled, so the emitted
+    # script covers the whole tree; must run before parse_args() sees argv.
+    # Guarded like _load_yaml's `import yaml` (config.py): shtab is a declared runtime
+    # dep (pyproject.toml), but build_parser() runs on EVERY invocation — unlike
+    # _load_yaml, which only fires when a task.yaml is actually read — so a partial
+    # install (deps not yet synced) must not break `task --help`/every other command.
+    try:
+        import shtab
+    except ImportError:
+        pass
+    else:
+        shtab.add_argument_to(p, ["--print-completion"])
+
     return p
 
 
