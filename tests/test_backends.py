@@ -2842,19 +2842,21 @@ def test_tasks_update_managed_body_edit_persists_change(monkeypatch):
     assert updated.backend_version == managed_row["version"] + 1
 
 
-def test_tasks_ambiguous_read_not_catchable_as_backend_error(monkeypatch):
+@pytest.mark.parametrize("method", ["GET", "PATCH"])
+def test_tasks_transport_failure_preserves_mutation_ambiguity(monkeypatch, method):
     from tasklib.backends.http import AmbiguousHttpError
 
-    def fake_request_bytes(url, *, method="GET", headers=None, data=None, timeout=60, same_host_redirects_only=False):
-        raise AmbiguousHttpError(f"connection dropped after 200 for {method} {url}")
+    calls = []
+    def fake_request_bytes(url, **kwargs):
+        calls.append(kwargs)
+        raise AmbiguousHttpError("connection dropped after 200")
 
     monkeypatch.setattr("tasklib.backends.tasks.request_bytes", fake_request_bytes)
-    try:
-        _tasks_backend().get("GL-1")
-    except BackendError:
-        pytest.fail("AmbiguousBackendError must not be catchable as BackendError")
-    except AmbiguousBackendError:
-        pass
+    expected = BackendError if method == "GET" else AmbiguousBackendError
+    with pytest.raises(expected):
+        _tasks_backend()._call("/api/v1/issues/GL-1", method=method)
+    assert len(calls) == 1
+    assert not issubclass(AmbiguousBackendError, BackendError)
 
 
 def test_tasks_all_calls_pass_same_host_redirects_only(monkeypatch):

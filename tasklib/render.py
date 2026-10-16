@@ -417,6 +417,7 @@ def parse(body: str, ticket: Ticket | None = None) -> Ticket:
         deployed_at=deployed_at,
         deployed_note=deployed_note,
         raw_body=body,
+        raw_body_available=True,
     )
 
 

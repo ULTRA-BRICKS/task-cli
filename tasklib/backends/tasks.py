@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass, field, replace
 from urllib.parse import quote, urlencode
 
@@ -181,30 +182,54 @@ class TasksBackend:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
 
-    def _call(self, path: str, *, method: str = "GET", payload: dict | None = None):
+    def _call(
+        self, path: str, *, method: str = "GET", payload: dict | None = None,
+        idempotency_key: str | None = None,
+    ):
         url = self.url + path
         headers = self._headers()
         data = None
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        try:
-            raw = request_bytes(
-                url, method=method, headers=headers, data=data, same_host_redirects_only=True
-            )
-        except AmbiguousHttpError as exc:
-            # caught before HttpError on purpose: AmbiguousHttpError is not an HttpError
-            # subclass (see its docstring) — this gives it its own distinctly-typed wrapper
-            # instead of falling through to the generic BackendError below.
-            raise AmbiguousBackendError(self._scrub(f"tasks: {exc}")) from None
-        except HttpError as exc:
-            raise BackendError(self._scrub(f"tasks: {exc} {exc.body}".strip())) from None
-        if not raw:
-            return None
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise BackendError(f"tasks: malformed response for {method} {url}: {exc}") from exc
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        # The server stores the create receipt against key + payload. Serialize once and
+        # reuse both for the single recovery attempt; never replay another mutation.
+        attempts = 2 if idempotency_key else 1
+        for attempt in range(attempts):
+            try:
+                raw = request_bytes(
+                    url, method=method, headers=headers, data=data, same_host_redirects_only=True
+                )
+                try:
+                    result = json.loads(raw.decode("utf-8")) if raw else None
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    if method.upper() in {"GET", "HEAD"}:
+                        raise BackendError(f"tasks: malformed JSON response for {method} {path}") from None
+                    raise AmbiguousHttpError("response was not usable JSON; request may have completed") from None
+                if idempotency_key and (not isinstance(result, dict) or not result.get("id")):
+                    raise AmbiguousHttpError("create receipt missing; request may have completed")
+                return result
+            except AmbiguousHttpError as exc:
+                if method.upper() in {"GET", "HEAD"}:
+                    raise BackendError(f"tasks: unusable response for {method} {path}") from None
+                if attempt + 1 < attempts:
+                    continue
+                note = (
+                    f"; recovery exhausted for operation {idempotency_key}; "
+                    "the issue may have been created — inspect the backend before a new create"
+                    if idempotency_key else ""
+                )
+                raise AmbiguousBackendError(self._scrub(f"tasks: {exc}{note}")) from None
+            except HttpError as exc:
+                if attempt:
+                    raise AmbiguousBackendError(self._scrub(
+                        f"tasks: recovery failed for operation {idempotency_key} "
+                        f"(HTTP {exc.status}): {exc} {exc.body}; "
+                        "the issue may have been created — inspect the backend before a new create"
+                    )) from None
+                raise BackendError(self._scrub(f"tasks: {exc} {exc.body}".strip())) from None
 
     def _scrub(self, text: str) -> str:
         """Error text with this backend's token (and any other token-shaped value) removed — a
@@ -333,7 +358,7 @@ class TasksBackend:
         return None
 
     # ── row <-> Ticket ───────────────────────────────────────────────────────────
-    def _row_to_ticket(self, row: dict) -> Ticket:
+    def _row_to_ticket(self, row: dict, *, include_comments: bool = True) -> Ticket:
         # PRESENCE-check, not truthy-check: `"due_date" in row` is the only way to tell "the
         # server explicitly cleared this" (key present, value null/absent-of-value → must win
         # and clear the ticket's due date) apart from "this response simply doesn't carry the
@@ -342,6 +367,18 @@ class TasksBackend:
         # alone cannot distinguish these two cases — both collapse to the empty string — and a
         # response shape that omits `due_date` entirely would otherwise silently wipe a real
         # body-parsed due date on every read (found during Phase-3 integration review).
+        # Mutation receipts confirm the write, not a complete discussion fetch. Ancillary
+        # discussion data must not turn a confirmed write into an apparent failure.
+        comments = row.get("comments") if include_comments else None
+        if comments is not None and (
+            not isinstance(comments, list)
+            or any(
+                not isinstance(comment, dict)
+                or not isinstance(comment.get("body"), str)
+                for comment in comments
+            )
+        ):
+            raise BackendError("tasks: malformed comments in issue response")
         has_native_due = "due_date" in row
         native_due = str(row.get("due_date") or "")
         state = self._derive_state(row)
@@ -356,6 +393,8 @@ class TasksBackend:
             created_at=str(row.get("created_at") or ""),
             due=native_due,
             backend_version=int(row.get("version") or 0),
+            comments=comments,
+            comments_truncated=include_comments and bool(row.get("comments_truncated", False)),
         )
         ticket = parse(row.get("description") or "", base)
         if not has_native_due:
@@ -392,10 +431,13 @@ class TasksBackend:
         }
         if ticket.due.strip():
             payload["due_date"] = ticket.due.strip()
-        row = self._call("/api/v1/issues", method="POST", payload=payload)
+        row = self._call(
+            "/api/v1/issues", method="POST", payload=payload,
+            idempotency_key=f"task-create:{uuid.uuid4()}",
+        )
         if not isinstance(row, dict) or not row.get("id"):
             raise BackendError(f"tasks: issue create returned a malformed response: {row!r}")
-        return self._row_to_ticket(row)
+        return self._row_to_ticket(row, include_comments=False)
 
     def get(self, ticket_id: str) -> Ticket:
         return self._row_to_ticket(self._issue_row(ticket_id))
@@ -449,7 +491,7 @@ class TasksBackend:
         updated = self._call(f"/api/v1/issues/{quote(code, safe='')}", method="PATCH", payload=payload)
         if not isinstance(updated, dict) or not updated.get("id"):
             raise BackendError(f"tasks: issue update returned a malformed response: {updated!r}")
-        return self._row_to_ticket(updated)
+        return self._row_to_ticket(updated, include_comments=False)
 
     def _update_version(self, ticket: Ticket) -> int:
         """Validate and return the optimistic-concurrency token ``update`` must send — always
@@ -667,7 +709,7 @@ class TasksBackend:
         updated = self._call(f"/api/v1/issues/{row['id']}", method="PATCH", payload=payload)
         if not isinstance(updated, dict) or not updated.get("id"):
             raise BackendError(f"tasks: issue transition returned a malformed response: {updated!r}")
-        return self._row_to_ticket(updated)
+        return self._row_to_ticket(updated, include_comments=False)
 
     def session_tickets(self, session_label: str, *, limit: int = 30) -> list[Ticket]:
         return self.list(labels=[session_label], limit=limit)

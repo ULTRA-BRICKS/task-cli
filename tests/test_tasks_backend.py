@@ -110,3 +110,20 @@ def test_tasks_errors_never_echo_the_token_or_url_credentials(monkeypatch):
         with pytest.raises(BackendError) as info:
             TasksBackend(url=url, token=TOKEN, team_key='HYP')
         assert 'hunter2-secret' not in str(info.value)
+
+
+@pytest.mark.parametrize('comments', [[], [{'id': 'c2', 'body': 'Second'}, {'id': 'c1', 'body': 'First', 'author_source_id': 'imported-person', 'source': {'provider': 'linear'}}]])
+def test_get_retains_complete_comment_rows_in_server_order(monkeypatch, comments):
+    calls = []
+    def call(self, path, **kwargs):
+        calls.append(path)
+        return {**ROW, 'comments': comments}
+    monkeypatch.setattr(TasksBackend, '_call', call)
+    ticket = backend().get('HYP-1')
+    assert ticket.comments == comments
+    assert not ticket.comments_truncated
+    assert calls == ['/api/v1/issues/HYP-1']
+
+
+def test_omitted_comments_are_not_loaded(api):
+    assert backend().get('HYP-1').comments is None

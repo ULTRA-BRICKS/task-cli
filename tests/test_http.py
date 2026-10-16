@@ -167,25 +167,13 @@ def test_request_json_wraps_construction_time_valueerror_as_http_error():
         request_json("https://[bad/api/v3/repos/o/r/issues", method="POST")
 
 
-def test_request_json_leaves_bad_status_line_unhandled_by_design(monkeypatch):
-    # scope-boundary regression guard (round 2 → round 3 review history): an EARLIER version of
-    # this fix widened the catch to the whole http.client.HTTPException family and tried to
-    # split it into "clean" (pre-send) vs "ambiguous" (post-send) buckets. Three independent
-    # reviewers then found that split itself was unsound — http.client.RemoteDisconnected is
-    # simultaneously an OSError (→ urllib wraps it into URLError, a "clean" bucket) AND a
-    # BadStatusLine (→ the "ambiguous" bucket), so which bucket it lands in depends on
-    # CPython/urllib internals, not on anything this module controls; a raw OSError escaping
-    # getresponse() has the identical problem. Rather than chase that classification into
-    # CPython version-sensitive territory, the scope was pulled back to ONLY the unambiguous
-    # InvalidURL case (see request_json's/request_bytes's docstrings). This test pins that
-    # BadStatusLine is a PRE-EXISTING, deliberately-untouched crash mode — not a silent
-    # regression — so a future change doesn't "fix" it by accidentally reopening the unsound
-    # split.
+def test_request_json_bad_status_line_is_conservatively_ambiguous(monkeypatch):
+    # A malformed status gives no evidence that the write did not commit.
     def fake_urlopen(req, timeout=None):
         raise http.client.BadStatusLine("garbage status line")
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    with pytest.raises(http.client.BadStatusLine):
+    with pytest.raises(AmbiguousHttpError):
         request_json("https://api.github.com/repos/o/r/issues", method="POST")
 
 
