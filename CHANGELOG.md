@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.22.1 — 2026-10-16
+
+- Linear backend: a team with more than 50 labels no longer fails `task new`, `task check`,
+  `task link`, `task mark-shipped` or any other update with `duplicate label name`
+  (task-cli#241, #265, #268). The label cache now reads every page of the team's labels
+  (Linear's `team.labels` returns workspace labels too), and a label another session creates
+  between that read and our create is looked up by name instead of failing the command.
+
 ## 0.22.0 — 2026-10-01
 
 - New `task change <id> --unlabel <label>` (repeatable) removes a label the ticket carries and

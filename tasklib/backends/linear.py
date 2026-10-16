@@ -55,6 +55,8 @@ from .http import (
 )
 
 API_URL = "https://api.linear.app/graphql"
+# Labels fetched per GraphQL page; Linear's own default, well under its query-complexity cap.
+_LABEL_PAGE = 50
 # The ONLY hosts `fetch_attachment_bytes` will send the Linear API key to (review finding: never
 # attach auth to an arbitrary attachment URL — see that method's docstring).
 _LINEAR_ASSET_HOSTS = frozenset({"uploads.linear.app"})
@@ -153,7 +155,8 @@ class LinearBackend:
             return
         data = self._query(
             "query($key:String!){teams(filter:{key:{eq:$key}}){nodes{id "
-            "states{nodes{id name type}} labels{nodes{id name}}}}}",
+            "states{nodes{id name type}} "
+            f"labels(first:{_LABEL_PAGE}){{nodes{{id name}} pageInfo{{hasNextPage endCursor}}}}}}}}}}",
             {"key": self.team_key},
         )
         nodes = data.get("teams", {}).get("nodes", [])
@@ -163,8 +166,27 @@ class LinearBackend:
         self._team_id = team["id"]
         for st in team.get("states", {}).get("nodes", []):
             self._states_by_type.setdefault(st["type"], st["id"])
-        for lbl in team.get("labels", {}).get("nodes", []):
-            self._labels[lbl["name"].lower()] = lbl["id"]
+        # Linear pages a team's labels (50 by default); the connection also carries the
+        # workspace labels (team null) this team may use. Caching only the first page made every
+        # older label look missing, and re-creating it fails "duplicate label name" (task-cli#241).
+        labels = team.get("labels", {})
+        seen_cursors: set[str] = set()
+        while True:
+            for lbl in labels.get("nodes", []):
+                self._labels[lbl["name"].lower()] = lbl["id"]
+            page = labels.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            cursor = page.get("endCursor")
+            # a missing or repeated cursor would refetch the same page forever
+            if not cursor or cursor in seen_cursors:
+                raise BackendError(f"linear: label pagination for team {self.team_key} stopped advancing")
+            seen_cursors.add(cursor)
+            labels = self._gql(
+                "query($id:String!,$after:String){team(id:$id){"
+                f"labels(first:{_LABEL_PAGE},after:$after){{nodes{{id name}} pageInfo{{hasNextPage endCursor}}}}}}}}",
+                {"id": self._team_id, "after": cursor},
+            ).get("team", {}).get("labels", {})
 
     def _state_id_for(self, state: State) -> str:
         self._ensure_team()
@@ -200,14 +222,38 @@ class LinearBackend:
         return ids
 
     def _create_label(self, name: str) -> str | None:
-        """Create a team label and cache its id. Returns ``None`` if creation failed."""
-        data = self._gql(
-            "mutation($input:IssueLabelCreateInput!){issueLabelCreate(input:$input)"
-            "{success issueLabel{id name}}}",
-            {"input": {"teamId": self._team_id, "name": name}},
-        )
-        res = data.get("issueLabelCreate", {})
-        label = res.get("issueLabel") if res.get("success") else None
+        """Create a team label and cache its id. Returns ``None`` if creation failed.
+
+        Another session may create the same label between our page read and this create;
+        Linear then answers "duplicate label name", and the existing label is looked up by name.
+        """
+        try:
+            data = self._gql(
+                "mutation($input:IssueLabelCreateInput!){issueLabelCreate(input:$input)"
+                "{success issueLabel{id name}}}",
+                {"input": {"teamId": self._team_id, "name": name}},
+            )
+        except BackendError as exc:
+            if "duplicate label name" not in str(exc):
+                raise
+            # Only labels this team may use: its own, or a workspace label (no team). Filtering
+            # server-side keeps other teams' same-name labels from crowding them off the page.
+            nodes = self._gql(
+                "query($name:String!,$team:ID!){issueLabels(filter:{name:{eqIgnoreCase:$name},"
+                "or:[{team:{id:{eq:$team}}},{team:{null:true}}]}){nodes{id name team{id}}}}",
+                {"name": name, "team": self._team_id},
+            ).get("issueLabels", {}).get("nodes", [])
+            # this team's label first, else the workspace label
+            label = next(
+                (n for scope in (self._team_id, None) for n in nodes if (n.get("team") or {}).get("id") == scope),
+                None,
+            )
+            if label is None:
+                # dropping it would make the update silently strip the label from the ticket
+                raise BackendError(f"linear: label {name!r} exists but this team cannot use it") from exc
+        else:
+            res = data.get("issueLabelCreate", {})
+            label = res.get("issueLabel") if res.get("success") else None
         if label:
             self._labels[label["name"].lower()] = label["id"]
             return label["id"]

@@ -894,6 +894,156 @@ def test_linear_label_ids_creates_missing_labels(monkeypatch):
     ]  # only the missing ones were created
 
 
+def _linear_two_page_label_gql(created: list[str], *, duplicate_on_create: bool = False):
+    """Fake Linear GraphQL for a team whose labels span two pages (task-cli#241).
+
+    Page one rides the team lookup; page two is fetched by cursor. ``session:old`` exists only
+    on page two, which is what the unpaginated cache used to miss.
+    """
+
+    def page(nodes, *, more):
+        return {"nodes": nodes, "pageInfo": {"hasNextPage": more, "endCursor": "c1" if more else None}}
+
+    def fake_gql(query, variables=None):
+        if "teams(" in query:
+            return {
+                "teams": {
+                    "nodes": [
+                        {
+                            "id": "team-1",
+                            "states": {"nodes": [{"id": "st-1", "name": "Todo", "type": "unstarted"}]},
+                            "labels": page([{"id": "lbl-ui", "name": "ui"}], more=True),
+                        }
+                    ]
+                }
+            }
+        if "team(id:" in query:
+            assert variables == {"id": "team-1", "after": "c1"}
+            return {"team": {"labels": page([{"id": "lbl-old", "name": "session:old"}], more=False)}}
+        if "issueLabelCreate" in query:
+            name = variables["input"]["name"]
+            created.append(name)
+            if duplicate_on_create:
+                raise BackendError("linear GraphQL error: duplicate label name")
+            return {"issueLabelCreate": {"success": True, "issueLabel": {"id": f"new-{name}", "name": name}}}
+        if "issueLabels(" in query:
+            # the lookup must ask only for labels this team may use (its own or workspace-wide)
+            assert variables["team"] == "team-1" and "team:{null:true}" in query
+            if variables["name"] == "session:elsewhere":
+                return {"issueLabels": {"nodes": []}}
+            return {
+                "issueLabels": {
+                    "nodes": [
+                        {"id": f"found-{variables['name']}", "name": variables["name"], "team": {"id": "team-1"}},
+                    ]
+                }
+            }
+        raise AssertionError(f"unexpected query: {query}")
+
+    return fake_gql
+
+
+def test_linear_label_ids_reuses_a_label_beyond_the_first_page(monkeypatch):
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    created: list[str] = []
+    monkeypatch.setattr(be, "_gql", _linear_two_page_label_gql(created))
+    assert be._label_ids(["ui", "session:old"]) == ["lbl-ui", "lbl-old"]
+    assert created == []
+
+
+def test_linear_label_ids_creates_a_label_absent_from_every_page_once(monkeypatch):
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    created: list[str] = []
+    monkeypatch.setattr(be, "_gql", _linear_two_page_label_gql(created))
+    assert be._label_ids(["session:new"]) == ["new-session:new"]
+    assert be._label_ids(["session:new"]) == ["new-session:new"]
+    assert created == ["session:new"]
+
+
+def test_linear_label_ids_resolves_a_concurrently_created_label_by_name(monkeypatch):
+    # another session created the label between our page read and our create
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    created: list[str] = []
+    monkeypatch.setattr(be, "_gql", _linear_two_page_label_gql(created, duplicate_on_create=True))
+    assert be._label_ids(["session:raced"]) == ["found-session:raced"]
+    assert created == ["session:raced"]
+
+
+def test_linear_label_ids_refuses_a_duplicate_this_team_cannot_use(monkeypatch):
+    # the name exists only on another team: refuse instead of dropping the label from the ticket
+    from tasklib.backends.linear import LinearBackend
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    monkeypatch.setattr(be, "_gql", _linear_two_page_label_gql([], duplicate_on_create=True))
+    with pytest.raises(BackendError, match="session:elsewhere"):
+        be._label_ids(["session:elsewhere"])
+
+
+def test_linear_ensure_team_refuses_a_label_cursor_that_never_advances(monkeypatch):
+    # a page that says "more" but repeats its cursor would otherwise loop forever
+    from tasklib.backends.linear import LinearBackend
+
+    stuck = {"nodes": [{"id": "lbl-ui", "name": "ui"}], "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}
+    calls: list[str] = []
+
+    def fake_gql(query, variables=None):
+        calls.append(query)
+        if "teams(" in query:
+            return {"teams": {"nodes": [{"id": "team-1", "states": {"nodes": []}, "labels": stuck}]}}
+        return {"team": {"labels": stuck}}
+
+    be = LinearBackend(api_key="k", team_key="HYP")
+    monkeypatch.setattr(be, "_gql", fake_gql)
+    with pytest.raises(BackendError, match="stopped advancing"):
+        be._ensure_team()
+    assert len(calls) == 2
+
+
+def test_linear_label_ids_resolves_team_and_workspace_labels_past_the_first_50(monkeypatch):
+    # task-cli#268/#265: team GL had 89 labels (12 team-scoped, 77 workspace-scoped, which
+    # team.labels also returns); session:conloca-app sat past Linear's default first 50.
+    import re
+
+    from tasklib.backends.linear import LinearBackend
+
+    labels = [{"id": f"lbl-{i}", "name": f"session:old-{i}", "team": {"id": "team-1"}} for i in range(55)]
+    labels.append({"id": "lbl-improvement", "name": "Improvement", "team": None})
+    labels.append({"id": "lbl-app", "name": "session:conloca-app", "team": {"id": "team-1"}})
+    labels += [{"id": f"lbl-x{i}", "name": f"x{i}", "team": {"id": "team-1"}} for i in range(5)]
+    created: list[str] = []
+
+    def connection(query, after):
+        # Linear's own paging: `first` defaults to 50, `after` is the last node's cursor
+        m = re.search(r"labels\(first:(\d+)", query)
+        size = int(m.group(1)) if m else 50
+        start = int(after) if after else 0
+        end = min(start + size, len(labels))
+        more = end < len(labels)
+        return {"nodes": labels[start:end], "pageInfo": {"hasNextPage": more, "endCursor": str(end)}}
+
+    def fake_gql(query, variables=None):
+        if "teams(" in query:
+            node = {"id": "team-1", "states": {"nodes": []}, "labels": connection(query, None)}
+            return {"teams": {"nodes": [node]}}
+        if "team(id:" in query:
+            return {"team": {"labels": connection(query, variables["after"])}}
+        if "issueLabelCreate" in query:
+            created.append(variables["input"]["name"])
+            raise BackendError("linear GraphQL error: duplicate label name")
+        raise AssertionError(f"unexpected query: {query}")
+
+    be = LinearBackend(api_key="k", team_key="GL")
+    monkeypatch.setattr(be, "_gql", fake_gql)
+    assert be._label_ids(["Session:Conloca-App", "improvement", "x4"]) == ["lbl-app", "lbl-improvement", "lbl-x4"]
+    assert created == []
+
+
 def test_linear_node_to_ticket_seeds_native_due_date(monkeypatch):
     # a ticket created/edited in the Linear UI carries dueDate natively (no body Due section);
     # _node_to_ticket must seed Ticket.due from it so the daemon still sees the date.
