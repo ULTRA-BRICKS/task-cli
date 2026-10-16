@@ -137,10 +137,21 @@ class LinearBackend:
             raise BackendError(f"linear GraphQL error: {msgs}")
         return (result or {}).get("data", {})
 
+    def _query(self, query: str, variables: dict | None = None):
+        """Run a known read-only operation without implying an uncertain write.
+
+        GraphQL uses POST for both queries and mutations. Only callers that know the
+        operation is read-only use this boundary; opaque operations stay conservative.
+        """
+        try:
+            return self._gql(query, variables)
+        except AmbiguousBackendError as exc:
+            raise BackendError("linear: read-only query failed; no mutation attempted by this query") from exc
+
     def _ensure_team(self) -> None:
         if self._team_id:
             return
-        data = self._gql(
+        data = self._query(
             "query($key:String!){teams(filter:{key:{eq:$key}}){nodes{id "
             "states{nodes{id name type}} labels{nodes{id name}}}}}",
             {"key": self.team_key},
@@ -320,7 +331,7 @@ class LinearBackend:
             ticket_id = linear_identifier(ticket_id, self.team_key)
         except TaskRefError as exc:
             raise BackendError(str(exc)) from exc
-        data = self._gql(
+        data = self._query(
             "query($id:String!){issue(id:$id){" + self._ISSUE_FIELDS + "}}",
             {"id": ticket_id},
         )
@@ -382,7 +393,7 @@ class LinearBackend:
             flt["state"] = {"type": {"eq": _STATE_TO_TYPE[state]}}
         elif state is not None:
             fetch_n = 100
-        data = self._gql(
+        data = self._query(
             # base fields — the bulk N-tickets-at-once path; see _ISSUE_FIELDS's own comment.
             "query($filter:IssueFilter,$n:Int){issues(filter:$filter,first:$n,"
             "orderBy:updatedAt){nodes{"
@@ -403,7 +414,7 @@ class LinearBackend:
         # return workspace-wide hits and attribute the whole workspace to each Linear group.
         # NOTE: ``limit`` bounds the rows FETCHED from Linear; the team/project filter then runs
         # client-side, so the returned count can be < limit (matches are a subset of the fetch).
-        data = self._gql(
+        data = self._query(
             # base fields — same bulk-path reasoning as list().
             "query($q:String!,$n:Int){searchIssues(term:$q,first:$n){nodes{"
             + self._ISSUE_FIELDS_BASE
@@ -676,7 +687,7 @@ class LinearBackend:
         filter). ``None`` on any failure — never an authorization boundary, just a filter hint;
         the caller (``cli.py``) falls back to an unfiltered scan when it can't be determined."""
         try:
-            data = self._gql("query{viewer{id}}")
+            data = self._query("query{viewer{id}}")
         except BackendError:
             return None
         if not isinstance(data, dict):

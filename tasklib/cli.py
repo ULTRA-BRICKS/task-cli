@@ -297,7 +297,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # read / view
-    rp = sub.add_parser("read", parents=[common], help="show a full ticket")
+    rp = sub.add_parser(
+        "read", parents=[common], help="show a full ticket",
+        description="Show the original backend document, metadata, attachments, and comments "
+        "when fetched. JSON includes body, comments, and comments_status. A synthetic ticket "
+        "without a fetched document falls back to the canonical template.",
+    )
     rp.add_argument("id", help="ticket id (#123 or HYP-456)")
     rp.add_argument(
         "--save-attachments",
@@ -664,6 +669,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .backends import AmbiguousBackendError
+
     ensure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -701,6 +708,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _refuse_explicit_non_repo_cwd(args)
         return handlers[args.command](args)
+    except AmbiguousBackendError as exc:
+        # Read boundaries normalize by query intent; an escaping write must not
+        # reach success bookkeeping or be mistaken for a safe-to-retry failure.
+        print(_err(f"ambiguous: {exc}"))
+        print(_warn("  the mutation may have completed — check the backend before retrying."))
+        return exc.exit_code
     except TransitionError as exc:
         # an illegal state transition (issue #10): clean error, no traceback. It returns the
         # structured exit code the TransitionError pins — the agenttools_errors USAGE class (2),
@@ -825,14 +838,23 @@ def _load(args: argparse.Namespace):
     return cfg
 
 
+def _read_failure_message(exc: Exception) -> str:
+    """A read cannot imply a possible mutation, even when its adapter uses POST."""
+    from .backends import AmbiguousBackendError
+
+    if isinstance(exc, AmbiguousBackendError):
+        return "read-only request failed: no usable response received"
+    return str(exc)
+
+
 def _backend(cfg):
-    from .backends import BackendError, get_backend
+    from .backends import AmbiguousBackendError, BackendError, get_backend
     from .credentials import CredentialError
 
     try:
         return get_backend(cfg)
-    except (BackendError, CredentialError) as exc:
-        raise _UserError(str(exc)) from exc
+    except (BackendError, AmbiguousBackendError, CredentialError) as exc:
+        raise _UserError(_read_failure_message(exc)) from exc
 
 
 # ── repo presence + project resolution (the outside-a-repo / cross-repo machinery) ──
@@ -2619,7 +2641,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def _list_session_scoped(args, cfg, state, current) -> int:
     """The default in-repo view: this session's tickets, falling back to all repo tasks."""
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
 
     backend = _backend(cfg)
     session = _detect_session(cfg)
@@ -2633,16 +2655,16 @@ def _list_session_scoped(args, cfg, state, current) -> int:
         session_tickets = (
             [] if no_session else backend.session_tickets(session.label, limit=limit)
         )
-    except BackendError as exc:
-        raise _UserError(str(exc)) from exc
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(_read_failure_message(exc)) from exc
 
     if no_session or not session_tickets:
         # Fallback: no agent session, or the session has NO tickets at all → show ALL repo tasks
         # and SAY SO, so the user understands why they're seeing everything (not just theirs).
         try:
             tickets = backend.list(labels=args.label or None, state=state, limit=limit)
-        except BackendError as exc:
-            raise _UserError(str(exc)) from exc
+        except (BackendError, AmbiguousBackendError) as exc:
+            raise _UserError(_read_failure_message(exc)) from exc
         if args.json:
             _print_tickets_json(tickets)
             return 0
@@ -2755,7 +2777,7 @@ def _query_projects(base_cfg, projects, call, current_coordinate=None) -> list:
     ``current_coordinate`` flags the cwd's repo (by coordinate, so it works whether or not that
     repo is also in the registry).
     """
-    from .backends import BackendError, get_backend
+    from .backends import AmbiguousBackendError, BackendError, get_backend
     from .credentials import CredentialError
 
     groups: list[_ProjectGroup] = []
@@ -2769,13 +2791,13 @@ def _query_projects(base_cfg, projects, call, current_coordinate=None) -> list:
                     name=proj.name, backend=proj.backend, tickets=tickets, current=cur
                 )
             )
-        except (BackendError, CredentialError) as exc:
+        except (BackendError, AmbiguousBackendError, CredentialError) as exc:
             groups.append(
                 _ProjectGroup(
                     name=proj.name,
                     backend=proj.backend,
                     tickets=[],
-                    error=str(exc),
+                    error=_read_failure_message(exc),
                     current=cur,
                 )
             )
@@ -2840,7 +2862,7 @@ def _gantt_tickets(args, cfg, state) -> list[Ticket]:
     project's tickets into a single axis (the project shows up via the ticket id prefix). Reuses
     the existing backend queries so `gantt` and `list` never drift on what "this session" means.
     """
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
 
     current = _current_project_overlay(cfg)
     limit = _effective_limit(args)
@@ -2873,14 +2895,14 @@ def _gantt_tickets(args, cfg, state) -> list[Ticket]:
         session_tickets = (
             [] if no_session else backend.session_tickets(session.label, limit=limit)
         )
-    except BackendError as exc:
-        raise _UserError(str(exc)) from exc
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(_read_failure_message(exc)) from exc
 
     if no_session or not session_tickets:
         try:
             return backend.list(labels=args.label or None, state=state, limit=limit)
-        except BackendError as exc:
-            raise _UserError(str(exc)) from exc
+        except (BackendError, AmbiguousBackendError) as exc:
+            raise _UserError(_read_failure_message(exc)) from exc
 
     tickets = session_tickets
     if state is not None:
@@ -3371,15 +3393,17 @@ def _save_attachments(
 
 
 def cmd_read(args: argparse.Namespace) -> int:
+    import json
+
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
     from .render import render
 
     try:
         ticket = backend.get(args.id)
-    except BackendError as exc:
-        raise _UserError(str(exc)) from exc
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(_read_failure_message(exc)) from exc
 
     save_dir = getattr(args, "save_attachments", None)
     saved_lines = (
@@ -3390,14 +3414,20 @@ def cmd_read(args: argparse.Namespace) -> int:
         else []
     )
 
+    body = ticket.raw_body if ticket.raw_body_available or ticket.raw_body else render(ticket)
+    comments_status = (
+        "not-fetched" if ticket.comments is None
+        else "truncated" if ticket.comments_truncated else "fetched"
+    )
     if args.json:
-        import json
-
         d = _ticket_dict(ticket)
-        d["body"] = render(ticket)
+        d["body"] = body
+        d["comments"] = ticket.comments
+        d["comments_status"] = comments_status
         if save_dir:
             d["saved_attachments"] = saved_lines
         print(json.dumps(d, ensure_ascii=False, indent=2))
+        sys.stdout.flush()
         _mark_ticket_read(cfg, backend, ticket)
         return 0
     print(_bold(f"{ticket.id}  {ticket.title}"))
@@ -3426,7 +3456,14 @@ def cmd_read(args: argparse.Namespace) -> int:
         for line in saved_lines:
             print(_dim(line))
     print()
-    print(render(ticket))
+    print(body)
+    count = f", {len(ticket.comments)}" if ticket.comments is not None else ""
+    print(f"\nComments ({comments_status}{count}):")
+    for comment in ticket.comments or []:
+        metadata = {key: value for key, value in comment.items() if key != "body"}
+        print(json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+        print(comment.get("body", ""))
+    sys.stdout.flush()
     # Record this session as having read the CURRENT ticket content (task-cli#119) — the read
     # half of the read-before-edit gate `cmd_change --what` enforces. Placed LAST, after
     # `_save_attachments` AND every print above have already succeeded (review finding, round
@@ -3442,7 +3479,7 @@ def cmd_read(args: argparse.Namespace) -> int:
 
 def cmd_find(args: argparse.Namespace) -> int:
     cfg = _load(args)
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
 
     state = _parse_state(args.state) if args.state else None
 
@@ -3474,8 +3511,8 @@ def cmd_find(args: argparse.Namespace) -> int:
     backend = _backend(cfg)
     try:
         tickets = backend.search(args.query, state=state, limit=limit)
-    except BackendError as exc:
-        raise _UserError(str(exc)) from exc
+    except (BackendError, AmbiguousBackendError) as exc:
+        raise _UserError(_read_failure_message(exc)) from exc
     if args.json:
         _print_tickets_json(tickets)
         return 0
@@ -3898,13 +3935,13 @@ def cmd_attach(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
-    from .backends import BackendError
+    from .backends import AmbiguousBackendError, BackendError
 
     if not args.new_state:
         try:
             ticket = backend.get(args.id)
-        except BackendError as exc:
-            raise _UserError(str(exc)) from exc
+        except (BackendError, AmbiguousBackendError) as exc:
+            raise _UserError(_read_failure_message(exc)) from exc
         if args.json:
             import json
 

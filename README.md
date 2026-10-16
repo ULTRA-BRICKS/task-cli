@@ -118,6 +118,38 @@ refused before any config, credential or network access, because it would otherw
 to a global/registry route that may be a different project. The cross-project registry views
 (`list`, `find`, `read` outside a repo) work from a non-repository shell cwd **without** `-C`.
 
+`task read <id>` / `view` displays the exact backend document, including custom headings,
+Unicode, code fences, and whitespace. In JSON, `body` is that original document; `what` and
+other parsed fields are normalized views, not substitutes for the document. A fetched empty
+document stays empty. A synthetic ticket with no fetched document falls back to the canonical
+template (a directly supplied nonempty `raw_body` also takes precedence). The read marker is
+recorded only after the full output has been written and stdout successfully flushed.
+
+Full reads also include discussion: JSON has `comments` (the original provider rows, preserving
+IDs, authors, source attribution, timestamps, bodies, and optional metadata) and `comments_status`
+(`fetched`, `not-fetched`, or `truncated`). `comments: []` with `fetched` means an actually loaded
+empty discussion; `comments: null` with `not-fetched` means the backend did not load it. Human
+output gives the same status, comment metadata, and complete bodies in provider order. The Tasks
+backend uses comments already returned by the issue detail endpoint; it makes no separate comment
+GET. Malformed comment rows (including missing or non-text bodies) fail the read cleanly;
+Optional metadata is preserved without requiring it. Other backends that do not load comments
+report `not-fetched`. List/find summaries retain their existing output.
+
+Tasks creates carry a fresh `Idempotency-Key` per create operation. On an uncertain transport
+outcome (including a timeout waiting for headers or reading the body), task-cli makes at most
+one recovery POST with the identical encoded payload and key, using tasks-app's stored receipt.
+Proven URL validation/connect refusals and explicit HTTP failures are not retried. Other
+mutations are never automatically replayed. If recovery also fails, exit 9 remains explicitly
+ambiguous and includes the operation key: inspect the backend before starting another create.
+The key survives only within that running operation; restarting the process or invoking create
+again generates a new key, so this does not promise exactly-once creation across process restarts.
+The supported tasks-app API persists `Idempotency-Key` receipts for POST issues and rejects
+reuse with a changed payload. Recovery relies on that contract: a non-conforming server or
+a proxy that strips the key is not covered. Recovery uses that contract without a capability
+probe. GET/HEAD response failures are read errors, with no possible-create warning.
+A recovery HTTP rejection
+retains its scrubbed status and body, but cannot rule out a commit from the first attempt.
+
 ### Due-date reminders (the daemon)
 
 A ticket can carry a `--due YYYY-MM-DD` date (set on `new`/`create`, changed or cleared on

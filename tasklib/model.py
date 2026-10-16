@@ -259,6 +259,13 @@ class Ticket:
     # into rendered text and never read back into a field is lost on the next backend update.
     deployed_note: str = ""
 
+    # Distinguishes a fetched empty document from an unpersisted synthetic ticket.
+    raw_body_available: bool = False
+    # None means not fetched, [] means fetched and empty. Preserve provider attribution
+    # and optional metadata verbatim; full reads expose these, list summaries do not.
+    comments: list[dict] | None = None
+    comments_truncated: bool = False
+
     def __post_init__(self) -> None:
         # Coerce plain-string criteria to unchecked Criterion objects. This keeps construction
         # ergonomic (`Ticket(acceptance=["a", "b"])`) while the rest of the code — render, parse,
