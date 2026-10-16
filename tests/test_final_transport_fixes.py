@@ -127,7 +127,17 @@ def test_redirect_failure_retains_original_write_intent(monkeypatch, helper, gua
     expected = transport.AmbiguousHttpError if method == 'POST' else transport.HttpError
     with pytest.raises(expected) as caught:
         helper('http://example.test/issues', method=method, **options)
-    assert calls == ([method] if failure in {'malformed', 'unsafe'} else [method, 'GET' if method == 'POST' else method])
+    # CPython's supported versions differ on HEAD -> 303 (GET on 3.11/3.12,
+    # HEAD on newer versions). This adapter delegates method selection to urllib;
+    # compare with the independent stock handler, not a fixed runtime assumption.
+    stock_request = urllib.request.HTTPRedirectHandler().redirect_request(
+        urllib.request.Request('http://example.test/issues', method=method),
+        None, 303, 'See Other', {}, 'http://example.test/receipt',
+    )
+    expected_calls = [method] if failure in {'malformed', 'unsafe'} else [
+        method, stock_request.get_method(),
+    ]
+    assert calls == expected_calls
     assert TOKEN not in str(caught.value)
     if method == 'POST':
         assert 'may have' in str(caught.value) and 'before sending' not in str(caught.value)
