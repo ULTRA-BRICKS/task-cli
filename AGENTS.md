@@ -282,7 +282,12 @@ question schema (the client sends it), and exits after 15 idle minutes;
 stubs `_cached_laya_snapshot`, the load's local-HF-cache-first lookup). `classify_server.start`
 (`task classify-server start`, task-cli#279) is the strict path for callers that need the
 server: it shares `predict`'s spawn-and-wait but raises `StartError` with the reason, while
-`predict` keeps returning `None`. `cli._classify_text`
+`predict` keeps returning `None`. When no server answers, both start the installed user unit
+`ai.hyperide.laya.service` (`TASK_CLASSIFY_UNIT`; systemd `--user`, or launchd's
+`ai.hyperide.laya` LaunchAgent on macOS) whose ExecStart is the foreground `task
+classify-server serve` (`classify_server.run_server`), and spawn the server detached only when no
+unit is installed; `tests/conftest.py` stubs `_start_unit` so no test reaches the real manager.
+`cli._classify_text`
 wraps EVERY provider in two pure rules from `classify.py`: `is_small_talk` → `justAsk` with
 no provider call, `looks_like_bug_report` → a `justAsk` verdict becomes `change`, axes kept
 (`actionable` stays: task-cli#80). `task classify --batch` (stdin JSONL → stdout JSONL,

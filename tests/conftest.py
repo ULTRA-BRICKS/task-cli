@@ -95,10 +95,13 @@ def _no_real_classify_server(monkeypatch):
     server functions directly on throwaway sockets; tests of the client wiring re-enable it
     per-test with their own monkeypatches. Likewise the laya load never consults the REAL
     HuggingFace cache (`_cached_laya_snapshot`), so a developer machine that has the checkpoint
-    cached sees the same `laya.load(<hub id>)` call as CI.
+    cached sees the same `laya.load(<hub id>)` call as CI. No test may start the REAL
+    `ai.hyperide.laya` unit either (`_start_unit` asks the real `systemctl`/`launchctl`);
+    `tests/test_classify_server_unit.py` restores it with fake managers on PATH.
     """
     monkeypatch.setenv("TASK_CLASSIFY_SERVER", "0")
     monkeypatch.setattr("tasklib.classifiers._cached_laya_snapshot", lambda model_id: None)
+    monkeypatch.setattr("tasklib.classify_server._start_unit", lambda path: None)
 
 
 @pytest.fixture(autouse=True)

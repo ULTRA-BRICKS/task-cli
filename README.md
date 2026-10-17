@@ -101,6 +101,7 @@ task classify "<text>" [--create]  # change|actionable|justAsk (+ SP/priority/pr
                                     # ticket, or files a local `harness task` for a `process` item
 task classify --batch < in.jsonl   # {"text","id"?} per line -> one verdict JSON per line
 task classify-server start         # start the warm laya server if needed; prints its socket path
+task classify-server serve         # run that server in the foreground (a service unit's ExecStart)
 task session [show|bind <id>]      # show/bind the current session and its tickets
 task module list [--json]         # show the repo's configured product-module taxonomy
 task module add <name> --description "..."  # print the task.yaml snippet to add by hand
@@ -822,13 +823,41 @@ reaches your terminal).
 **Starting it on demand: `task classify-server start` (task-cli#279).** For a caller that needs
 the warm server rather than a fallback (text-lint, where laya is mandatory): if the server
 already accepts connections (under any version's socket) it is left alone and that socket is
-printed, otherwise the command spawns it the same way
-`task classify` does and waits up to 60 s for the socket to accept. On success it prints only
-the socket path on stdout and exits 0. Otherwise it exits 1 with one `error:` line on stderr
-naming the reason: disabled by `TASK_CLASSIFY_SERVER=0`, a socket directory that is not yours
-with mode 0700, a spawn failure, or the server exiting or not listening within 60 s (those last
-two name the server log). Concurrent starts are safe: the server's singleton lock loads the
-model once and every caller waits for that server.
+printed, otherwise the command starts it (see below) and waits up to 60 s for a socket to
+accept. On success it prints only the socket path on stdout and exits 0. Otherwise it exits 1
+with one `error:` line on stderr naming the reason: disabled by `TASK_CLASSIFY_SERVER=0`, a
+socket directory that is not yours with mode 0700, a unit or spawn that fails (the unit's
+message names the unit), or the server exiting or not listening within 60 s (those last two
+say where its log is). Concurrent starts are safe: the server's singleton lock loads the model
+once and every caller waits for that server.
+
+**Who runs the server: a service-manager unit when installed (0.24.0).** When nothing answers,
+`task classify` and `task classify-server start` start the user unit `ai.hyperide.laya.service`
+(override the name with `TASK_CLASSIFY_UNIT`), so the server is not a child of whichever agent
+or hook asked for it:
+
+- Linux: the unit counts as installed when `systemctl --user cat <unit>` succeeds; it is started
+  with `systemctl --user start <unit>`, and a failed unit is reported with
+  `journalctl --user -u <unit>`.
+- macOS: when `~/Library/LaunchAgents/ai.hyperide.laya.plist` exists (the label is the unit
+  name without `.service`), it is started with `launchctl kickstart gui/<uid>/ai.hyperide.laya`.
+- No unit installed: the server is spawned detached, as before. The same happens when the
+  unit's server would bind a different state dir than the caller's (the unit gets the service
+  manager's environment, e.g. a caller-only `XDG_STATE_HOME` override), since it could never
+  answer on the caller's socket.
+
+The unit runs the foreground `task classify-server serve`, which binds the installed version's
+socket, takes the same singleton lock and exits 0 after 15 idle minutes. A minimal systemd unit
+(`~/.config/systemd/user/ai.hyperide.laya.service`; no `[Install]` section, it is started on
+demand):
+
+```ini
+[Unit]
+Description=Laya classify server (task-cli)
+
+[Service]
+ExecStart=%h/.local/bin/task classify-server serve
+```
 
 **Batch mode.** `task classify --batch` reads JSONL on stdin — one `{"text": "...", "id": ...}`
 object per line, `id` optional and echoed back — and writes one `--json`-shaped verdict object

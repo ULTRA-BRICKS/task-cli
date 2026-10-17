@@ -6,16 +6,25 @@ process, so the tg-cli inbound hook and grooming passes paid 4-11 s per message.
 keeps ONE loaded model resident in a detached process and answers `predict` requests over a
 unix socket, so a warm call is one socket round-trip.
 
-HOW it is reached: `LayaClassifier.classify` calls :func:`predict`. On the first call no server
-is listening, so :func:`predict` spawns ``python -P -m tasklib.classify_server`` detached (the
-same interpreter/env bootstrap `task daemon start` uses — `daemon._child_env` etc.) and waits
-until the socket accepts; a later call just connects. Every failure (spawn refused, server died,
-socket error, bad reply) returns ``None`` and the caller loads the model in-process exactly as
-before — the server is an accelerator, never a new way for classify to fail.
+HOW it is reached: `LayaClassifier.classify` calls :func:`predict`. When no server is listening,
+:func:`predict` starts one (see "Who runs the server" below) and waits until the socket accepts;
+a later call just connects. Every failure (start refused, server died, socket error, bad reply)
+returns ``None`` and the caller loads the model in-process exactly as before — the server is an
+accelerator, never a new way for classify to fail.
 
-``task classify-server start`` (:func:`start`, task-cli#279) is the same spawn-and-wait for a
+``task classify-server start`` (:func:`start`, task-cli#279) is the same start-and-wait for a
 caller that NEEDS the server (text-lint, where laya is mandatory): it returns the socket path once
 the socket accepts, or raises :class:`StartError` with the reason instead of falling back.
+
+Who runs the server: when the service-manager unit ``ai.hyperide.laya.service`` (override with
+``TASK_CLASSIFY_UNIT``) is installed, the server runs under it, not inside whichever process
+asked for it, and is started with ``systemctl --user start <unit>`` (Linux: the unit is
+installed when ``systemctl --user cat <unit>`` succeeds) or ``launchctl kickstart
+gui/<uid>/<label>`` (macOS: ``~/Library/LaunchAgents/<label>.plist`` exists; ``<label>`` is the
+unit name without ``.service``). The unit's ExecStart runs ``task classify-server serve``
+(:func:`run_server`, foreground). Only when no unit is installed does the client spawn
+``python -P -m tasklib.classify_server`` detached itself (the same interpreter/env bootstrap
+`task daemon start` uses — `daemon._child_env` etc.).
 
 INVARIANTS:
 - One server per user at a time: the socket lives under the user's state dir
@@ -23,8 +32,10 @@ INVARIANTS:
   carries ``tasklib.__version__``. Before spawning, a client reuses ANY running
   ``laya-*.sock`` in that dir, highest version first (task-cli#282): right after an upgrade
   the previous version's server is still up, and a second one would load a second ~2 GB model.
-  The current-version server is spawned only when none answers. This relies on the request
-  format being the same across versions; a change to it must also change the ``laya-`` prefix.
+  The current-version server is started only when none answers. This relies on every version
+  answering the same requests the same way: a change to the request format, to the model id, or
+  to the server-side load/predict code must also change the ``laya-`` socket prefix, so an older
+  server is never reused for a client that expects different answers.
 - The request carries the QUESTIONS as well as the message, so the server holds no copy of the
   classification schema that could drift from the client's.
 - A flock on ``<socket>.lock`` is taken BEFORE the model loads: two cold clients racing to spawn
@@ -115,9 +126,9 @@ class StartError(Exception):
 def predict(message: str, questions: dict):
     """The laya ``predict`` result for ``message`` from the warm server, or ``None``.
 
-    Reuses a running server of any task-cli version (:func:`_running_socket`); otherwise spawns
-    a current-version one and waits up to ``_READY_TIMEOUT_S`` for it to load the model —
-    returning early (``None``) when the spawned server dies with an error, or when it lost the
+    Reuses a running server of any task-cli version (:func:`_running_socket`); otherwise starts
+    one (:func:`_launch`) and waits up to ``_READY_TIMEOUT_S`` for it to load the model —
+    returning early (``None``) when the server dies with an error, or when it lost the
     singleton race but no winner holds the lock any more. Never raises.
     """
     if not enabled():
@@ -130,14 +141,15 @@ def predict(message: str, questions: dict):
         try:
             return request(found, message, questions, timeout=_REQUEST_TIMEOUT_S)
         except OSError:
-            pass  # it went away between the probe and the request: start a current one
+            pass  # it went away between the probe and the request: start one
     try:
-        proc = _spawn_checked(path)
+        proc, see = _launch(path)
         return _await_server(
             path,
             proc,
-            lambda: request(path, message, questions, timeout=_REQUEST_TIMEOUT_S),
+            lambda: request(_any_socket(path), message, questions, timeout=_REQUEST_TIMEOUT_S),
             _READY_TIMEOUT_S,
+            see,
         )
     except StartError:
         return None  # the caller loads the model in-process instead
@@ -147,8 +159,9 @@ def start(wait_s: float = _READY_TIMEOUT_S) -> Path:
     """Make sure a warm server is accepting connections; return the socket it listens on.
 
     Idempotent: a running server of any task-cli version is reused (no spawn) and its socket
-    returned — see :func:`_running_socket`. Otherwise spawns a current-version server and waits
-    up to ``wait_s`` for its socket to accept a connection. Concurrent callers are safe — the
+    returned — see :func:`_running_socket`. Otherwise starts one (:func:`_launch`: the installed
+    unit, else a detached spawn) and waits up to ``wait_s`` for a socket to accept a connection,
+    returning that socket. Concurrent callers are safe — the
     server's singleton flock lets one load the model, and a caller whose spawn lost that race
     keeps waiting for the winner. Raises :class:`StartError` naming the reason otherwise.
     """
@@ -162,8 +175,186 @@ def start(wait_s: float = _READY_TIMEOUT_S) -> Path:
     found = _running_socket(path)
     if found is not None:
         return found
-    _await_server(path, _spawn_checked(path), lambda: _probe(path), wait_s)
-    return path
+    proc, see = _launch(path)
+    return _await_server(path, proc, lambda: _any_socket(path), wait_s, see)
+
+
+def _any_socket(path: Path) -> Path:
+    """:func:`_running_socket`, raising ``ConnectionRefusedError`` when none accepts yet.
+
+    A unit may run a different installed task-cli version than this client, so the wait accepts
+    whichever version's socket comes up, not only this version's ``path``.
+    """
+    found = _running_socket(path)
+    if found is None:
+        raise ConnectionRefusedError(f"no laya server accepts in {path.parent}")
+    return found
+
+
+def _launch(path: Path):
+    """Start a server: ``(handle, where to look when it fails)``.
+
+    The installed service-manager unit when there is one (:func:`_start_unit`), else a detached
+    spawn of this version's server on ``path``. The handle has ``poll()`` like a ``Popen``.
+    """
+    unit = _start_unit(path)
+    if unit is not None:
+        return unit, unit.see
+    return _spawn_checked(path), str(path.with_suffix(".log"))
+
+
+UNIT_ENV = "TASK_CLASSIFY_UNIT"
+DEFAULT_UNIT = "ai.hyperide.laya.service"
+# A unit's state is checked at most this often while waiting (one manager call each).
+_UNIT_POLL_INTERVAL_S = 1.0
+_LAUNCHD_EXIT_RE = re.compile(r"last exit code = (\d+)")
+
+
+class _StartedUnit:
+    """A started unit, polled like a spawned ``Popen`` by :func:`_await_server`.
+
+    ``state()`` returns ``"failed"`` (stopped with an error), ``"exited"`` (stopped cleanly) or
+    ``None`` (still running, starting, or unknown).
+    """
+
+    def __init__(self, unit: str, state, see: str, sock_dir: Path) -> None:
+        self.unit = unit
+        self.see = see
+        self._state = state
+        self._sock_dir = sock_dir
+        self._next_check = time.monotonic() + _UNIT_POLL_INTERVAL_S
+
+    def poll(self) -> None:
+        """``None`` while a server may still come up; raises :class:`StartError` once none will.
+
+        A unit that stopped cleanly may have lost the singleton race to a server that is still
+        loading (its lock is held): keep waiting for that one, like a lost-race spawn.
+        """
+        if time.monotonic() < self._next_check:
+            return None
+        self._next_check = time.monotonic() + _UNIT_POLL_INTERVAL_S
+        state = self._state()
+        if state == "failed":
+            raise StartError(f"{self.unit} failed (see {self.see})")
+        if state == "exited" and not _any_lock_held(self._sock_dir):
+            raise StartError(f"{self.unit} exited before listening (see {self.see})")
+        return None
+
+
+def _any_lock_held(sock_dir: Path) -> bool:
+    """Whether a server of any version holds its singleton lock in ``sock_dir``."""
+    locks = sock_dir.glob("laya-*.sock.lock")
+    return any(_lock_held(Path(str(lock).removesuffix(".lock"))) for lock in locks)
+
+
+def _systemd_state(systemctl: str, unit: str) -> str | None:
+    result = _run_manager([systemctl, "--user", "show", "-p", "ActiveState", "--value", unit])
+    if result is None or result.returncode != 0:
+        return None
+    return {"failed": "failed", "inactive": "exited"}.get(result.stdout.strip())
+
+
+def _launchd_state(launchctl: str, target: str) -> str | None:
+    """Read ``launchctl print``'s ``state = ...`` and ``last exit code = N`` lines.
+
+    Only the ``not running`` state counts as stopped, so a stale exit code from an earlier run
+    is not mistaken for this run's while the kickstarted run is still being scheduled.
+    """
+    result = _run_manager([launchctl, "print", target])
+    if result is None or result.returncode != 0 or "state = not running" not in result.stdout:
+        return None
+    code = _LAUNCHD_EXIT_RE.search(result.stdout)
+    return "failed" if code is not None and code.group(1) != "0" else "exited"
+
+
+def _account_home() -> str:
+    """The user's home from the account database (what a service manager gives its units)."""
+    import pwd
+
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def _systemd_manager_env(systemctl: str) -> dict[str, str]:
+    """The user manager's environment (``systemctl --user show-environment``), plus ``HOME``."""
+    result = _run_manager([systemctl, "--user", "show-environment"])
+    lines = result.stdout.splitlines() if result is not None and result.returncode == 0 else []
+    env = dict(line.split("=", 1) for line in lines if "=" in line)
+    env.setdefault("HOME", _account_home())
+    return env
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _start_unit(path: Path) -> _StartedUnit | None:
+    """Start the installed laya unit; ``None`` when no unit is installed or it can't serve us.
+
+    Raises :class:`StartError` naming the unit when it is installed but will not start.
+    ``path`` is this version's socket. The unit runs with the service manager's environment, not
+    ours, so its server binds under the manager's state dir; when that is not ``path``'s dir (a
+    caller-only ``XDG_STATE_HOME``/``HOME`` override) the unit could never answer here, and the
+    caller spawns instead.
+    """
+    import shutil
+
+    unit = os.environ.get(UNIT_ENV, "").strip() or DEFAULT_UNIT
+    if sys.platform == "darwin":
+        label = unit.removesuffix(".service")
+        home = _account_home()
+        plist = Path(home) / "Library" / "LaunchAgents" / f"{label}.plist"
+        launchctl = shutil.which("launchctl")
+        if launchctl is None or not plist.is_file():
+            return None
+        if not _same_dir(_state_dir({"HOME": home}), path.parent):
+            return None
+        target = f"gui/{os.getuid()}/{label}"
+        start_cmd = [launchctl, "kickstart", target]
+        started = _StartedUnit(
+            label,
+            lambda: _launchd_state(launchctl, target),
+            f"launchctl print {target}",
+            path.parent,
+        )
+    else:
+        systemctl = shutil.which("systemctl")
+        if systemctl is None:
+            return None
+        installed = _run_manager([systemctl, "--user", "cat", unit])
+        if installed is None or installed.returncode != 0:
+            return None
+        if not _same_dir(_state_dir(_systemd_manager_env(systemctl)), path.parent):
+            return None
+        start_cmd = [systemctl, "--user", "start", unit]
+        started = _StartedUnit(
+            unit,
+            lambda: _systemd_state(systemctl, unit),
+            f"journalctl --user -u {unit}",
+            path.parent,
+        )
+    shown = " ".join([Path(start_cmd[0]).name, *start_cmd[1:]])
+    result = _run_manager(start_cmd)
+    if result is None:
+        raise StartError(f"`{shown}` could not run")
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        reason = f": {detail[-1]}" if detail else ""
+        raise StartError(f"`{shown}` failed with status {result.returncode}{reason}")
+    return started
+
+
+def _run_manager(cmd: list[str]):
+    """Run one service-manager command; the ``CompletedProcess``, or ``None`` if it can't run."""
+    try:
+        return subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_REQUEST_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _running_socket(path: Path) -> Path | None:
@@ -191,9 +382,21 @@ def _own_socket(path: Path) -> bool:
     return stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid()
 
 
-def _version_key(path: Path) -> tuple[tuple[int, ...], str]:
-    """Order ``laya-0.9.0.sock`` below ``laya-0.22.0.sock`` (numeric, not text, comparison)."""
-    return tuple(int(n) for n in re.findall(r"\d+", path.name)), path.name
+_SOCKET_VERSION_RE = re.compile(r"laya-(\d+(?:\.\d+)*)(.*)\.sock")
+
+
+def _version_key(path: Path) -> tuple[tuple[int, ...], bool, str]:
+    """Order sockets by the release segment of their version, numerically.
+
+    ``laya-0.9.0.sock`` < ``laya-0.22.0.sock``. Only the leading ``\\d+(.\\d+)*`` counts, so a
+    pre-release such as ``laya-0.23.1rc1.sock`` ties with ``laya-0.23.1.sock`` on release, and
+    the final release wins the tie. A name with no version sorts lowest.
+    """
+    match = _SOCKET_VERSION_RE.fullmatch(path.name)
+    if match is None:
+        return (), False, path.name
+    release = tuple(int(n) for n in match.group(1).split("."))
+    return release, match.group(2) == "", path.name
 
 
 def _probe(sock_path: Path) -> None:
@@ -214,14 +417,15 @@ def _spawn_checked(path: Path):
     return proc
 
 
-def _await_server(path: Path, proc, attempt, timeout_s: float):
-    """Return ``attempt()`` once it stops raising ``OSError`` (i.e. the spawned server listens).
+def _await_server(path: Path, proc, attempt, timeout_s: float, see: str):
+    """Return ``attempt()`` once it stops raising ``OSError`` (i.e. the started server listens).
 
     Raises :class:`StartError` early when ``proc`` died with an error, or exited cleanly after
     losing the singleton race while no winner holds the lock any more (e.g. the winner's model
-    load failed): nothing will ever listen. Otherwise gives up after ``timeout_s``.
+    load failed): nothing will ever listen. ``proc.poll()`` may itself raise :class:`StartError`
+    (a failed unit). Otherwise gives up after ``timeout_s``. ``see`` is where the server's own
+    output is (its log file, or the service manager's log command).
     """
-    log = path.with_suffix(".log")
     deadline = time.monotonic() + timeout_s
     while True:
         try:
@@ -230,12 +434,12 @@ def _await_server(path: Path, proc, attempt, timeout_s: float):
             pass
         rc = proc.poll()
         if rc is not None and rc != 0:
-            raise StartError(f"the server exited with status {rc} (see {log})")
+            raise StartError(f"the server exited with status {rc} (see {see})")
         if rc == 0 and not _lock_held(path):
-            raise StartError(f"the server exited before listening (see {log})")
+            raise StartError(f"the server exited before listening (see {see})")
         if time.monotonic() >= deadline:
             raise StartError(
-                f"the server did not accept connections within {timeout_s:g} s (see {log})"
+                f"the server did not accept connections within {timeout_s:g} s (see {see})"
             )
         time.sleep(0.05)
 
@@ -394,12 +598,26 @@ def _load_laya_predictor():
     return agent.predict
 
 
+def run_server(path: Path | None = None) -> int:
+    """Serve the laya model on ``path`` (default: this version's socket) in the foreground.
+
+    ``task classify-server serve`` — what the service-manager unit's ExecStart runs — and the
+    detached spawn both end here. Creates the socket dir 0700 and moves into it (the
+    cwd-shadowing guard, see the module docstring), then :func:`serve` with the singleton flock
+    and the :data:`IDLE_SECONDS` idle exit. Returns 0 on an idle exit.
+    """
+    path = socket_path() if path is None else path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    os.chdir(path.parent)
+    return serve(path, None, idle_s=IDLE_SECONDS, load=_load_laya_predictor)
+
+
 def main(argv: list[str]) -> int:
     from . import daemon
 
     daemon._scrub_bootstrap_pythonpath()
-    path = Path(argv[0]) if argv else socket_path()
-    return serve(path, None, load=_load_laya_predictor)
+    return run_server(Path(argv[0]) if argv else None)
 
 
 if __name__ == "__main__":

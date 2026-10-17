@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.24.0 — 2026-10-17
+
+- The laya classify server runs under its own user service unit when one is installed, not
+  inside whichever process asked for it. When no server answers, `task classify` and
+  `task classify-server start` start `ai.hyperide.laya.service` (`systemctl --user start`; on
+  macOS `launchctl kickstart gui/<uid>/ai.hyperide.laya` when its LaunchAgent plist exists;
+  rename with `TASK_CLASSIFY_UNIT`). They spawn the server themselves only when no unit is
+  installed. A unit that will not start, fails, or stops before listening (unless another
+  server is still loading) makes `start` exit 1 naming the unit.
+- New `task classify-server serve` runs the server in the foreground (the unit's ExecStart): it
+  binds this version's socket, keeps the singleton lock and exits 0 after 15 idle minutes.
+- A pre-release server socket (e.g. `laya-0.23.1rc1.sock`) no longer outranks the final release
+  of the same version when a running server is chosen.
+
 ## 0.23.1 — 2026-10-17
 
 - After a task-cli upgrade, `task classify` and `task classify-server start` reuse the laya

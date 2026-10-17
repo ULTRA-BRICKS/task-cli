@@ -14,7 +14,7 @@ that never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-m
 · mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
 module (list/add/assign the repo's product-module taxonomy) · session · daemon (the
 due-date reminder watcher: start/stop/status/run) · classify-server (start the warm laya
-classify server on demand).
+classify server on demand, or serve it in the foreground under a service-manager unit).
 Global flags: --backend, --repo, --config, --json, --yes, and per-gate --skip-<gate>.
 """
 
@@ -669,12 +669,17 @@ def build_parser() -> argparse.ArgumentParser:
     # classify-server — the warm laya classify server (tasklib/classify_server.py)
     csp = sub.add_parser(
         "classify-server",
-        help="warm laya classify server (start)",
-        description="start: make sure the warm laya classify server accepts connections "
-        "(spawn it if needed, wait up to 60 s) and print its socket path; exit 1 with the "
-        "reason on stderr when it cannot start",
+        help="warm laya classify server (start|serve)",
+        description="start: make sure a warm laya classify server accepts connections (start "
+        "the installed ai.hyperide.laya unit, else spawn one, and wait up to 60 s) and print "
+        "its socket path; exit 1 with the reason on stderr when it cannot start. serve: run the "
+        "server in the foreground until it is idle for 15 minutes (the unit's ExecStart)",
     )
-    csp.add_argument("action", choices=["start"], help="start (idempotent, prints the socket path)")
+    csp.add_argument(
+        "action",
+        choices=["start", "serve"],
+        help="start (idempotent, prints the socket path) | serve (foreground server)",
+    )
 
     return p
 
@@ -6609,11 +6614,14 @@ def _daemon_coordinate(cfg) -> str:
 
 
 def cmd_classify_server(args: argparse.Namespace) -> int:
-    """`classify-server start`: the socket path on stdout (exit 0) once the warm laya server
+    """`classify-server start`: the socket path on stdout (exit 0) once a warm laya server
     accepts connections, or one `error:` line on stderr (exit 1). For callers where laya is
-    mandatory (text-lint, task-cli#279), unlike `task classify`, which falls back in-process."""
+    mandatory (text-lint, task-cli#279), unlike `task classify`, which falls back in-process.
+    `classify-server serve`: the foreground server a service-manager unit runs."""
     from . import classify_server
 
+    if args.action == "serve":
+        return classify_server.run_server()
     try:
         path = classify_server.start()
     except classify_server.StartError as exc:
