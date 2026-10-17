@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.1 — 2026-10-17
+
+- After a task-cli upgrade, `task classify` and `task classify-server start` reuse the laya
+  server the previous version started (still running for up to 15 idle minutes) instead of
+  starting a second one that loads another ~2 GB copy of the model (task-cli#282). When several
+  versions' servers are running, the newest one is used. `task classify-server start` prints the
+  socket of the server it reused. A new-version server is started only when none answers.
+
 ## 0.23.0 — 2026-10-17
 
 - New `task classify-server start` starts the warm laya classify server when it is not already

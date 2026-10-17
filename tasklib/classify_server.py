@@ -18,10 +18,13 @@ caller that NEEDS the server (text-lint, where laya is mandatory): it returns th
 the socket accepts, or raises :class:`StartError` with the reason instead of falling back.
 
 INVARIANTS:
-- One server per (user, task-cli version): the socket lives under the user's state dir
+- One server per user at a time: the socket lives under the user's state dir
   (``$XDG_STATE_HOME/task-cli/classify/``, mode 0700; the socket itself 0600) and its name
-  carries ``tasklib.__version__``, so an upgraded client never talks to an old server — the old
-  one simply idles out.
+  carries ``tasklib.__version__``. Before spawning, a client reuses ANY running
+  ``laya-*.sock`` in that dir, highest version first (task-cli#282): right after an upgrade
+  the previous version's server is still up, and a second one would load a second ~2 GB model.
+  The current-version server is spawned only when none answers. This relies on the request
+  format being the same across versions; a change to it must also change the ``laya-`` prefix.
 - The request carries the QUESTIONS as well as the message, so the server holds no copy of the
   classification schema that could drift from the client's.
 - A flock on ``<socket>.lock`` is taken BEFORE the model loads: two cold clients racing to spawn
@@ -40,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -111,19 +115,22 @@ class StartError(Exception):
 def predict(message: str, questions: dict):
     """The laya ``predict`` result for ``message`` from the warm server, or ``None``.
 
-    Spawns the server on first use and waits up to ``_READY_TIMEOUT_S`` for it to load the
-    model — returning early (``None``) when the spawned server dies with an error, or when it
-    lost the singleton race but no winner holds the lock any more. Never raises.
+    Reuses a running server of any task-cli version (:func:`_running_socket`); otherwise spawns
+    a current-version one and waits up to ``_READY_TIMEOUT_S`` for it to load the model —
+    returning early (``None``) when the spawned server dies with an error, or when it lost the
+    singleton race but no winner holds the lock any more. Never raises.
     """
     if not enabled():
         return None
     path = socket_path()
     if not _private_dir(path.parent):
         return None  # someone else could own or listen on this socket; never send them the text
-    try:
-        return request(path, message, questions, timeout=_REQUEST_TIMEOUT_S)
-    except OSError:
-        pass
+    found = _running_socket(path)
+    if found is not None:
+        try:
+            return request(found, message, questions, timeout=_REQUEST_TIMEOUT_S)
+        except OSError:
+            pass  # it went away between the probe and the request: start a current one
     try:
         proc = _spawn_checked(path)
         return _await_server(
@@ -137,12 +144,13 @@ def predict(message: str, questions: dict):
 
 
 def start(wait_s: float = _READY_TIMEOUT_S) -> Path:
-    """Make sure the warm server is accepting connections; return its socket path.
+    """Make sure a warm server is accepting connections; return the socket it listens on.
 
-    Idempotent: a server already accepting is left alone (no spawn). Otherwise spawns one and
-    waits up to ``wait_s`` for its socket to accept a connection. Concurrent callers are safe —
-    the server's singleton flock lets one load the model, and a caller whose spawn lost that
-    race keeps waiting for the winner. Raises :class:`StartError` naming the reason otherwise.
+    Idempotent: a running server of any task-cli version is reused (no spawn) and its socket
+    returned — see :func:`_running_socket`. Otherwise spawns a current-version server and waits
+    up to ``wait_s`` for its socket to accept a connection. Concurrent callers are safe — the
+    server's singleton flock lets one load the model, and a caller whose spawn lost that race
+    keeps waiting for the winner. Raises :class:`StartError` naming the reason otherwise.
     """
     if not enabled():
         if not hasattr(socket, "AF_UNIX"):
@@ -151,13 +159,41 @@ def start(wait_s: float = _READY_TIMEOUT_S) -> Path:
     path = socket_path()
     if not _private_dir(path.parent):
         raise StartError(f"{path.parent} must be a directory you own with mode 0700")
-    try:
-        _probe(path)
-        return path
-    except OSError:
-        pass
+    found = _running_socket(path)
+    if found is not None:
+        return found
     _await_server(path, _spawn_checked(path), lambda: _probe(path), wait_s)
     return path
+
+
+def _running_socket(path: Path) -> Path | None:
+    """The first socket in ``path``'s dir that accepts a connection, or ``None``.
+
+    Candidates are ``path`` and every ``laya-*.sock`` beside it, highest version first, and
+    only real sockets we own (never a symlink). The caller has already checked the dir with
+    :func:`_private_dir`.
+    """
+    candidates = {path, *path.parent.glob("laya-*.sock")}
+    for candidate in sorted(filter(_own_socket, candidates), key=_version_key, reverse=True):
+        try:
+            _probe(candidate)
+        except OSError:
+            continue  # stale file of a server that died without cleanup
+        return candidate
+    return None
+
+
+def _own_socket(path: Path) -> bool:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid()
+
+
+def _version_key(path: Path) -> tuple[tuple[int, ...], str]:
+    """Order ``laya-0.9.0.sock`` below ``laya-0.22.0.sock`` (numeric, not text, comparison)."""
+    return tuple(int(n) for n in re.findall(r"\d+", path.name)), path.name
 
 
 def _probe(sock_path: Path) -> None:

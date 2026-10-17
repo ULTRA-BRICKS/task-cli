@@ -808,7 +808,9 @@ every `task classify` is a fresh process, so the `laya` provider does not load t
 itself: the first call spawns a detached, machine-wide server
 (`python -P -m tasklib.classify_server`, `tasklib/classify_server.py`) that loads the model
 once and answers over a unix socket under `~/.local/state/task-cli/classify/` (dir 0700,
-socket 0600, one per task-cli version, log alongside it). Later calls are one socket
+socket 0600, named after the task-cli version, log alongside it). A server already running
+under ANY version's socket is reused, newest first, so an upgrade never starts a second model
+next to the previous version's server (task-cli#282). Later calls are one socket
 round-trip; the server exits after 15 minutes without a request. Measured on the M-series dev
 host: cold ~4 s (spawn + load), warm ~0.3 s, versus 4-8 s for EVERY call before. If the server
 cannot start or answer, the provider loads the model in-process exactly as before.
@@ -819,7 +821,8 @@ reaches your terminal).
 
 **Starting it on demand: `task classify-server start` (task-cli#279).** For a caller that needs
 the warm server rather than a fallback (text-lint, where laya is mandatory): if the server
-already accepts connections it is left alone, otherwise the command spawns it the same way
+already accepts connections (under any version's socket) it is left alone and that socket is
+printed, otherwise the command spawns it the same way
 `task classify` does and waits up to 60 s for the socket to accept. On success it prints only
 the socket path on stdout and exits 0. Otherwise it exits 1 with one `error:` line on stderr
 naming the reason: disabled by `TASK_CLASSIFY_SERVER=0`, a socket directory that is not yours

@@ -271,8 +271,10 @@ repo shadow the real checkpoint (mirrors `bin/task`'s existing cwd-import-shadow
 
 **Warm laya server, guard rules, batch (task-cli#245).** `LayaClassifier.classify` first asks
 `classify_server.predict` — a detached, machine-wide `python -P -m tasklib.classify_server`
-that holds the loaded model and answers over a 0600 unix socket keyed by task-cli version;
-the first call spawns it (reusing `daemon`'s child-env/`-P` bootstrap) and waits for the
+that holds the loaded model and answers over a 0600 unix socket named after the task-cli
+version; a running server under ANY version's `laya-*.sock` is reused first, newest version
+first (task-cli#282: an upgrade must not load a second model), and only when none answers does
+the call spawn a current-version one (reusing `daemon`'s child-env/`-P` bootstrap) and wait for the
 socket, and every failure returns `None` so the provider loads in-process as before. The
 server takes a flock BEFORE loading (racing cold clients load once), carries no copy of the
 question schema (the client sends it), and exits after 15 idle minutes;
