@@ -100,6 +100,7 @@ task classify "<text>" [--create]  # change|actionable|justAsk (+ SP/priority/pr
                                     # on `change`) via review; --create makes/dedups a product
                                     # ticket, or files a local `harness task` for a `process` item
 task classify --batch < in.jsonl   # {"text","id"?} per line -> one verdict JSON per line
+task classify-server start         # start the warm laya server if needed; prints its socket path
 task session [show|bind <id>]      # show/bind the current session and its tickets
 task module list [--json]         # show the repo's configured product-module taxonomy
 task module add <name> --description "..."  # print the task.yaml snippet to add by hand
@@ -815,6 +816,16 @@ cannot start or answer, the provider loads the model in-process exactly as befor
 HuggingFace "Fetching N files" bar and no laya "invalid temperatures" RuntimeWarning — unless
 `task classify --verbose` (which skips the warm server and loads in-process, so that output
 reaches your terminal).
+
+**Starting it on demand: `task classify-server start` (task-cli#279).** For a caller that needs
+the warm server rather than a fallback (text-lint, where laya is mandatory): if the server
+already accepts connections it is left alone, otherwise the command spawns it the same way
+`task classify` does and waits up to 60 s for the socket to accept. On success it prints only
+the socket path on stdout and exits 0. Otherwise it exits 1 with one `error:` line on stderr
+naming the reason: disabled by `TASK_CLASSIFY_SERVER=0`, a socket directory that is not yours
+with mode 0700, a spawn failure, or the server exiting or not listening within 60 s (those last
+two name the server log). Concurrent starts are safe: the server's singleton lock loads the
+model once and every caller waits for that server.
 
 **Batch mode.** `task classify --batch` reads JSONL on stdin — one `{"text": "...", "id": ...}`
 object per line, `id` optional and echoed back — and writes one `--json`-shaped verdict object

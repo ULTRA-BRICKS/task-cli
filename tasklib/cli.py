@@ -13,7 +13,8 @@ relationship between two tickets) · audit (reconciliation backstop — flags/re
 that never passed the close gates, e.g. one closed by Linear's/GitHub's own PR-merge auto-close)
 · mark-shipped (the `gh ship` post-merge hook — records a merge, never closes) · classify ·
 module (list/add/assign the repo's product-module taxonomy) · session · daemon (the
-due-date reminder watcher: start/stop/status/run).
+due-date reminder watcher: start/stop/status/run) · classify-server (start the warm laya
+classify server on demand).
 Global flags: --backend, --repo, --config, --json, --yes, and per-gate --skip-<gate>.
 """
 
@@ -665,6 +666,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="listen port (default 8765)",
     )
 
+    # classify-server — the warm laya classify server (tasklib/classify_server.py)
+    csp = sub.add_parser(
+        "classify-server",
+        help="warm laya classify server (start)",
+        description="start: make sure the warm laya classify server accepts connections "
+        "(spawn it if needed, wait up to 60 s) and print its socket path; exit 1 with the "
+        "reason on stderr when it cannot start",
+    )
+    csp.add_argument("action", choices=["start"], help="start (idempotent, prints the socket path)")
+
     return p
 
 
@@ -704,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
         "session": cmd_session,
         "install-skill": cmd_install_skill,
         "daemon": cmd_daemon,
+        "classify-server": cmd_classify_server,
     }
     try:
         _refuse_explicit_non_repo_cwd(args)
@@ -6594,6 +6606,21 @@ def _daemon_coordinate(cfg) -> str:
         )
     name, _overlay = current
     return name
+
+
+def cmd_classify_server(args: argparse.Namespace) -> int:
+    """`classify-server start`: the socket path on stdout (exit 0) once the warm laya server
+    accepts connections, or one `error:` line on stderr (exit 1). For callers where laya is
+    mandatory (text-lint, task-cli#279), unlike `task classify`, which falls back in-process."""
+    from . import classify_server
+
+    try:
+        path = classify_server.start()
+    except classify_server.StartError as exc:
+        print(_err(f"error: classify server not started: {exc}"), file=sys.stderr)
+        return 1
+    print(path)
+    return 0
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:

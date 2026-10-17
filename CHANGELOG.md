@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.23.0 — 2026-10-17
+
+- New `task classify-server start` starts the warm laya classify server when it is not already
+  accepting connections and waits up to 60 s for it (task-cli#279), so a tool that needs laya
+  (text-lint) can bring it up on demand. It prints only the socket path and exits 0, also when a
+  server was already running (nothing is spawned then). It exits 1 with one `error:` line naming
+  the reason when the server is disabled (`TASK_CLASSIFY_SERVER=0`), cannot be spawned, exits,
+  or does not listen in time.
+
 ## 0.22.1 — 2026-10-16
 
 - Linear backend: a team with more than 50 labels no longer fails `task new`, `task check`,

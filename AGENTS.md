@@ -277,7 +277,10 @@ socket, and every failure returns `None` so the provider loads in-process as bef
 server takes a flock BEFORE loading (racing cold clients load once), carries no copy of the
 question schema (the client sends it), and exits after 15 idle minutes;
 `TASK_CLASSIFY_SERVER=0` disables it (`tests/conftest.py` sets that for every test, and also
-stubs `_cached_laya_snapshot`, the load's local-HF-cache-first lookup). `cli._classify_text`
+stubs `_cached_laya_snapshot`, the load's local-HF-cache-first lookup). `classify_server.start`
+(`task classify-server start`, task-cli#279) is the strict path for callers that need the
+server: it shares `predict`'s spawn-and-wait but raises `StartError` with the reason, while
+`predict` keeps returning `None`. `cli._classify_text`
 wraps EVERY provider in two pure rules from `classify.py`: `is_small_talk` → `justAsk` with
 no provider call, `looks_like_bug_report` → a `justAsk` verdict becomes `change`, axes kept
 (`actionable` stays: task-cli#80). `task classify --batch` (stdin JSONL → stdout JSONL,

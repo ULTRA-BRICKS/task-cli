@@ -13,6 +13,10 @@ until the socket accepts; a later call just connects. Every failure (spawn refus
 socket error, bad reply) returns ``None`` and the caller loads the model in-process exactly as
 before — the server is an accelerator, never a new way for classify to fail.
 
+``task classify-server start`` (:func:`start`, task-cli#279) is the same spawn-and-wait for a
+caller that NEEDS the server (text-lint, where laya is mandatory): it returns the socket path once
+the socket accepts, or raises :class:`StartError` with the reason instead of falling back.
+
 INVARIANTS:
 - One server per (user, task-cli version): the socket lives under the user's state dir
   (``$XDG_STATE_HOME/task-cli/classify/``, mode 0700; the socket itself 0600) and its name
@@ -100,6 +104,10 @@ def request(sock_path: Path, message, questions, *, timeout: float, op: str = "p
     return reply.get("result")
 
 
+class StartError(Exception):
+    """The server could not be started or never came up; the message says why."""
+
+
 def predict(message: str, questions: dict):
     """The laya ``predict`` result for ``message`` from the warm server, or ``None``.
 
@@ -117,24 +125,83 @@ def predict(message: str, questions: dict):
     except OSError:
         pass
     try:
+        proc = _spawn_checked(path)
+        return _await_server(
+            path,
+            proc,
+            lambda: request(path, message, questions, timeout=_REQUEST_TIMEOUT_S),
+            _READY_TIMEOUT_S,
+        )
+    except StartError:
+        return None  # the caller loads the model in-process instead
+
+
+def start(wait_s: float = _READY_TIMEOUT_S) -> Path:
+    """Make sure the warm server is accepting connections; return its socket path.
+
+    Idempotent: a server already accepting is left alone (no spawn). Otherwise spawns one and
+    waits up to ``wait_s`` for its socket to accept a connection. Concurrent callers are safe —
+    the server's singleton flock lets one load the model, and a caller whose spawn lost that
+    race keeps waiting for the winner. Raises :class:`StartError` naming the reason otherwise.
+    """
+    if not enabled():
+        if not hasattr(socket, "AF_UNIX"):
+            raise StartError("unix sockets are not available on this platform")
+        raise StartError(f"the classify server is disabled ({SERVER_ENV}={os.environ[SERVER_ENV]})")
+    path = socket_path()
+    if not _private_dir(path.parent):
+        raise StartError(f"{path.parent} must be a directory you own with mode 0700")
+    try:
+        _probe(path)
+        return path
+    except OSError:
+        pass
+    _await_server(path, _spawn_checked(path), lambda: _probe(path), wait_s)
+    return path
+
+
+def _probe(sock_path: Path) -> None:
+    """Connect and hang up; raises ``OSError`` when nothing accepts on ``sock_path``."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(_REQUEST_TIMEOUT_S)
+        conn.connect(str(sock_path))
+
+
+def _spawn_checked(path: Path):
+    """:func:`_spawn`, raising :class:`StartError` instead of returning ``None`` or raising."""
+    try:
         proc = _spawn(path)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise StartError(f"could not spawn the server: {exc}") from exc
     if proc is None:
-        return None
-    deadline = time.monotonic() + _READY_TIMEOUT_S
-    while time.monotonic() < deadline:
+        raise StartError(f"{sys.executable} does not support -P, which the server needs")
+    return proc
+
+
+def _await_server(path: Path, proc, attempt, timeout_s: float):
+    """Return ``attempt()`` once it stops raising ``OSError`` (i.e. the spawned server listens).
+
+    Raises :class:`StartError` early when ``proc`` died with an error, or exited cleanly after
+    losing the singleton race while no winner holds the lock any more (e.g. the winner's model
+    load failed): nothing will ever listen. Otherwise gives up after ``timeout_s``.
+    """
+    log = path.with_suffix(".log")
+    deadline = time.monotonic() + timeout_s
+    while True:
         try:
-            return request(path, message, questions, timeout=_REQUEST_TIMEOUT_S)
+            return attempt()
         except OSError:
             pass
         rc = proc.poll()
-        if rc is not None and (rc != 0 or not _lock_held(path)):
-            # Died with an error, or lost the race to a winner that has since died too (e.g.
-            # its model load failed): nothing will ever listen, so load in-process now.
-            return None
+        if rc is not None and rc != 0:
+            raise StartError(f"the server exited with status {rc} (see {log})")
+        if rc == 0 and not _lock_held(path):
+            raise StartError(f"the server exited before listening (see {log})")
+        if time.monotonic() >= deadline:
+            raise StartError(
+                f"the server did not accept connections within {timeout_s:g} s (see {log})"
+            )
         time.sleep(0.05)
-    return None
 
 
 def _private_dir(directory: Path) -> bool:
