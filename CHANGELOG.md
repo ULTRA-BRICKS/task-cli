@@ -5,8 +5,9 @@
 - The laya classify server runs under its own user service unit when one is installed, not
   inside whichever process asked for it. When no server answers, `task classify` and
   `task classify-server start` start `ai.hyperide.laya.service` (`systemctl --user start`; on
-  macOS `launchctl kickstart gui/<uid>/ai.hyperide.laya` when its LaunchAgent plist exists;
-  rename with `TASK_CLASSIFY_UNIT`). They spawn the server themselves only when no unit is
+  macOS `launchctl kickstart gui/<uid>/ai.hyperide.laya` when its LaunchAgent plist exists,
+  after `launchctl bootstrap` if the agent is not loaded yet; rename with
+  `TASK_CLASSIFY_UNIT`). They spawn the server themselves only when no unit is
   installed. A unit that will not start, fails, or stops before listening (unless another
   server is still loading) makes `start` exit 1 naming the unit.
 - New `task classify-server serve` runs the server in the foreground (the unit's ExecStart): it

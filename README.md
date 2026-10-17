@@ -841,6 +841,8 @@ or hook asked for it:
   `journalctl --user -u <unit>`.
 - macOS: when `~/Library/LaunchAgents/ai.hyperide.laya.plist` exists (the label is the unit
   name without `.service`), it is started with `launchctl kickstart gui/<uid>/ai.hyperide.laya`.
+  If that fails because the agent is not loaded yet, it is loaded with `launchctl bootstrap
+  gui/<uid> <plist>` and kicked once more.
 - No unit installed: the server is spawned detached, as before. The same happens when the
   unit's server would bind a different state dir than the caller's (the unit gets the service
   manager's environment, e.g. a caller-only `XDG_STATE_HOME` override), since it could never

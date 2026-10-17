@@ -21,10 +21,12 @@ Who runs the server: when the service-manager unit ``ai.hyperide.laya.service`` 
 asked for it, and is started with ``systemctl --user start <unit>`` (Linux: the unit is
 installed when ``systemctl --user cat <unit>`` succeeds) or ``launchctl kickstart
 gui/<uid>/<label>`` (macOS: ``~/Library/LaunchAgents/<label>.plist`` exists; ``<label>`` is the
-unit name without ``.service``). The unit's ExecStart runs ``task classify-server serve``
-(:func:`run_server`, foreground). Only when no unit is installed does the client spawn
-``python -P -m tasklib.classify_server`` detached itself (the same interpreter/env bootstrap
-`task daemon start` uses — `daemon._child_env` etc.).
+unit name without ``.service``; an agent that is not loaded yet is loaded with ``launchctl
+bootstrap gui/<uid> <plist>`` and kickstarted once more). The unit's ExecStart runs ``task
+classify-server serve`` (:func:`run_server`, foreground). The client spawns ``python -P -m
+tasklib.classify_server`` detached itself (the same interpreter/env bootstrap `task daemon
+start` uses — `daemon._child_env` etc.) only when no unit is installed, or when the unit's
+server would bind another state dir than the client's (see :func:`_start_unit`).
 
 INVARIANTS:
 - One server per user at a time: the socket lives under the user's state dir
@@ -267,19 +269,34 @@ def _launchd_state(launchctl: str, target: str) -> str | None:
     return "failed" if code is not None and code.group(1) != "0" else "exited"
 
 
-def _account_home() -> str:
-    """The user's home from the account database (what a service manager gives its units)."""
+def _account_home() -> str | None:
+    """The user's home from the account database (what a service manager gives its units).
+
+    For a uid with no passwd entry (e.g. a container's arbitrary uid) falls back to an absolute
+    ``$HOME``, else ``None``: the home is unknown. Never raises, so :func:`predict` keeps its
+    never-raises contract.
+    """
     import pwd
 
-    return pwd.getpwuid(os.getuid()).pw_dir
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        home = os.environ.get("HOME", "")
+        return home if os.path.isabs(home) else None
 
 
-def _systemd_manager_env(systemctl: str) -> dict[str, str]:
-    """The user manager's environment (``systemctl --user show-environment``), plus ``HOME``."""
+def _systemd_manager_env(systemctl: str) -> dict[str, str] | None:
+    """The user manager's environment (``systemctl --user show-environment``), plus ``HOME``
+    from the account database when the manager does not set it; ``None`` when no home is
+    known (then where the unit's server binds is unknown too)."""
     result = _run_manager([systemctl, "--user", "show-environment"])
     lines = result.stdout.splitlines() if result is not None and result.returncode == 0 else []
     env = dict(line.split("=", 1) for line in lines if "=" in line)
-    env.setdefault("HOME", _account_home())
+    if "HOME" not in env:
+        home = _account_home()
+        if home is None:
+            return None
+        env["HOME"] = home
     return env
 
 
@@ -302,14 +319,19 @@ def _start_unit(path: Path) -> _StartedUnit | None:
     if sys.platform == "darwin":
         label = unit.removesuffix(".service")
         home = _account_home()
-        plist = Path(home) / "Library" / "LaunchAgents" / f"{label}.plist"
         launchctl = shutil.which("launchctl")
-        if launchctl is None or not plist.is_file():
+        if home is None or launchctl is None:
             return None
-        if not _same_dir(_state_dir({"HOME": home}), path.parent):
+        plist = Path(home) / "Library" / "LaunchAgents" / f"{label}.plist"
+        if not plist.is_file() or not _same_dir(_state_dir({"HOME": home}), path.parent):
             return None
         target = f"gui/{os.getuid()}/{label}"
         start_cmd = [launchctl, "kickstart", target]
+        # A plist that exists but was never loaded (no login since it was written) makes
+        # kickstart fail; then bootstrapping loads it and kickstart is retried once. A loaded
+        # agent whose kickstart fails keeps that error (no bootstrap).
+        load_cmd = [launchctl, "bootstrap", f"gui/{os.getuid()}", str(plist)]
+        loaded_cmd = [launchctl, "print", target]  # exits non-zero for an agent not loaded
         started = _StartedUnit(
             label,
             lambda: _launchd_state(launchctl, target),
@@ -323,24 +345,48 @@ def _start_unit(path: Path) -> _StartedUnit | None:
         installed = _run_manager([systemctl, "--user", "cat", unit])
         if installed is None or installed.returncode != 0:
             return None
-        if not _same_dir(_state_dir(_systemd_manager_env(systemctl)), path.parent):
+        manager_env = _systemd_manager_env(systemctl)
+        if manager_env is None or not _same_dir(_state_dir(manager_env), path.parent):
             return None
         start_cmd = [systemctl, "--user", "start", unit]
+        load_cmd = loaded_cmd = None  # `systemctl --user cat` succeeded: already loaded
         started = _StartedUnit(
             unit,
             lambda: _systemd_state(systemctl, unit),
             f"journalctl --user -u {unit}",
             path.parent,
         )
-    shown = " ".join([Path(start_cmd[0]).name, *start_cmd[1:]])
     result = _run_manager(start_cmd)
-    if result is None:
-        raise StartError(f"`{shown}` could not run")
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip().splitlines()
-        reason = f": {detail[-1]}" if detail else ""
-        raise StartError(f"`{shown}` failed with status {result.returncode}{reason}")
+    if (
+        result is not None
+        and result.returncode != 0
+        and load_cmd is not None
+        and loaded_cmd is not None
+        and not _ok(_run_manager(loaded_cmd))
+    ):
+        loaded = _run_manager(load_cmd)
+        # A concurrent caller may have bootstrapped it first (ours then fails "already
+        # loaded"): only a bootstrap failure that left the agent unloaded is an error.
+        if not _ok(loaded) and not _ok(_run_manager(loaded_cmd)):
+            raise StartError(_failure(load_cmd, loaded))
+        result = _run_manager(start_cmd)
+    if not _ok(result):
+        raise StartError(_failure(start_cmd, result))
     return started
+
+
+def _ok(result) -> bool:
+    return result is not None and result.returncode == 0
+
+
+def _failure(cmd: list[str], result) -> str:
+    """One line naming ``cmd`` (and so the unit) and why it failed."""
+    shown = " ".join([Path(cmd[0]).name, *cmd[1:]])
+    if result is None:
+        return f"`{shown}` could not run"
+    detail = (result.stderr or "").strip().splitlines()
+    reason = f": {detail[-1]}" if detail else ""
+    return f"`{shown}` failed with status {result.returncode}{reason}"
 
 
 def _run_manager(cmd: list[str]):

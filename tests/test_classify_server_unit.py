@@ -30,6 +30,7 @@ pytestmark = pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="needs AF
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # conftest replaces `_start_unit` for every test; these tests drive the real one.
 REAL_START_UNIT = server._start_unit
+REAL_ACCOUNT_HOME = server._account_home
 UNIT = "ai.hyperide.laya.service"
 
 FAKE_SERVER = """
@@ -58,16 +59,34 @@ exits = os.environ.get("FAKE_UNIT_EXITS") == "1"
 if args[:2] == ["--user", "show"]:
     print("failed" if dies else "inactive" if exits else "active")
     sys.exit(0)
+loaded = os.environ["FAKE_MANAGER_LOG"] + ".loaded"
+unloaded = os.environ.get("FAKE_AGENT_UNLOADED") == "1" and not os.path.exists(loaded)
 if args[:1] == ["print"]:
+    if unloaded:
+        print("Could not find service \\"ai.hyperide.laya\\" in domain", file=sys.stderr)
+        sys.exit(113)
     if dies or exits:
         print("\\tstate = not running\\n\\tlast exit code = " + ("1" if dies else "0"))
     else:
         print("\\tstate = running\\n\\tlast exit code = 1")  # a stale code from an earlier run
     sys.exit(0)
+if args[:1] == ["bootstrap"]:
+    if os.environ.get("FAKE_BOOTSTRAP_RACED") == "1":  # another caller loaded it just now
+        open(loaded, "w").close()
+        print("Bootstrap failed: 37: Operation already in progress", file=sys.stderr)
+        sys.exit(37)
+    if os.environ.get("FAKE_BOOTSTRAP_FAILS") == "1":
+        print("Bootstrap failed: 5: Input/output error", file=sys.stderr)
+        sys.exit(5)
+    open(loaded, "w").close()
+    sys.exit(0)
 if args[:2] == ["--user", "start"] or args[:1] == ["kickstart"]:
     if os.environ.get("FAKE_UNIT_START_FAILS") == "1":
         print("Failed to start unit: Unit not found.", file=sys.stderr)
         sys.exit(5)
+    if unloaded:
+        print("Could not find service \\"ai.hyperide.laya\\" in domain", file=sys.stderr)
+        sys.exit(113)
     if not (dies or exits):
         # Like the real managers, return at once: the server must not hold our output pipes.
         subprocess.Popen(
@@ -91,6 +110,8 @@ def unit_env(monkeypatch):
     monkeypatch.delenv("TASK_CLASSIFY_UNIT", raising=False)
     monkeypatch.setattr(server, "_start_unit", REAL_START_UNIT)
     monkeypatch.setattr(server, "_UNIT_POLL_INTERVAL_S", 0.05)
+    # Linux (systemd) unless a test says darwin, so the suite behaves the same on a Mac.
+    monkeypatch.setattr(server.sys, "platform", "linux")
     d = Path(tempfile.mkdtemp(prefix="tcsu-", dir="/tmp"))
     os.chmod(d, 0o700)
     home, bin_dir = d / "home", d / "bin"
@@ -297,6 +318,123 @@ def test_macos_a_launch_agent_that_fails_is_reported_fast(monkeypatch, unit_env)
     with pytest.raises(server.StartError, match=expected):
         server.start()
     assert time.monotonic() - started < 5, "a failed agent must not wait out the 60 s cap"
+
+
+def test_macos_bootstraps_a_launch_agent_that_is_not_loaded_then_kickstarts(
+    monkeypatch, unit_env
+):
+    _install_launch_agent(unit_env)
+    monkeypatch.setenv("FAKE_AGENT_UNLOADED", "1")
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    monkeypatch.setattr(server, "_spawn", _no_spawn)
+    assert server.start(wait_s=10) == unit_env["sock"]
+    uid = os.getuid()
+    plist = unit_env["dir"] / "home" / "Library" / "LaunchAgents" / "ai.hyperide.laya.plist"
+    assert _calls(unit_env)[:4] == [
+        f"launchctl kickstart gui/{uid}/ai.hyperide.laya",
+        f"launchctl print gui/{uid}/ai.hyperide.laya",
+        f"launchctl bootstrap gui/{uid} {plist}",
+        f"launchctl kickstart gui/{uid}/ai.hyperide.laya",
+    ]
+
+
+def test_macos_a_launch_agent_that_will_not_load_fails_naming_it(capsys, monkeypatch, unit_env):
+    _install_launch_agent(unit_env)
+    monkeypatch.setenv("FAKE_AGENT_UNLOADED", "1")
+    monkeypatch.setenv("FAKE_BOOTSTRAP_FAILS", "1")
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    monkeypatch.setattr(server, "_spawn", _no_spawn)
+    assert main(["classify-server", "start"]) == 1
+    err = capsys.readouterr().err
+    assert f"launchctl bootstrap gui/{os.getuid()}" in err
+    assert "Input/output error" in err
+    assert len(err.strip().splitlines()) == 1
+    calls = [c.split()[1] for c in _calls(unit_env)]
+    assert calls == ["kickstart", "print", "bootstrap", "print"], "no kickstart retry"
+
+
+def test_macos_a_bootstrap_lost_to_a_concurrent_caller_still_kickstarts(monkeypatch, unit_env):
+    # Both callers saw the agent unloaded; the other one bootstrapped it first, so ours fails
+    # but the agent is loaded now: kickstart it instead of reporting a failure.
+    _install_launch_agent(unit_env)
+    monkeypatch.setenv("FAKE_AGENT_UNLOADED", "1")
+    monkeypatch.setenv("FAKE_BOOTSTRAP_RACED", "1")
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    monkeypatch.setattr(server, "_spawn", _no_spawn)
+    assert server.start(wait_s=10) == unit_env["sock"]
+    assert [c.split()[1] for c in _calls(unit_env)][:5] == [
+        "kickstart", "print", "bootstrap", "print", "kickstart",
+    ]
+
+
+def test_macos_a_loaded_agent_that_will_not_start_keeps_its_own_error(
+    capsys, monkeypatch, unit_env
+):
+    # Loaded, but kickstart fails for another reason: no bootstrap, no retry, original error.
+    _install_launch_agent(unit_env)
+    monkeypatch.setenv("FAKE_UNIT_START_FAILS", "1")
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    monkeypatch.setattr(server, "_spawn", _no_spawn)
+    assert main(["classify-server", "start"]) == 1
+    err = capsys.readouterr().err
+    assert f"launchctl kickstart gui/{os.getuid()}/ai.hyperide.laya` failed with status 5" in err
+    assert [c.split()[1] for c in _calls(unit_env)] == ["kickstart", "print"]
+
+
+def test_a_uid_without_a_passwd_entry_falls_back_to_home(monkeypatch, unit_env):
+    # e.g. a container running under an arbitrary uid: predict must still not raise.
+    import pwd
+
+    def _no_entry(uid):
+        raise KeyError(f"getpwuid(): uid not found: {uid}")
+
+    monkeypatch.setattr(pwd, "getpwuid", _no_entry)
+    monkeypatch.setattr(server, "_account_home", REAL_ACCOUNT_HOME)
+    monkeypatch.setenv("HOME", str(unit_env["dir"] / "home"))
+    monkeypatch.setattr(server, "_spawn", _no_spawn)
+    assert server._account_home() == str(unit_env["dir"] / "home")
+    assert server.predict("hi", {}) == {"unit": "hi"}
+
+
+@pytest.mark.parametrize("home", ["", "~", "relative/home"])
+def test_with_no_known_home_the_unit_is_skipped_and_the_server_spawned(
+    monkeypatch, unit_env, home
+):
+    # No passwd entry and no absolute $HOME: where the unit would bind is unknown, so never
+    # build a relative state dir from it; spawn instead.
+    import pwd
+
+    def _no_entry(uid):
+        raise KeyError(f"getpwuid(): uid not found: {uid}")
+
+    monkeypatch.setattr(pwd, "getpwuid", _no_entry)
+    monkeypatch.setattr(server, "_account_home", REAL_ACCOUNT_HOME)
+    monkeypatch.setenv("HOME", home)
+    assert server._account_home() is None
+    spawned: list[Path] = []
+
+    def _spawn(path):
+        spawned.append(path)
+        return subprocess.Popen(
+            [sys.executable, "-c", FAKE_SERVER, str(path)], start_new_session=True
+        )
+
+    monkeypatch.setattr(server, "_spawn", _spawn)
+    assert server.predict("hi", {}) == {"unit": "hi"}
+    assert spawned == [unit_env["sock"]]
+    assert f"systemctl --user start {UNIT}" not in _calls(unit_env)
+
+
+
+def test_the_managers_own_home_is_not_overridden(monkeypatch, unit_env):
+    monkeypatch.setenv("FAKE_MANAGER_ENV", "HOME=/somewhere/else")
+
+    def _must_not_look_up():
+        raise AssertionError("HOME came from the manager; no account lookup needed")
+
+    monkeypatch.setattr(server, "_account_home", _must_not_look_up)
+    env = server._systemd_manager_env(shutil.which("systemctl"))
+    assert env["HOME"] == "/somewhere/else"
 
 
 def test_macos_without_the_launch_agent_spawns(monkeypatch, unit_env):
