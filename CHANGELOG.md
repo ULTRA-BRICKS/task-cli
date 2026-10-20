@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `task create` (and `task classify --create`) now refuses to file a ticket when the effective
+  `backend:` is not GitHub Issues and came only from a machine-wide layer
+  (`~/.config/task-cli/config.yaml` or rig-global) — no repo `task.yaml`, `rig.yaml` `task:`
+  block or ancestor `rig.yaml` pins it. A global `backend: tasks` (team HYP) used to send
+  tickets for personal repos (garage-band, 3d-cli, ubuntu-tweaks, …) into the startup tracker.
+  The error names the fix: add a `task.yaml` to the repo, or pass `--backend <name>` for a
+  one-off. Reads (`list`, `read`, `find`) are unchanged.
+
 ## 0.23.0 — 2026-10-17
 
 - New `task classify-server start` starts the warm laya classify server when it is not already

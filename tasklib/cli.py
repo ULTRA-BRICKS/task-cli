@@ -1140,6 +1140,31 @@ def _unroutable_id_error(ticket_id: str, projects: list) -> str:
     )
 
 
+def _refuse_machine_wide_backend(cfg, args: argparse.Namespace) -> None:
+    """Refuse to FILE a ticket when a non-GitHub backend came only from a machine-wide layer.
+
+    A `backend:` in ``~/.config/task-cli/config.yaml`` (or rig-global) applies to every repo on the
+    machine that has no tracker of its own. For GitHub Issues that is the zero-config default and
+    harmless; for any other backend it silently files personal-project tickets into one team's
+    tracker (2026-10-20: HYP tickets for garage-band/3d-cli/ubuntu-tweaks). Reads stay unaffected —
+    only the write path asks the repo to say where its tickets belong.
+    """
+    if getattr(args, "backend", None):
+        return
+    if not cfg.backend_machine_wide or cfg.backend == "github-issues":
+        return
+    raise _UserError(
+        f"refusing to create a ticket: this repo has no tracker of its own, and the {cfg.backend!r} "
+        "backend comes only from the machine-wide config (~/.config/task-cli/config.yaml or "
+        "rig-global), so the ticket would land in that tracker whatever this repo is.\n"
+        "  why: a machine-wide non-GitHub default routed personal-project tickets into a team "
+        "tracker.\n"
+        f"  fix: pin the tracker in this repo — add a task.yaml (`backend: {cfg.backend}` + its "
+        "section, or `backend: github-issues` + `github: {repo: owner/name}`) or a rig.yaml "
+        f"`task:` block; or pass `--backend {cfg.backend}` for a one-off ticket."
+    )
+
+
 def _create_without_repo_error(cfg) -> str:
     """The honest 3-part (WHAT/WHY/HOW) error for `task create` run outside a repo.
 
@@ -1875,6 +1900,7 @@ def cmd_create(args: argparse.Namespace) -> int:
     # 3-part error — never the cryptic "no 'origin' remote" the backend would otherwise throw.
     if _current_project_overlay(cfg) is None:
         raise _UserError(_create_without_repo_error(cfg))
+    _refuse_machine_wide_backend(cfg, args)
     session = _detect_session(cfg)
 
     title = args.title
@@ -6146,6 +6172,7 @@ def _classify_create(
     never on a dedup-fold-in comment, since that path touches an EXISTING ticket whose own
     labels (possibly from an earlier, different classification) must not be silently relabeled.
     """
+    _refuse_machine_wide_backend(cfg, args)
     backend = _backend(cfg)
     session = _detect_session(cfg)
     from .backends import BackendError

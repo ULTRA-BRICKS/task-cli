@@ -619,10 +619,22 @@ def _global_rig_task_overlay(env: dict[str, str]) -> tuple[dict[str, Any], Path]
     return overlay, path
 
 
-def _merge_layer(base: dict[str, Any], over: dict[str, Any], explicit: dict[str, bool]) -> dict[str, Any]:
-    """:func:`_deep_merge` for one config layer, recording whether it set ``backend``."""
+def _merge_layer(
+    base: dict[str, Any],
+    over: dict[str, Any],
+    explicit: dict[str, bool],
+    *,
+    machine_wide: bool = False,
+) -> dict[str, Any]:
+    """:func:`_deep_merge` for one config layer, recording whether it set ``backend``.
+
+    ``machine_wide`` marks the two truly-global layers (task-cli's own global config and
+    rig-global). ``explicit["machine_wide"]`` always reflects the LAST layer that set
+    ``backend``, so a repo-scoped layer that follows a global one resets it.
+    """
     if isinstance(over, dict) and "backend" in over:
         explicit["backend"] = True
+        explicit["machine_wide"] = machine_wide
     return _deep_merge(base, over)
 
 
@@ -646,6 +658,12 @@ class LoadedConfig:
     # Whether any config layer (not the built-in default) set `backend:`. Zero-config routing
     # (e.g. the CLI's Forgejo auto-detection) only applies when this is False.
     explicit_backend: bool = False
+    # True when the effective `backend:` came from a machine-wide layer (task-cli's global config
+    # or rig-global) and no repo-scoped layer (ancestor/rig.yaml/task.yaml/--config) overrode it.
+    # `task create` refuses to file a ticket on a non-GitHub backend in that case: a machine-wide
+    # default silently routed every repo without its own task.yaml (personal projects included)
+    # into one team's tracker (HYP tickets for garage-band, 2026-10-20).
+    backend_machine_wide: bool = False
 
     @property
     def backend(self) -> str:
@@ -671,6 +689,7 @@ class LoadedConfig:
             repo_root=self.repo_root,
             layers=list(self.layers),
             explicit_backend=self.explicit_backend or "backend" in overlay,
+            backend_machine_wide=self.backend_machine_wide and "backend" not in overlay,
         )
 
     @property
@@ -848,7 +867,9 @@ def load(
     # later mutation (e.g. cli `--repo` writing cfg.data["github"]["repo"]) would leak into
     # the module-global DEFAULTS for the whole process (and contaminate across main() calls).
     merged: dict[str, Any] = copy.deepcopy(DEFAULTS)
-    explicit = {"backend": False}  # set by _merge_layer when a real layer names a backend
+    # `backend` is set by _merge_layer when a real layer names a backend; `machine_wide` says
+    # whether the layer that last did so was a machine-wide one.
+    explicit = {"backend": False, "machine_wide": False}
     layers: list[str] = ["builtin-defaults"]
 
     if include_global:
@@ -858,12 +879,12 @@ def load(
         # outranks a rig-provisioned default), not the reverse.
         rig_global_overlay, rig_global_path = _global_rig_task_overlay(env)
         if rig_global_overlay:
-            merged = _merge_layer(merged, rig_global_overlay, explicit)
+            merged = _merge_layer(merged, rig_global_overlay, explicit, machine_wide=True)
             layers.append(f"rig-global:{rig_global_path}")
 
         gpath = global_config_path(env)
         if gpath.is_file():
-            merged = _merge_layer(merged, _load_yaml(gpath), explicit)
+            merged = _merge_layer(merged, _load_yaml(gpath), explicit, machine_wide=True)
             layers.append(f"global:{gpath}")
 
     # Ancestor rig.yaml task: blocks, outer → inner — folder-level routing defaults (e.g.
@@ -934,7 +955,11 @@ def load(
 
     validate(merged)
     return LoadedConfig(
-        data=merged, repo_root=repo_root, layers=layers, explicit_backend=explicit["backend"]
+        data=merged,
+        repo_root=repo_root,
+        layers=layers,
+        explicit_backend=explicit["backend"],
+        backend_machine_wide=explicit["machine_wide"],
     )
 
 
