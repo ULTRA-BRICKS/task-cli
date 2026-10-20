@@ -1169,18 +1169,19 @@ def _create_without_repo_error(cfg) -> str:
     """The honest 3-part (WHAT/WHY/HOW) error for `task create` run outside a repo.
 
     The HOW must not lie: it points at the real escape hatches that exist — ``--repo`` (which
-    pins the GitHub coordinate), a Linear team in config, or simply running inside the repo.
+    pins the GitHub coordinate), a repo-scoped Linear/Tasks pin, or simply running inside the repo.
     """
     backend = cfg.backend
     if backend == "linear":
         how = (
-            "  fix: run inside the repo whose `task.yaml` sets `linear.team`, "
-            "or set `linear: {team: KEY}` in ~/.config/task-cli/config.yaml."
+            "  fix: run inside the repo whose `task.yaml` (or `rig.yaml` `task:` block) sets "
+            "`linear.team` (a machine-wide global config would route every repo to that team)."
         )
     elif backend == "tasks":
         how = (
-            "  fix: run inside the repo whose `task.yaml` sets `tasks.url`/`tasks.team`, "
-            "or set `tasks: {url: URL, team: KEY}` in ~/.config/task-cli/config.yaml."
+            "  fix: run inside the repo whose `task.yaml` (or `rig.yaml` `task:` block) sets "
+            "`tasks.url`/`tasks.team` (a machine-wide global config would route every repo "
+            "to that team)."
         )
     elif backend == "forgejo":
         how = (
