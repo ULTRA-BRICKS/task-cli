@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Linear backend: `task done` (and `gh ship`'s auto-close) no longer refuses a ticket linked
+  with `task link` on the `links-url` gate (task-cli#278). Linear stores each link as
+  `[GL-346](<url>)`; the parser now unwraps that identifier-labelled form back to the bare URL,
+  while bare values, embedded credentials and other labelled links are still refused.
+
 ## 0.23.0 — 2026-10-17
 
 - New `task classify-server start` starts the warm laya classify server when it is not already

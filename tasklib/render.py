@@ -617,7 +617,9 @@ def _unwrap_link_value(val: str) -> str:
     Only unwraps when the visible label equals the target URL — Linear's own auto-linkify
     always echoes the bare URL as both, so this never touches a genuinely user-authored
     labeled link like ``[design review](https://figma.com/x)`` (review finding,
-    task-cli#F2). The target capture is greedy-to-the-last-``)`` (anchored at end of
+    task-cli#F2) — or when the label is the issue identifier Linear puts in the URL path
+    (``[GL-346](https://linear.app/ws/issue/GL-346/slug)``, what it makes of a ``task link``
+    entry; GL-459). The target capture is greedy-to-the-last-``)`` (anchored at end of
     string) rather than stopping at the first ``)``, so a URL that itself contains a
     parenthesis (e.g. a Wikipedia article title) still round-trips.
     """
@@ -626,7 +628,40 @@ def _unwrap_link_value(val: str) -> str:
         return val
     label, wrapped = m.group(1).strip(), m.group(2).strip()
     target = wrapped[1:-1].strip() if wrapped.startswith("<") and wrapped.endswith(">") else wrapped
-    return target if label == target else val
+    if label == target or _label_is_linear_issue_identifier(label, target):
+        return target
+    return val
+
+
+_LINEAR_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-[0-9]+$")
+
+
+def _label_is_linear_issue_identifier(label: str, target: str) -> bool:
+    """Linear rewrites the issue URL ``task link`` writes into ``[GL-346](<url>)``: the label is
+    the issue identifier, which is the path segment right after ``issue`` in the URL
+    (``https://linear.app/<workspace>/issue/GL-346/<slug>``, a ``linear.app`` host) — still Linear's own auto-linkify
+    echo, not user-authored text (GL-459). Requires an http(s) target, an identifier-shaped
+    label, and that exact (case-insensitive) identifier directly after the ``issue`` segment, so
+    any other labelled link — ``[design](https://figma.com/design)``, a workspace or slug match —
+    stays wrapped and the ``links-url`` gate keeps refusing it. An unparseable target (a bracket
+    the URL parser rejects) is simply not Linear's echo."""
+    from urllib.parse import urlparse
+
+    if not _LINEAR_IDENTIFIER_RE.match(label):
+        return False
+    try:
+        parsed = urlparse(target)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    host = (parsed.hostname or "").casefold()
+    if host != "linear.app" and not host.endswith(".linear.app"):
+        return False
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    return len(segments) >= 3 and segments[1].casefold() == "issue" and segments[2].casefold() == label.casefold()
 
 
 def _parse_criteria(text: str) -> list[Criterion]:

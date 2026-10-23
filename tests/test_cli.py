@@ -2756,6 +2756,36 @@ def test_link_follow_up_of_writes_asymmetric_mirrored_labels(_inject_fake):
     assert _inject_fake.get("#1").links["Followed up by #2"] == "https://fake/2"
 
 
+def test_done_accepts_the_links_task_link_writes_after_a_linear_style_round_trip(
+    capsys, monkeypatch, _inject_fake
+):
+    # GL-459: Linear rewrites each bare URL value `task link` stores into `[<id>](<url>)` on save.
+    # Simulate that echo on the way into the backend; `task done` must still pass links-url.
+    import tasklib.render as render_mod
+
+    real_render_links = render_mod._render_links
+
+    def linear_like(ticket):
+        def echo(val):
+            if not val.startswith("https://fake/"):
+                return val
+            ident = f"GL-{val.rsplit('/', 1)[-1]}"
+            return f"[{ident}](https://linear.app/ws/issue/{ident}/some-slug)"
+
+        return "\n".join(f"- {key}: {echo(val)}" for key, val in ticket.links.items()) or real_render_links(ticket)
+
+    monkeypatch.setattr(render_mod, "_render_links", linear_like)
+    main(_create_argv(**{"--title": "original ticket"}))  # #1
+    main(_create_argv(**{"--title": "regression follow-up"}))  # #2
+    assert main(["link", "#2", "relates-to", "#1"]) == 0
+    assert main(["link", "#2", "follow-up-of", "#1"]) == 0
+    _ready_to_close(_inject_fake, "#2")
+    capsys.readouterr()
+    rc = main(["done", "#2"])
+    assert rc == 0, capsys.readouterr().out
+    assert _inject_fake.get("#2").state.value == "done"
+
+
 def test_link_is_idempotent_on_rerun(capsys, _inject_fake):
     main(_create_argv(**{"--title": "first ticket"}))
     main(_create_argv(**{"--title": "second ticket"}))

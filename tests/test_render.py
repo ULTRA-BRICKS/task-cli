@@ -561,6 +561,49 @@ def test_unwrap_link_value_preserves_user_authored_labels():
     assert links == {"design": "[design review](https://figma.com/x)"}
 
 
+def test_unwrap_link_value_unwraps_linears_issue_identifier_label():
+    # GL-459: Linear rewrites the bare issue URL `task link` writes into `[GL-346](<url>)` (the
+    # label is the issue identifier, which is also a path segment of the URL). That is the same
+    # auto-linkify echo as label == target, so it must parse back to the bare URL.
+    url = "https://linear.app/glide-vc/issue/GL-346/some-slug"
+    body = _body_with_section("Links", f"\n- Relates to GL-346: [GL-346]({url})\n")
+    assert parse(body).links == {"Relates to GL-346": url}
+
+
+def _body_with_links_or_skips(section: str, bullet: str) -> str:
+    """A full body whose Links section, or its trailing optional Skipped gates section, holds one
+    ``- <bullet>`` line."""
+    if section == "Links":
+        return _body_with_section("Links", f"\n- {bullet}\n")
+    return _body_with_section("Links", "\n- (none)\n") + f"\n## Skipped gates\n- {bullet}\n"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[GL-9](https://linear.app/ws/issue/GL-346/slug)",  # label not the URL's identifier
+        "[design](https://figma.com/design)",  # ordinary label that is a path segment
+        "[ws](https://linear.app/ws/issue/GL-346/slug)",  # workspace segment
+        "[slug](https://linear.app/ws/issue/GL-346/slug)",  # slug segment
+        "[GL-346](https://example.com/ws/issue/GL-346/slug)",  # identifier on a non-Linear host
+        "[GL-346](https://linear.app/ws/projects/GL-346/slug)",  # not an /issue/ URL
+        "[GL-346](https://user:tok@linear.app/ws/issue/GL-346/slug)",  # embedded credentials
+    ],
+)
+def test_unwrap_link_value_keeps_labelled_links_that_are_not_linears_issue_echo(value):
+    for section in ("Links", "Skipped gates"):
+        parsed = parse(_body_with_links_or_skips(section, f"x: {value}"))
+        assert (parsed.links if section == "Links" else parsed.skips) == {"x": value}
+
+
+@pytest.mark.parametrize("section", ["Links", "Skipped gates"])
+def test_unwrap_link_value_survives_an_unparseable_target(section):
+    # urlparse raises ValueError on a malformed bracketed host; parsing a ticket must not crash
+    value = "[GL-346](https://[broken/issue/GL-346)"
+    parsed = parse(_body_with_links_or_skips(section, f"reference: {value}"))
+    assert (parsed.links if section == "Links" else parsed.skips) == {"reference": value}
+
+
 def test_join_bullet_blocks_does_not_absorb_column_zero_pasted_image():
     # review finding: a hand-pasted GitHub screenshot commonly lands at column 0
     # (`![Screenshot...](...)`, no leading whitespace) directly under the Links section
