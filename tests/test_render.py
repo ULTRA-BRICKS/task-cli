@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from tasklib.links import RELATIONS
 from tasklib.model import Criterion, Screenshot, Ticket
 from tasklib.render import (
     SECTIONS,
@@ -576,6 +577,26 @@ def _body_with_links_or_skips(section: str, bullet: str) -> str:
     if section == "Links":
         return _body_with_section("Links", f"\n- {bullet}\n")
     return _body_with_section("Links", "\n- (none)\n") + f"\n## Skipped gates\n- {bullet}\n"
+
+
+@pytest.mark.parametrize("relation", RELATIONS)
+def test_every_entry_task_link_writes_survives_linears_echo_and_passes_links_url(relation):
+    # GL-459: for each relation, both entries `plan_link` can write (source side and mirror),
+    # stored by Linear as `[<ID>](<issue url>)`, parse back to the bare URL and pass the gate.
+    from tasklib.links import plan_link
+    from tasklib.policy import EnforceConfig, links_url_violation
+
+    def url(ident: str) -> str:
+        return f"https://linear.app/ws/issue/{ident}/some-slug"
+
+    entries = plan_link("GL-1", url("GL-1"), relation, "GL-2", url("GL-2"))
+    assert entries
+    for entry in entries:
+        ident = entry.url.split("/issue/")[1].split("/")[0]
+        body = _body_with_links_or_skips("Links", f"{entry.key}: [{ident}]({entry.url})")
+        links = parse(body).links
+        assert links == {entry.key: entry.url}
+        assert links_url_violation(replace(parse(body), links=links), EnforceConfig()) is None
 
 
 @pytest.mark.parametrize(
