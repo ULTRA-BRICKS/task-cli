@@ -124,7 +124,7 @@ def test_vendored_hook_keeps_the_block_marker_contract():
 
 
 def test_vendored_hook_allows_a_ticketed_commit():
-    event = '{"args":{"command":"git commit -m \\"add feature (Closes #5)\\""},"cwd":"/tmp"}'
+    event = '{"args":{"command":"git commit -m \\"add feature (Refs #5)\\""},"cwd":"/tmp"}'
     proc = subprocess.run(
         [sys.executable, str(VENDORED)],
         input=event,
@@ -174,11 +174,13 @@ def test_vendored_hook_gates_a_ticketless_commit_in_a_chain():
     assert BLOCK_MARKER in proc.stdout
 
 
-def test_vendored_hook_honors_inline_skip_escape():
-    # the documented inline escape REQUIRE_TICKET_SKIP=1 must allow a ticketless commit
+def test_vendored_hook_no_longer_honors_the_inline_skip_escape():
+    # agent-tools#104 removed the trailer/inline-env escapes: the only remaining outs for a genuine
+    # ticketless commit are the Telegram hatch and the repo-level warn-only dial. A re-sync that
+    # brought the escape back (or a stale vendored copy that still has it) fails here.
     proc = _run_hook('REQUIRE_TICKET_SKIP=1 git commit -m "no ticket"')
-    assert proc.returncode == 0, proc.stderr
-    assert BLOCK_MARKER not in proc.stdout
+    assert proc.returncode == 10, proc.stderr
+    assert BLOCK_MARKER in proc.stdout
 
 
 def test_resync_check_is_body_only_and_ignores_the_commit_line():
@@ -256,3 +258,36 @@ def test_resync_cli_maps_a_crash_to_infra_exit_not_drift(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "reconstruct_canonical_from_vendored", boom)
     rc = mod.cli(["resync", "--check", synced])
     assert rc >= 2, "an unexpected crash must be an infra error (>=2), never drift (1)"
+
+
+# ── the block text must name the self-service remedy first (task-cli#290, agent-tools#994) ─────
+# Incident 2026-10-24: an agent hit this block, never ran `task new`, and stopped to ask the human.
+# The vendored fixture is what the Docker agent test shows a real agent, so it must carry the same
+# guidance the canonical hook now emits: run `task new` yourself, recommit with `Refs #<id>`.
+
+
+def _block_message(command: str = 'git commit -m "wall-plugs: flat-head spiral plug mod"') -> str:
+    proc = _run_hook(command)
+    assert proc.returncode == 10, proc.stderr
+    return json.loads(proc.stdout)["message"]
+
+
+def test_block_text_leads_with_the_task_new_remedy_not_with_asking_the_human():
+    text = _block_message()
+    assert text.startswith(BLOCK_MARKER)
+    first_step = text.split("1.", 1)[1].split("\n", 1)[0]
+    assert "task new" in first_step and "--acceptance" in first_step
+    assert "Refs #<id>" in first_step
+    assert "ASK the human" not in text and "No self-service bypass" not in text
+
+
+def test_block_text_never_teaches_the_closing_keywords_the_task_skill_forbids():
+    for command in ('git commit -m "no ticket"', "git commit -F -"):
+        text = _block_message(command)
+        assert "Closes" not in text and "Fixes" not in text, text
+
+
+def test_block_text_tells_a_dispatched_agent_to_message_its_coordinator_not_to_stop():
+    text = _block_message()
+    assert "write agent://" in text and "awaiting-coordinator" in text
+    assert text.index("task new") < text.index("write agent://")
