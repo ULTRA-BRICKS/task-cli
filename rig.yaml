@@ -30,3 +30,14 @@ task:
     url: https://git.hyperide.ai
     repo: ultrabricks/task-cli
     attachment_mode: native
+
+# TEMPORARY ratchet for the commit-time lint gate (`rig lint check`, hook 30-lint-check), which checks whole staged
+# files: tasklib/cli.py alone is 6881 lines with functions up to cognitive 39 / cyclomatic 33. Values sit just above
+# today's worst case; a NEW function or file above them is still refused. Remove or lower once rig-cli#798
+# (diff-scoped gate with a baseline) is in. Ticket: #300 of this repository.
+lint_checks:
+  complexity:
+    max_cognitive: 45 # ratchet down, see rig-cli#798 (worst today: cli.py cmd_change 39)
+    max_cyclomatic: 40 # ratchet down, see rig-cli#798 (worst today: cli.py cmd_change 33)
+  file_lines:
+    error_above: 7200 # ratchet down, see rig-cli#798 (tasklib/cli.py is 6881 lines today)
