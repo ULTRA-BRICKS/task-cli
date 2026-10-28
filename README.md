@@ -809,7 +809,8 @@ itself: the first call spawns a detached, machine-wide server
 (`python -P -m tasklib.classify_server`, `tasklib/classify_server.py`) that loads the model
 once and answers over a unix socket under `~/.local/state/task-cli/classify/` (dir 0700,
 socket 0600, one per task-cli version, log alongside it). Later calls are one socket
-round-trip; the server exits after 15 minutes without a request. Measured on the M-series dev
+round-trip; the server exits after 15 minutes without a request (configurable, see "Keeping Laya
+resident" below). Measured on the M-series dev
 host: cold ~4 s (spawn + load), warm ~0.3 s, versus 4-8 s for EVERY call before. If the server
 cannot start or answer, the provider loads the model in-process exactly as before.
 `TASK_CLASSIFY_SERVER=0` keeps classification in-process. The model load is quiet — no
@@ -826,6 +827,42 @@ naming the reason: disabled by `TASK_CLASSIFY_SERVER=0`, a socket directory that
 with mode 0700, a spawn failure, or the server exiting or not listening within 60 s (those last
 two name the server log). Concurrent starts are safe: the server's singleton lock loads the
 model once and every caller waits for that server.
+
+**Keeping Laya resident (task-cli#298).** `TASK_CLASSIFY_SERVER_IDLE_SECONDS` sets how long the
+server may sit idle before it exits: a finite number of seconds >= 0, unset = 900 (15 minutes),
+`0` = never exit on idle. Anything else (empty, negative, NaN, infinite, text) is an error, not
+a silent fallback to the default: `task classify-server start` exits 1 with one `error:` line
+and spawns nothing, the server process exits 2, and `task classify` prints a warning and
+classifies in-process. A server that is already running keeps the lifetime it was started with.
+The setting is read where the server is spawned (`task classify-server start`, the first
+`task classify`) or run, and the server inherits it. The module entrypoint
+`python -P -m tasklib.classify_server [socket]` runs in the foreground, and SIGTERM/SIGINT make
+it finish the request in flight, remove its socket, release its lock and exit 0, so it can be
+supervised. A `systemd --user` unit (adjust `ExecStart` to the interpreter that has hyper-task
+and laya, e.g. a `uv tool` environment) keeps one resident server and restarts it after a crash:
+
+```ini
+# ~/.config/systemd/user/task-classify-server.service
+[Unit]
+Description=task-cli warm Laya classify server
+
+[Service]
+Environment=TASK_CLASSIFY_SERVER_IDLE_SECONDS=0
+ExecStart=%h/.local/share/uv/tools/hyper-task/bin/python -P -m tasklib.classify_server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+The singleton lock still decides who serves: a second instance (the service started while a
+client-spawned server of the same version is alive) exits 0 without loading a model and is
+restarted every `RestartSec` until that server is gone, so stop a running same-version server
+first (send it a `shutdown` request; never delete its socket or lock file). The unit must see
+the same `$HOME`/`$XDG_STATE_HOME` as your clients, or they will look for a different socket.
+`systemctl --user enable --now task-classify-server` starts it; `loginctl enable-linger $USER`
+keeps it across logouts.
 
 **Batch mode.** `task classify --batch` reads JSONL on stdin — one `{"text": "...", "id": ...}`
 object per line, `id` optional and echoed back — and writes one `--json`-shaped verdict object

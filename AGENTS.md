@@ -275,7 +275,12 @@ that holds the loaded model and answers over a 0600 unix socket keyed by task-cl
 the first call spawns it (reusing `daemon`'s child-env/`-P` bootstrap) and waits for the
 socket, and every failure returns `None` so the provider loads in-process as before. The
 server takes a flock BEFORE loading (racing cold clients load once), carries no copy of the
-question schema (the client sends it), and exits after 15 idle minutes;
+question schema (the client sends it), and exits after 15 idle minutes unless
+`TASK_CLASSIFY_SERVER_IDLE_SECONDS` (task-cli#298: finite number >= 0, `0` = never exit on idle,
+invalid = an error in `start`/the server and a stderr warning plus in-process fallback in
+`predict`, never a silent default; `classify_server.idle_seconds` is its single parser) says
+otherwise. The foreground module (`_run_foreground`) stops on SIGTERM/SIGINT after the request
+in flight and is the unit a `systemd --user` service supervises (README "Keeping Laya resident");
 `TASK_CLASSIFY_SERVER=0` disables it (`tests/conftest.py` sets that for every test, and also
 stubs `_cached_laya_snapshot`, the load's local-HF-cache-first lookup). `classify_server.start`
 (`task classify-server start`, task-cli#279) is the strict path for callers that need the

@@ -1,11 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.24.0 — 2026-10-28
 
 - Linear backend: `task done` (and `gh ship`'s auto-close) no longer refuses a ticket linked
   with `task link` on the `links-url` gate (task-cli#278). Linear stores each link as
   `[GL-346](<url>)`; the parser now unwraps that identifier-labelled form back to the bare URL,
   while bare values, embedded credentials and other labelled links are still refused.
+- Warm laya server: `TASK_CLASSIFY_SERVER_IDLE_SECONDS` sets the idle lifetime (task-cli#298).
+  Unset keeps 900 s; `0` never exits on idle; an empty, negative, NaN, infinite or non-numeric
+  value is refused (`task classify-server start` exits 1, the server process exits 2,
+  `task classify` warns and classifies in-process) instead of silently using the default. The
+  spawned server inherits the setting. The foreground module entrypoint now stops cleanly on
+  SIGTERM/SIGINT (finishes the request in flight, removes its socket, releases its lock, exits 0)
+  and runs from its own state directory, so a supervisor such as a `systemd --user` unit with
+  `Restart=always` can keep Laya resident (see the README).
 
 ## 0.23.0 — 2026-10-17
 

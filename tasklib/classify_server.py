@@ -26,9 +26,13 @@ INVARIANTS:
   classification schema that could drift from the client's.
 - A flock on ``<socket>.lock`` is taken BEFORE the model loads: two cold clients racing to spawn
   load the model once; the loser exits 0 and the client keeps waiting for the winner's socket.
-- The server exits after :data:`IDLE_SECONDS` without a request (the model holds ~1 GB of RAM),
-  removing its socket. A server killed without cleanup leaves a stale socket file; the next
-  client gets "connection refused", spawns, and the new server (holding the lock) replaces it.
+- The server exits after :data:`IDLE_SECONDS` (900 s) without a request unless
+  ``$TASK_CLASSIFY_SERVER_IDLE_SECONDS`` says otherwise (task-cli#298: a finite number >= 0;
+  ``0`` never exits on idle; anything else is an error, never a silent default). Exiting
+  removes its socket; SIGTERM/SIGINT do the same after the request in flight. A server killed
+  without cleanup leaves a stale socket file; the next client gets "connection refused",
+  spawns, and the new server (holding the lock) replaces it. The resident-service form is the
+  same foreground module run under a supervisor (README "Keeping Laya resident").
 - The model id is the same fixed `_LAYA_DEFAULT_MODEL_ID` the in-process path uses, loaded with
   the server's cwd set to its own state dir (see `LayaClassifier._load_agent`'s cwd-shadowing
   guard) — nothing in a request can choose what gets loaded. A client only talks to a socket
@@ -38,8 +42,12 @@ INVARIANTS:
 
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import os
+import select
+import signal
 import socket
 import stat
 import subprocess
@@ -48,7 +56,11 @@ import time
 from pathlib import Path
 
 SERVER_ENV = "TASK_CLASSIFY_SERVER"
-IDLE_SECONDS = 900.0
+IDLE_ENV = "TASK_CLASSIFY_SERVER_IDLE_SECONDS"
+IDLE_SECONDS = 900.0  # the default when IDLE_ENV is unset; 0 means "never exit on idle"
+# select() rejects timeouts beyond the platform's time_t range (an idle of 1e308 is a valid
+# setting); ten years is "never" for a server that is restarted far more often than that.
+_MAX_IDLE_WAIT_S = 10 * 365 * 86400.0
 # How long a cold client waits for a spawned server that is still alive. Deliberately long: a
 # live server is already paying the model load, and falling back to a SECOND in-process load
 # would only compete with it for the same CPU/RAM (measured under a load average of ~36: a
@@ -108,6 +120,36 @@ class StartError(Exception):
     """The server could not be started or never came up; the message says why."""
 
 
+class IdleSettingError(ValueError):
+    """The idle lifetime is not a finite number of seconds >= 0."""
+
+
+def _is_valid_idle(value: float) -> bool:
+    return math.isfinite(value) and value >= 0
+
+
+def idle_seconds(env: dict[str, str] | None = None) -> float:
+    """The idle lifetime in seconds from ``$TASK_CLASSIFY_SERVER_IDLE_SECONDS``.
+
+    Unset gives :data:`IDLE_SECONDS`; ``0`` means the server never exits on idle. Anything that
+    is not a finite number >= 0 (empty, negative, NaN, infinite, text) raises
+    :class:`IdleSettingError` naming the variable — never a silent fall back to the default.
+    """
+    env = os.environ if env is None else env
+    raw = env.get(IDLE_ENV)
+    if raw is None:
+        return IDLE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not _is_valid_idle(value):
+        raise IdleSettingError(
+            f"{IDLE_ENV}={raw!r} must be a finite number of seconds >= 0 (0 = never exit on idle)"
+        )
+    return value
+
+
 def predict(message: str, questions: dict):
     """The laya ``predict`` result for ``message`` from the warm server, or ``None``.
 
@@ -124,6 +166,11 @@ def predict(message: str, questions: dict):
         return request(path, message, questions, timeout=_REQUEST_TIMEOUT_S)
     except OSError:
         pass
+    try:
+        idle_seconds()  # the spawned server inherits it; a bad value is reported, not defaulted
+    except IdleSettingError as exc:
+        print(f"warning: classify server not started: {exc}", file=sys.stderr)
+        return None
     try:
         proc = _spawn_checked(path)
         return _await_server(
@@ -148,6 +195,10 @@ def start(wait_s: float = _READY_TIMEOUT_S) -> Path:
         if not hasattr(socket, "AF_UNIX"):
             raise StartError("unix sockets are not available on this platform")
         raise StartError(f"the classify server is disabled ({SERVER_ENV}={os.environ[SERVER_ENV]})")
+    try:
+        idle_seconds()
+    except IdleSettingError as exc:
+        raise StartError(str(exc)) from exc
     path = socket_path()
     if not _private_dir(path.parent):
         raise StartError(f"{path.parent} must be a directory you own with mode 0700")
@@ -233,14 +284,18 @@ def _lock_held(sock_path: Path) -> bool:
     return False
 
 
+def _make_private_dir(directory: Path) -> None:
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+
+
 def _spawn(path: Path):
     """Start the server detached; the ``Popen`` handle, or ``None`` when it can't be started."""
     from . import daemon
 
     if not daemon.python_supports_safepath():
         return None  # -P is required to keep a cwd `tasklib/` from shadowing the real package
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    _make_private_dir(path.parent)
     log_path = path.with_suffix(".log")
     try:
         if log_path.stat().st_size > _LOG_MAX_BYTES:
@@ -266,16 +321,29 @@ def _spawn(path: Path):
         )
 
 
-def serve(sock_path: Path, predictor, *, idle_s: float = IDLE_SECONDS, load=None) -> int:
+def serve(
+    sock_path: Path,
+    predictor,
+    *,
+    idle_s: float = IDLE_SECONDS,
+    load=None,
+    stop_fd: int | None = None,
+) -> int:
     """Serve ``predictor(message, questions)`` on ``sock_path`` until idle for ``idle_s``.
 
-    ``load`` (optional) runs AFTER the singleton lock is held and BEFORE the socket binds, so a
-    client never connects to a server whose model isn't loaded yet, and a losing racer never
-    loads a second copy. Returns 0 on an idle/requested exit or when another server already
-    holds the lock.
+    ``idle_s == 0`` never exits on idle (a blocking wait, not a zero timeout). ``stop_fd``
+    (optional) is a pipe read end: once it is readable the request in flight finishes, then
+    the server returns. ``load`` (optional) runs AFTER the singleton lock is held and BEFORE
+    the socket binds, so a client never connects to a server whose model isn't loaded yet, and
+    a losing racer never loads a second copy. Returns 0 on an idle/requested exit or when
+    another server already holds the lock. Raises ``ValueError`` for an invalid ``idle_s``
+    before touching the filesystem.
     """
     import fcntl
 
+    if not _is_valid_idle(idle_s):
+        raise ValueError(f"idle_s must be a finite number of seconds >= 0, got {idle_s!r}")
+    timeout = None if idle_s == 0 else min(idle_s, _MAX_IDLE_WAIT_S)
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = os.open(str(sock_path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -285,35 +353,46 @@ def serve(sock_path: Path, predictor, *, idle_s: float = IDLE_SECONDS, load=None
             return 0  # another server owns this socket
         if load is not None:
             predictor = load()
-        try:
+        if stop_fd is not None and select.select([stop_fd], [], [], 0)[0]:
+            return 0  # asked to stop while the model loaded: never bind
+        with contextlib.suppress(FileNotFoundError):
             sock_path.unlink()
-        except FileNotFoundError:
-            pass
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as srv:
-            old_umask = os.umask(0o177)
+            _bind_private(srv, sock_path)
             try:
-                srv.bind(str(sock_path))
+                return _accept_loop(srv, predictor, timeout, stop_fd)
             finally:
-                os.umask(old_umask)
-            os.chmod(sock_path, 0o600)
-            srv.listen(16)
-            srv.settimeout(idle_s)
-            try:
-                while True:
-                    try:
-                        conn, _ = srv.accept()
-                    except socket.timeout:
-                        return 0
-                    with conn:
-                        if _handle(conn, predictor) == "shutdown":
-                            return 0
-            finally:
-                try:
+                with contextlib.suppress(FileNotFoundError):
                     sock_path.unlink()
-                except FileNotFoundError:
-                    pass
     finally:
         os.close(lock_fd)
+
+
+def _bind_private(srv: socket.socket, sock_path: Path) -> None:
+    old_umask = os.umask(0o177)
+    try:
+        srv.bind(str(sock_path))
+    finally:
+        os.umask(old_umask)
+    os.chmod(sock_path, 0o600)
+    srv.listen(16)
+    srv.setblocking(False)
+
+
+def _accept_loop(srv: socket.socket, predictor, timeout: float | None, stop_fd: int | None) -> int:
+    """Answer requests until idle for ``timeout`` (``None`` = never), stopped, or told to shut down."""
+    watched = [srv] if stop_fd is None else [srv, stop_fd]
+    while True:
+        ready = select.select(watched, [], [], timeout)[0]
+        if not ready or stop_fd in ready:
+            return 0  # idle timeout, or asked to stop
+        try:
+            conn, _ = srv.accept()
+        except BlockingIOError:
+            continue  # the client hung up between select and accept
+        with conn:
+            if _handle(conn, predictor) == "shutdown":
+                return 0
 
 
 def _handle(conn: socket.socket, predictor) -> str | None:
@@ -358,12 +437,62 @@ def _load_laya_predictor():
     return agent.predict
 
 
+@contextlib.contextmanager
+def _stop_on_signals():
+    """Yield a pipe read end that becomes readable on SIGTERM or SIGINT; handlers restored after.
+
+    The Python-level handler is a no-op: the wake-up fd (written by the C handler) is what
+    :func:`serve` selects on, so a signal never interrupts a request half way.
+    """
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.set_blocking(write_fd, False)
+    signals = (signal.SIGTERM, signal.SIGINT)
+    previous = {sig: signal.signal(sig, lambda *_: None) for sig in signals}
+    old_wakeup = signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
+    try:
+        yield read_fd
+    finally:
+        signal.set_wakeup_fd(old_wakeup)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def _run_foreground(path: Path, load, env: dict[str, str] | None = None) -> int:
+    """The server process: validated idle setting, signal-driven graceful stop, then :func:`serve`.
+
+    Returns 2 with one ``error:`` line on stderr for an invalid idle setting, before the
+    singleton lock is taken or any model is loaded.
+    """
+    try:
+        idle_s = idle_seconds(env)
+    except IdleSettingError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    with _stop_on_signals() as stop_fd:
+        return serve(path, None, idle_s=idle_s, load=load, stop_fd=stop_fd)
+
+
+def _enter_state_dir(path: Path) -> None:
+    """Make ``path``'s directory the cwd (creating it), as :func:`_spawn` does for a
+    client-spawned server, so a supervisor's cwd can never shadow the model id. Only the
+    default state dir is forced to 0700; a directory the operator named is left as it is."""
+    if path.parent == _state_dir():
+        _make_private_dir(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    os.chdir(path.parent)
+
+
 def main(argv: list[str]) -> int:
     from . import daemon
 
     daemon._scrub_bootstrap_pythonpath()
-    path = Path(argv[0]) if argv else socket_path()
-    return serve(path, None, load=_load_laya_predictor)
+    path = Path(argv[0]).absolute() if argv else socket_path()
+    _enter_state_dir(path)
+    return _run_foreground(path, _load_laya_predictor)
 
 
 if __name__ == "__main__":
