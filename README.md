@@ -845,12 +845,16 @@ and laya, e.g. a `uv tool` environment) keeps one resident server and restarts i
 # ~/.config/systemd/user/task-classify-server.service
 [Unit]
 Description=task-cli warm Laya classify server
+StartLimitIntervalSec=0
 
 [Service]
 Environment=TASK_CLASSIFY_SERVER_IDLE_SECONDS=0
 ExecStart=%h/.local/share/uv/tools/hyper-task/bin/python -P -m tasklib.classify_server
 Restart=always
-RestartSec=10
+RestartSec=2
+TimeoutStopSec=60
+# The model is reloadable: if the host runs out of memory, sacrifice this service, not others.
+OOMScoreAdjust=500
 
 [Install]
 WantedBy=default.target
@@ -858,8 +862,13 @@ WantedBy=default.target
 
 The singleton lock still decides who serves: a second instance (the service started while a
 client-spawned server of the same version is alive) exits 0 without loading a model and is
-restarted every `RestartSec` until that server is gone, so stop a running same-version server
-first (send it a `shutdown` request; never delete its socket or lock file). The unit must see
+restarted every `RestartSec` until that server is gone (`StartLimitIntervalSec=0` keeps systemd
+from giving up meanwhile), so stop a running same-version server first (send it a `shutdown`
+request; never delete its socket or lock file). A client that arrives in the `RestartSec` gap
+after a crash may spawn its own server with the default 15 minute lifetime and so hold the lock
+instead of the service; keep `RestartSec` short for that reason. On a host that is short of
+memory a failing model load repeats every `RestartSec` and costs 20-70 s of CPU each time, so
+raise `RestartSec` there (60) and consider `MemoryMax=`. The unit must see
 the same `$HOME`/`$XDG_STATE_HOME` as your clients, or they will look for a different socket.
 `systemctl --user enable --now task-classify-server` starts it; `loginctl enable-linger $USER`
 keeps it across logouts.
