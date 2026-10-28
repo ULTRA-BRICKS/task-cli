@@ -79,6 +79,16 @@ cheap message classification and is wired into a `tg-cli` inbound hook.
   within the TTL needs no flag of its own — see the module docstring's "one direct consequence"
   note for the precise distinction from the persisted-skip case this gate actually guards
   against.
+- **`change --acceptance-replace/-remove/-clear` is the only supported way to take a criterion
+  OUT of a ticket (task-cli#293).** The rules are pure (`tasklib/acceptance_edit.py`), `cli.py`
+  only wires them (`_plan_acceptance_edit`, planned BEFORE any field is mutated so a refusal
+  writes nothing). `N` is the 1-based position BEFORE the edit; a criterion no flag names is
+  never touched (checked box, proof, force reason intact); the `acceptance_min` minimum is
+  re-applied to the result (waived by `--skip-acceptance`). Rewriting/dropping an ALREADY-CHECKED
+  criterion warns on stderr and needs `--acceptance-force "<reason>"` (`--force` stays the
+  boolean transition override), and an edit never shares a command with `--done`; recorded under `## Skipped gates` as
+  `acceptance-edit`. Never let an edit reach a checked criterion silently: that discards a
+  proof somebody gave.
 - **`task gate` is the same predicate as the close gate, exposed pre-merge.**
   `policy.acceptance_gate` wraps `unchecked_criteria_violation` (the call `check_done` makes)
   and `acceptance_min_violation` (the minimum-count gate `check` also enforces at close — a

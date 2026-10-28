@@ -2,6 +2,16 @@
 
 ## 0.24.0 — 2026-10-28
 
+- New `task change <id> --acceptance-replace N=TEXT`, `--acceptance-remove N` (both repeatable) and
+  `--acceptance-clear` correct a ticket's acceptance criteria instead of only appending
+  (task-cli#293). N is the 1-based position `task read` shows, counted before the edit; criteria
+  the edit does not name keep their text, checked box and proof. The minimum number of criteria
+  must still hold afterwards. Rewriting or dropping an already-checked criterion warns and is
+  refused without `--acceptance-force "<reason>"` (`--force` stays the transition
+  override and never unlocks an edit); an edit and `--done` never share a command; the reason is recorded under
+  `## Skipped gates`. Bad numbers, contradicting flags and a result below the minimum are refused
+  with a what / why / fix error before anything is written. `task change --json` now lists the
+  resulting `acceptance` (index, text, checked, proof).
 - Linear backend: `task done` (and `gh ship`'s auto-close) no longer refuses a ticket linked
   with `task link` on the `links-url` gate (task-cli#278). Linear stores each link as
   `[GL-346](<url>)`; the parser now unwraps that identifier-labelled form back to the bare URL,

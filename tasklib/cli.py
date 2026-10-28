@@ -355,6 +355,28 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="CRIT",
         help="add acceptance criterion",
     )
+    chp.add_argument(
+        "--acceptance-replace",
+        action="append",
+        default=[],
+        metavar="N=TEXT",
+        help="replace acceptance criterion N (1-based, as `task read` numbers them) with TEXT "
+        "(repeatable); the new criterion starts unchecked, every other criterion is untouched",
+    )
+    chp.add_argument(
+        "--acceptance-remove",
+        action="append",
+        default=[],
+        metavar="N",
+        help="remove acceptance criterion N (1-based, repeatable); numbers refer to the list "
+        "before this edit",
+    )
+    chp.add_argument(
+        "--acceptance-clear",
+        action="store_true",
+        help="drop every acceptance criterion first; any --acceptance given then becomes the "
+        "whole list",
+    )
     chp.add_argument("--why", help="set motivation")
     chp.add_argument("--impact", help="set user impact")
     chp.add_argument("--if-not-done", dest="if_not_done", help="set cost of inaction")
@@ -398,6 +420,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="override the legal-transition check (e.g. re-close a cancelled ticket)",
+    )
+    chp.add_argument(
+        "--acceptance-force",
+        dest="acceptance_force",
+        metavar="REASON",
+        help="allow --acceptance-replace/--acceptance-remove/--acceptance-clear to rewrite or drop a "
+        "criterion that is already checked; the REASON is recorded on the ticket (never overrides "
+        "the transition check: that is --force)",
     )
     _add_skip_flags(chp)
 
@@ -1627,8 +1657,8 @@ def _enforce_edit_or_die(
     clean ``--title`` edit on a ticket that already carries a bare reference in another section
     (e.g. ``why``) is blocked on that pre-existing reference — deliberately, as a nudge to fix
     it. On this edit path the waiver is ``--skip-links``/``--skip-user-impact-quality`` (the
-    ``--force "<reason>"`` shortcut is a create/new-only flag — on ``change`` ``--force`` is the
-    boolean transition-legality override, not a reason). Only a metadata-only edit, which
+    ``--force "<reason>"`` shortcut is a create/new-only flag — on ``change`` ``--force``
+    is the boolean transition-legality override, not a reason). Only a metadata-only edit, which
     touches no scanned field, is exempt.
 
     ``read_violation``/``read_waived`` carry the read-before-edit gate's outcome, computed by
@@ -3586,6 +3616,99 @@ def _check_unlabel(ticket: Ticket, added: list[str], removed: list[str]) -> froz
     return frozenset(removed)
 
 
+# Where `change --acceptance-replace/-remove/-clear --acceptance-force "<reason>"` records the reason it was
+# allowed to rewrite an already-checked criterion — the same audited `## Skipped gates` slot every
+# other recorded override lives in (a pure record: it waives no gate).
+_ACCEPTANCE_EDIT_RECORD = "acceptance-edit"
+
+
+def _plan_acceptance_edit(
+    ticket: Ticket, args: argparse.Namespace, cfg, new_skips: dict[str, str]
+) -> tuple[list[Criterion], dict[str, str], list[str]]:
+    """The acceptance list ``task change`` should write — the existing ``--acceptance`` appends
+    plus ``--acceptance-replace/-remove/-clear`` (pure rules: :mod:`tasklib.acceptance_edit`) —
+    the record to persist when ``--acceptance-force "<reason>"`` let it rewrite a checked criterion, and the
+    warnings to print once the write succeeded (a refused change must not claim a criterion was removed).
+    Computed BEFORE the ticket is mutated, so every refusal leaves it (and the backend) untouched.
+
+    Dropping or rewording a criterion that is already checked discards a check somebody proved,
+    so it warns (stderr, keeping ``--json`` stdout parseable) and needs ``--acceptance-force`` with a
+    reason; ``--force`` is the transition override only. An acceptance edit and ``--done`` never share a
+    command: the close gate would judge the already-edited list, so a criterion nobody proved could be
+    dropped and the ticket closed in one step. The ``acceptance-criteria`` minimum is applied to
+    the RESULT of an edit, and a ``--skip-acceptance`` on this command or a recorded one waives it
+    exactly as it does at create/close."""
+    from .acceptance_edit import AcceptanceEditError, apply_edit, checked_edits, parse_edit
+    from .policy import GATE_ACCEPTANCE, gate_is_skipped
+
+    cfg_e = _enforce_config(cfg)
+    waived = GATE_ACCEPTANCE in new_skips or gate_is_skipped(ticket, GATE_ACCEPTANCE)
+    minimum = cfg_e.acceptance_min if cfg_e.acceptance_criteria and not waived else 0
+    try:
+        edit = parse_edit(args.acceptance_replace, args.acceptance_remove, args.acceptance_clear)
+        edited = apply_edit(ticket.acceptance, edit, args.acceptance, minimum)
+    except AcceptanceEditError as exc:
+        raise _UserError(str(exc)) from exc
+    if edit.active and args.done:
+        raise _UserError(
+            "an acceptance edit cannot be combined with --done\n"
+            "  why: the close gate would judge the already-edited list, so criteria nobody proved could be dropped "
+            "and the ticket closed in one step\n"
+            "  fix: run the --acceptance-replace/--acceptance-remove/--acceptance-clear edit first, then close "
+            "with `task done`"
+        )
+    touched = checked_edits(ticket.acceptance, edit)
+    if not touched:
+        if not edit.active:
+            return edited, {}, []
+        # An unchecked criterion needs no reason, but dropping or rewording one is still audited: a ticket must
+        # not lose a criterion nobody proved with no trace of it.
+        dropped = (
+            [str(i) for i, c in enumerate(ticket.acceptance, start=1)]
+            if edit.clear
+            else sorted(str(n) for n in edit.remove | edit.replace.keys())
+        )
+        earlier = ticket.skips.get(_ACCEPTANCE_EDIT_RECORD)
+        note = f"unchecked criterion {', '.join(dropped)} dropped or reworded"
+        return edited, {_ACCEPTANCE_EDIT_RECORD: f"{earlier} | {note}" if earlier else note}, []
+    verbs = {"replaced": "replace", "removed": "remove", "cleared": "clear"}
+    reason = " ".join((args.acceptance_force or "").split())
+    if not reason:
+        what = "; ".join(
+            f"criterion {t.index} is already checked ({t.evidence}) and this edit would {verbs[t.action]} it"
+            for t in touched
+        )
+        raise _UserError(
+            f"{what}\n"
+            "  why: dropping or rewording a checked criterion discards a check somebody proved\n"
+            '  fix: re-run with --acceptance-force "<reason>" (why the criterion is wrong or superseded) '
+            "to confirm, or leave the checked criteria out of the edit"
+        )
+    warnings = [
+        _warn(
+            f"warning: criterion {t.index} is already checked ({t.evidence}); "
+            f"{t.action} under --acceptance-force: {reason}"
+        )
+        for t in touched
+    ]
+    summary = ", ".join(f"criterion {t.index} {t.action}" for t in touched)
+    earlier = ticket.skips.get(_ACCEPTANCE_EDIT_RECORD)
+    note = f"{summary}: {reason}"
+    return edited, {_ACCEPTANCE_EDIT_RECORD: f"{earlier} | {note}" if earlier else note}, warnings
+
+
+def _change_json(ticket: Ticket) -> dict:
+    """``task change --json``: the ticket plus its CURRENT criteria (``index`` is the 1-based
+    number the ``--acceptance-replace/-remove`` and ``task check`` flags take)."""
+    return {
+        **_ticket_dict(ticket),
+        "acceptance": [
+            {"index": i, "text": c.text, "checked": c.checked, "proof": c.proof}
+            for i, c in enumerate(ticket.acceptance, start=1)
+        ],
+    }
+
+
 def cmd_change(args: argparse.Namespace) -> int:
     cfg = _load(args)
     backend = _backend_for_id(cfg, args.id)
@@ -3638,6 +3761,9 @@ def cmd_change(args: argparse.Namespace) -> int:
         if expand
         else None
     )
+    # Planned BEFORE any field is mutated: a refused edit must leave the fetched ticket untouched.
+    edited_acceptance, edit_skips, edit_warnings = _plan_acceptance_edit(ticket, args, cfg, new_skips)
+    new_skips.update(edit_skips)
     if args.title:
         ticket.title = args.title
     if args.what:
@@ -3653,13 +3779,9 @@ def cmd_change(args: argparse.Namespace) -> int:
             _expand_msgrefs(args.if_not_done, history) if expand else args.if_not_done
         )
     # Acceptance criteria are NEVER msgref-expanded (see the cmd_create comment on why: the
-    # single-line checkbox format can't carry a multi-line quote), so this dedup stays plain
-    # equality against the stored (always-raw) text — unchanged from before this feature.
-    existing_texts = {c.text for c in ticket.acceptance}
-    for crit in args.acceptance:
-        if crit not in existing_texts:
-            ticket.acceptance.append(Criterion(text=crit))
-            existing_texts.add(crit)
+    # single-line checkbox format can't carry a multi-line quote), so the append dedup stays
+    # plain equality against the stored (always-raw) text.
+    ticket.acceptance = edited_acceptance
     if getattr(args, "due", None) is not None:
         # --due passed (incl. --due "" to clear): validate then set. Not passed → leave as-is.
         ticket.due = _normalize_due(args.due)
@@ -3708,6 +3830,9 @@ def cmd_change(args: argparse.Namespace) -> int:
             args.impact,
             args.if_not_done,
             args.acceptance,
+            args.acceptance_replace,
+            args.acceptance_remove,
+            args.acceptance_clear,
         ]
     )
     # The read-before-edit gate (task-cli#119) fires ONLY when `--what` itself is being set — the
@@ -3765,6 +3890,8 @@ def cmd_change(args: argparse.Namespace) -> int:
         updated = backend.update(ticket)
     except BackendError as exc:
         raise _UserError(str(exc)) from exc
+    for line in edit_warnings:
+        print(line, file=sys.stderr)
 
     from .logging import log_event
 
@@ -3788,7 +3915,7 @@ def cmd_change(args: argparse.Namespace) -> int:
     if args.json:
         import json
 
-        print(json.dumps(_ticket_dict(updated), ensure_ascii=False, indent=2))
+        print(json.dumps(_change_json(updated), ensure_ascii=False, indent=2))
     else:
         print(_ok(f"updated {updated.id}  {updated.url}"))
     return 0

@@ -93,6 +93,18 @@ task change <id>  [--due ...] [--done] [--deployed "<note>"]  # update; --due se
 #   already be `done` — see "Deploy + follow-up traceability" below); --label adds a label,
 #   --unlabel removes one the ticket carries (repeatable; e.g. a duplicate priority:<Pn>).
 #   `default_labels` are stamped at create only, so an unlabeled default stays removed
+task change <id> --acceptance-replace N=TEXT  # rewrite criterion N (1-based, the number `task read`
+#   shows; repeatable). The new criterion starts unchecked; every other criterion keeps its text,
+#   checked box and proof. N always means the position BEFORE this edit.
+task change <id> --acceptance-remove N       # drop criterion N (repeatable)
+task change <id> --acceptance-clear --acceptance "..." --acceptance "..."  # drop all criteria,
+#   then the --acceptance entries become the whole list. After any replace/remove/clear the
+#   `acceptance_min` minimum (default 2) must still hold (or pass --skip-acceptance "<reason>").
+#   An edit that would rewrite or drop an ALREADY CHECKED criterion warns and is refused unless
+#   `--acceptance-force "<reason>"` is given (`--force` stays the transition override; an edit and `--done` never
+#   share a command); the reason is
+#   recorded under `## Skipped gates` as `acceptance-edit`. `--json` lists the resulting
+#   `acceptance` (index, text, checked, proof). Refusals are 3-part (what / why / fix) and write nothing.
 task status <id> [<new-state>]     # read or transition state (works outside a repo)
 #   close/transition verbs validate legality first: a cancelled ticket is a dead-end and a
 #   re-close of an already-done ticket is rejected (no silent re-write). `--force` overrides.
